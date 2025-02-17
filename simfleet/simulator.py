@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List
+from asyncio import Queue
 
 import faker
 from aiohttp import web as aioweb
@@ -235,7 +236,7 @@ class SimulatorAgent(Agent):
         await self.gather_batch(all_agents)
 
     async def gather_batch(self, all_coroutines):
-        agents_batch = 20
+        agents_batch = 200
         number = max(len(all_coroutines), 0)
         iterations = [agents_batch] * (number // agents_batch)
         if number % agents_batch:
@@ -1396,6 +1397,61 @@ class CoordinationBehaviour(CyclicBehaviour):
     def __init__(self):
         super().__init__()
 
+    async def on_start(self):
+        logger.debug("Agent[{}]: Strategy ({}) started in SimulatorAgent".format(self.agent.name, type(self).__name__))
+
+    async def process_requests(self):
+        """ Processes queue requests (queue of CyclicBehaviour) in concurrency. """
+        while True:
+            msg = await self.queue.get()
+            await self.handle_request(msg)
+            self.queue.task_done()
+
+    async def handle_request(self, msg):
+        """ Processes a single request and sends the response. """
+
+        performative = msg.get_metadata("performative")
+        agent_id = msg.sender
+        user_agent_id = json.loads(msg.body)["user_agent_id"].split('@')[0]
+        host = json.loads(msg.body)["user_agent_id"].split('@')[1]
+        object_type = json.loads(msg.body)["object_type"]
+
+        if performative == REQUEST_PERFORMATIVE:
+
+            logger.info(
+                "Agent[{}]: The agent received message from agent [{}]".format(
+                    self.agent.name, agent_id
+                )
+            )
+
+            if object_type == "transport":
+
+                for transport in self.agent.transport_agents.values():
+                    if transport.get_id() == user_agent_id:
+                        agent_position = transport.get_position()
+                        send_agent_id = user_agent_id + "@" + host
+
+                        content = {"agent_position": agent_position, "user_agent_id": send_agent_id}
+                        await self.inform_agent_position(agent_id, content)
+
+            if object_type == "customer":
+
+                for customer in self.agent.customer_agents.values():
+
+                    if customer.get_id() == user_agent_id:
+                        agent_position = customer.get_position()
+                        send_agent_id = user_agent_id + "@" + host
+
+                        content = {"agent_position": agent_position, "user_agent_id": send_agent_id}
+                        await self.inform_agent_position(agent_id, content)
+
+                        logger.debug(
+                            "Agent[{}]: The agent send msg to [{}]".format(
+                                self.agent.name, agent_id
+                            )
+                        )
+
+
     async def inform_agent_position(self, agent_id, content):
         reply = Message()
         reply.to = str(agent_id)
@@ -1404,58 +1460,13 @@ class CoordinationBehaviour(CyclicBehaviour):
         reply.body = json.dumps(content)
         await self.send(reply)
 
+
     async def run(self):
 
-        msg = await self.receive(timeout=5)
         logger.warning(
-            "Agent[{}]: The agent has a mailbox size of ({})".format(
-                self.agent.name, self.mailbox_size()
+            "Agent[{}]: Directory has a mailbox size of ({})".format(
+            self.agent.name, self.mailbox_size()
             )
         )
-        if msg:
-            performative = msg.get_metadata("performative")
-            agent_id = msg.sender
-            user_agent_id = json.loads(msg.body)["user_agent_id"].split("@")[0]
-            host = json.loads(msg.body)["user_agent_id"].split("@")[1]
-            object_type = json.loads(msg.body)["object_type"]
 
-            if performative == REQUEST_PERFORMATIVE:
-
-                logger.info(
-                    "Agent[{}]: The agent received message from agent [{}]".format(
-                        self.agent.name, agent_id
-                    )
-                )
-
-                if object_type == "transport":
-
-                    for transport in self.agent.transport_agents.values():
-                        if transport.get_id() == user_agent_id:
-                            agent_position = transport.get_position()
-                            send_agent_id = user_agent_id + "@" + host
-
-                            content = {
-                                "agent_position": agent_position,
-                                "user_agent_id": send_agent_id,
-                            }
-                            await self.inform_agent_position(agent_id, content)
-
-                if object_type == "customer":
-
-                    for customer in self.agent.customer_agents.values():
-
-                        if customer.get_id() == user_agent_id:
-                            agent_position = customer.get_position()
-                            send_agent_id = user_agent_id + "@" + host
-
-                            content = {
-                                "agent_position": agent_position,
-                                "user_agent_id": send_agent_id,
-                            }
-                            await self.inform_agent_position(agent_id, content)
-
-                            logger.debug(
-                                "Agent[{}]: The agent send msg to [{}]".format(
-                                    self.agent.name, agent_id
-                                )
-                            )
+        await self.process_requests()

@@ -1,4 +1,6 @@
 import json
+import asyncio #Solucion S1 - S2
+from asyncio import Queue #Solucion S1
 from asyncio import CancelledError
 
 from loguru import logger
@@ -186,14 +188,27 @@ class DirectoryStrategyBehaviour(CyclicBehaviour):
     async def on_start(self):
         logger.debug("Agent[{}]: Strategy ({}) started in directory".format(self.agent.name, type(self).__name__))
 
-    async def send_services(self, agent_id, type_service):
-        """
-        Sends a message to the requesting agent (customer/transport) with the list of available services.
+    async def process_requests(self):
+        """ Processes queue (queue of CyclicBehaviour) requests in concurrency. """
+        while True:
+            msg = await self.queue.get()
+            await self.handle_request(msg)
+            self.queue.task_done()
 
-        Args:
-            agent_id (str): The JID of the requesting agent.
-            type_service (str): The type of service the agent is requesting.
-        """
+    async def handle_request(self, msg):
+        """ Processes a single request and sends the response. """
+        agent_id = msg.sender
+        request = msg.body
+
+        if request in self.get("service_agents"):
+            await self.send_services(agent_id, request)
+        else:
+            await self.send_negative(agent_id)
+
+
+    async def send_services(self, agent_id, type_service):
+        """ Sends a message to the requesting agent (customer/transport) with the list of available services. """
+
         reply = Message()
         reply.to = str(agent_id)
         reply.set_metadata("protocol", QUERY_PROTOCOL)
@@ -202,12 +217,8 @@ class DirectoryStrategyBehaviour(CyclicBehaviour):
         await self.send(reply)
 
     async def send_negative(self, agent_id):
-        """
-        Sends a cancellation message to the requesting agent (customer/transport) if no services are available.
+        """ Sends a cancellation message to the requesting agent (customer/transport) if no services are available. """
 
-        Args:
-            agent_id (str): The JID of the requesting agent.
-        """
         reply = Message()
         reply.to = str(agent_id)
         reply.set_metadata("protocol", QUERY_PROTOCOL)
@@ -215,28 +226,12 @@ class DirectoryStrategyBehaviour(CyclicBehaviour):
         await self.send(reply)
 
     async def run(self):
-        """
-            Handles requests for services from customers or transport agents.
-        """
-        msg = await self.receive(timeout=5)
-        logger.debug(
+        """ Handles requests for services from customers or transport agents. """
+
+        logger.warning(
             "Agent[{}]: Directory has a mailbox size of ({})".format(
-                self.agent.name, self.mailbox_size()
+            self.agent.name, self.mailbox_size()
             )
         )
-        if msg:
-            performative = msg.get_metadata("performative")
-            agent_id = msg.sender
-            request = msg.body
-            if performative == REQUEST_PERFORMATIVE:
 
-                logger.info(
-                    "Agent[{}]: Directory received message from [{}]".format(
-                        self.agent.name, agent_id
-                    )
-                )
-
-                if request in self.get("service_agents"):
-                    await self.send_services(agent_id, msg.body)
-                else:
-                    await self.send_negative(agent_id)
+        await self.process_requests()
