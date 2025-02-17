@@ -1,3 +1,9 @@
+import asyncio
+import json
+import time
+from asyncio import Queue
+from spade.presence import PresenceManager
+from spade.message import Message
 from loguru import logger
 
 from simfleet.common.agents.fleetmanager import FleetManagerStrategyBehaviour
@@ -19,6 +25,13 @@ class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
             await self.send_registration()
 
         msg = await self.receive(timeout=5)
+
+        logger.warning(
+            "Agent[{}]: FleetManager has a queue of ({})".format(
+                self.agent.name, self.mailbox_size()
+            )
+        )
+
         logger.debug("Manager received message: {}".format(msg))
         if msg:
             for transport in self.get_transport_agents().values():

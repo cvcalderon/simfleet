@@ -156,7 +156,7 @@ class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
 
                     self.agent.arguments["transport_need"] = self.agent.max_autonomy_km - self.agent.current_autonomy_km
 
-                    content = {"service_name": self.agent.service_type,
+                    content = {"service_name": self.agent.service_type, "object_type": "transport",
                             "args": self.agent.arguments}
                     await self.request_access_station(self.agent.get("current_station"), content)
 
@@ -172,7 +172,7 @@ class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
                         self.agent.name, self.agent.get_nearby_station_id()
                     )
                 )
-                await self.cancel_proposal(self.agent.get_nearby_station_id())
+                #await self.cancel_proposal(self.agent.get_nearby_station_id())
                 self.agent.status = TRANSPORT_WAITING
                 self.set_next_state(TRANSPORT_WAITING)
                 return
@@ -230,7 +230,7 @@ class ElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
 
             self.agent.arguments["transport_need"] = self.agent.max_autonomy_km - self.agent.current_autonomy_km
 
-            content = {"service_name": self.agent.service_type, "args": self.agent.arguments}
+            content = {"service_name": self.agent.service_type, "object_type": "transport", "args": self.agent.arguments}
             await self.request_access_station(self.agent.get("current_station"), content)
 
             # New statistics

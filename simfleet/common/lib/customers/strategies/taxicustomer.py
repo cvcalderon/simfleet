@@ -64,7 +64,7 @@ class AcceptFirstRequestBehaviour(TaxiCustomerStrategyBehaviour):
             await self.send_request(content={})
 
         try:
-            msg = await self.receive(timeout=5)
+            msg = await self.receive(timeout=60)
 
             if msg:
                 performative = msg.get_metadata("performative")
