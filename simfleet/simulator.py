@@ -1390,7 +1390,10 @@ class DelayedLaunchBehaviour(TimeoutBehaviour):
     async def run(self):
         for agent in self.agents:
             agent.is_launched = True
-            await agent.start()
+
+        # Launch all agents concurrently
+        await asyncio.gather(*(agent.start() for agent in self.agents))
+        logger.debug(f"[{datetime.now()}] 🚀 Launched {len(self.agents)} agents concurrently.")
 
 
 class CoordinationBehaviour(CyclicBehaviour):
