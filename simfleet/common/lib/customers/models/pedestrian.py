@@ -14,6 +14,7 @@ class PedestrianAgent(MovableMixin, CustomerAgent):
         MovableMixin.__init__(self)
 
         self.pedestrian_dest = None
+        self.max_walking_dist = None
 
     def run_strategy(self):
         """import json
@@ -36,3 +37,8 @@ class PedestrianAgent(MovableMixin, CustomerAgent):
         """
         await super().set_position(coords)
         self.set("current_pos", coords)
+
+
+    def set_max_walking_dist(self, distance):
+
+        self.max_walking_dist = distance
