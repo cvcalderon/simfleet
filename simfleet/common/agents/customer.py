@@ -29,6 +29,7 @@ class CustomerAgent(GeoLocatedAgent):
         super().__init__(agentjid, password)
 
         self.customer_dest = None
+        self.fleetmanagers = None
 
 
     async def setup(self):
@@ -104,6 +105,25 @@ class CustomerAgent(GeoLocatedAgent):
             "dest": [float("{0:.6f}".format(coord)) for coord in self.customer_dest],
         })
         return data
+
+
+    def set_fleetmanagers(self, fleetmanagers):
+        """
+        Sets the fleet manager's JID list for the customer agent.
+
+        Args:
+            fleetmanagers (dict): The JID list of the fleet manager(s).
+        """
+        self.fleetmanagers = fleetmanagers
+
+    def get_fleetmanagers(self):
+        """
+                Retrieves the fleet managers' JIDs.
+
+                Returns:
+                    dict: The dictionary of fleet managers' JIDs.
+                """
+        return self.fleetmanagers
 
 
 class TravelBehaviour(CyclicBehaviour):
