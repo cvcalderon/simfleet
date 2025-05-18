@@ -1,9 +1,13 @@
 import asyncio
+import json
+
+from loguru import logger
 from spade.behaviour import State
+from spade.template import Template
+from spade.message import Message
 
 from simfleet.common.lib.customers.models.pedestrian import PedestrianAgent
-from simfleet.communications.protocol import REQUEST_PROTOCOL, REQUEST_PERFORMATIVE
-from spade.message import Message
+from simfleet.communications.protocol import REQUEST_PROTOCOL, QUERY_PROTOCOL, REQUEST_PERFORMATIVE, INFORM_PERFORMATIVE, PROPOSE_PERFORMATIVE, CANCEL_PERFORMATIVE
 
 from simfleet.utils.helpers import distance_in_meters
 from simfleet.utils.helpers import (
@@ -52,15 +56,30 @@ class SharingCustomerAgent(PedestrianAgent):
         """
         await super().setup()
 
-    def watch_value(self, key, callback):
+    #def watch_value(self, key, callback):
+    #    """
+    #    Registers an observer callback to be run when a value is changed
+    #
+    #    Args:
+    #        key (str): the name of the value
+    #        callback (function): a function to be called when the value changes. It receives two arguments: the old and the new value.
+    #    """
+    #    self.__observers[key].append(callback)
+
+    async def set_position(self, coords=None):
         """
-        Registers an observer callback to be run when a value is changed
+        Sets the position of the customer. If no position is provided, assigns a random one.
 
         Args:
-            key (str): the name of the value
-            callback (function): a function to be called when the value changes. It receives two arguments: the old and the new value.
+            coords (list): Coordinates (longitude and latitude) where the customer is located.
         """
-        self.__observers[key].append(callback)
+        await super().set_position(coords)
+        self.set("current_pos", coords)
+
+        if self.is_in_destination():
+            logger.debug("Customer {} has arrived to its moving destination. Status: {}".format(self.agent_id, self.status))
+            # inform the transport
+            await self.arrived_to_transport()
 
     def run_strategy(self):
         # CHECK IF IT NEEDS MODIFICATION
@@ -193,3 +212,38 @@ class SharingCustomerStrategyBehaviour(State):
         reply.body = json.dumps(content)
         await self.send(reply)
         logger.info("Customer {} sent cancel booking to transport {}".format(self.agent.name, transport_id))
+
+
+    async def inform_transport(self, content=None):
+        """
+        Sends a ``spade.message.Mesade`` to the booked transport.
+        It uses the ???_PROTOCOL and the ???_PERFORMATIVE.
+        This method is used to inform the transport that the customer agent is in its position.
+        The transport will be waiting for this message and, upon receiving it, it will pick the
+        customer up and start to move.
+
+        Args:
+            content (dict): Optional content dictionary
+        """
+        # NOT SURE IF THIS WILL BE PERFORMED INSIDE arrived_to_transport OR HERE
+        # DON'T IMPLEMENT BY NOW
+        # ++++++++++++ IMPORTANT: SEND AS "origin": THE COORDINATES OF MY CURRENT POSITION
+        # ++++++++++++ WHICH IS ALSO THE TRANSPORT'S POSITION
+        msg = Message()
+        msg.to = self.get("current_transport")
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        if content is None:
+            content = {
+                "customer_id": str(self.agent.jid),
+                "origin": self.get("current_pos"),
+                "dest": self.agent.customer_dest
+            }
+        msg.body = json.dumps(content)
+        await self.send(msg)
+        logger.info("Customer {} informed transport {} that they are in its position".format(self.agent.name,
+                                                                                             self.get(
+                                                                                                 "current_transport")))
+
+    async def run(self):
+        raise NotImplementedError

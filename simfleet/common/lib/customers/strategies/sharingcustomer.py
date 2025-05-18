@@ -2,13 +2,13 @@ import asyncio
 import json
 
 from loguru import logger
-from spade.behaviour import State, FSMBehaviour
 from spade.message import Message
 
+from simfleet.utils.abstractstrategies import FSMSimfleetBehaviour
 from simfleet.common.lib.customers.models.sharingcustomer import SharingCustomerStrategyBehaviour
 
-from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE
-from simfleet.utils.status import CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT
+from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE, REFUSE_PERFORMATIVE, CANCEL_PERFORMATIVE
+from simfleet.utils.status import CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT, CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST
 from simfleet.utils.helpers import (
     PathRequestException,
     AlreadyInDestination,
@@ -141,7 +141,7 @@ class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
                     return
 
 
-class CustomerWaitingForApprovalState(SharingCustomerStrategyBehaviour):
+class SharingCustomerWaitingForApprovalState(SharingCustomerStrategyBehaviour):
 
     async def on_start(self):
         await super().on_start()
@@ -185,7 +185,7 @@ class CustomerWaitingForApprovalState(SharingCustomerStrategyBehaviour):
             return
 
 
-class CustomerMovingToTransportState(CustomerStrategyBehaviour, State):
+class SharingCustomerMovingToTransportState(SharingCustomerStrategyBehaviour):
 
     async def on_start(self):
         await super().on_start()
@@ -202,7 +202,7 @@ class CustomerMovingToTransportState(CustomerStrategyBehaviour, State):
         return self.set_next_state(CUSTOMER_IN_TRANSPORT)
 
 
-class CustomerInTransportState(CustomerStrategyBehaviour, State):
+class SharingCustomerInTransportState(SharingCustomerStrategyBehaviour):
 
     async def on_start(self):
         await super().on_start()
@@ -218,7 +218,7 @@ class CustomerInTransportState(CustomerStrategyBehaviour, State):
         return self.set_next_state(CUSTOMER_IN_DEST)
 
 
-class CustomerInDestState(CustomerStrategyBehaviour, State):
+class SharingCustomerInDestState(SharingCustomerStrategyBehaviour):
 
     async def on_start(self):
         await super().on_start()
@@ -230,14 +230,14 @@ class CustomerInDestState(CustomerStrategyBehaviour, State):
         return # self.set_next_state(CUSTOMER_IN_DEST)
 
 
-class FSMCustomerStrategyBehaviour(FSMBehaviour):
+class FSMCustomerStrategyBehaviour(FSMSimfleetBehaviour):
     def setup(self):
         # Create states
-        self.add_state(CUSTOMER_WAITING, CustomerWaitingState(), initial=True)
-        self.add_state(CUSTOMER_WAITING_FOR_APPROVAL, CustomerWaitingForApprovalState())
-        self.add_state(CUSTOMER_MOVING_TO_TRANSPORT, CustomerMovingToTransportState())
-        self.add_state(CUSTOMER_IN_TRANSPORT, CustomerInTransportState())
-        self.add_state(CUSTOMER_IN_DEST, CustomerInDestState())
+        self.add_state(CUSTOMER_WAITING, SharingCustomerWaitingState(), initial=True)
+        self.add_state(CUSTOMER_WAITING_FOR_APPROVAL, SharingCustomerWaitingForApprovalState())
+        self.add_state(CUSTOMER_MOVING_TO_TRANSPORT, SharingCustomerMovingToTransportState())
+        self.add_state(CUSTOMER_IN_TRANSPORT, SharingCustomerInTransportState())
+        self.add_state(CUSTOMER_IN_DEST, SharingCustomerInDestState())
 
         # Create transitions
         self.add_transition(CUSTOMER_WAITING, CUSTOMER_WAITING)  # get list of transports
