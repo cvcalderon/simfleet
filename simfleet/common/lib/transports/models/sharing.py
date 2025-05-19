@@ -1,0 +1,185 @@
+import asyncio
+import json
+
+from loguru import logger
+from spade.behaviour import State
+from spade.template import Template
+from spade.message import Message
+
+from simfleet.common.agents.transport import TransportAgent
+
+from simfleet.utils.status import TRANSPORT_WAITING, TRANSPORT_IN_CUSTOMER_PLACE, TRANSPORT_MOVING_TO_DESTINATION
+
+from simfleet.communications.protocol import (
+    REQUEST_PROTOCOL,
+    INFORM_PERFORMATIVE
+)
+
+from simfleet.utils.helpers import (
+    PathRequestException,
+    AlreadyInDestination
+)
+
+class SharingAgent(TransportAgent):
+
+    def __init__(self, agentjid, password, **kwargs):
+        super().__init__(agentjid, password)
+
+        self.fleetmanager_id = kwargs.get('fleet', None)
+        self.current_customer_orig = None
+        self.current_customer_dest = None
+
+
+    async def setup(self):
+        self.set_type("transport")
+        self.set_status()
+
+        await super().setup()
+
+        #try:
+        #    template = Template()
+        #    template.set_metadata("protocol", REGISTER_PROTOCOL)
+        #    register_behaviour = RegistrationBehaviour()
+        #    self.add_behaviour(register_behaviour, template)
+        #    while not self.has_behaviour(register_behaviour):
+        #        logger.warning("Transport {} could not create RegisterBehaviour. Retrying...".format(self.agent_id))
+        #        self.add_behaviour(register_behaviour, template)
+        #    self.ready = True
+        #except Exception as e:
+        #    logger.error("EXCEPTION creating RegisterBehaviour in Transport {}: {}".format(self.agent_id, e))
+
+    #Analizar si quitarlo
+    def set_type(self, transport_type):  # new
+        self.transport_type = transport_type
+
+    def set_status(self, state=TRANSPORT_WAITING):  # new
+        self.status = state
+
+    async def send_status_fleetmanager(self):
+        msg = Message()
+        msg.to = str(self.fleetmanager_id)
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        msg.body = json.dumps({
+            "name": self.name,
+            "jid": str(self.jid),
+            "status": self.status,
+            "position": self.get_position()
+        })
+        await self.send(msg)
+
+    def is_customer_in_transport(self):
+        return self.get("customer_in_transport") is not None
+
+    async def drop_customer(self):
+        """
+        Drops the customer that the transport is carring in the current location.
+        """
+        await self.inform_customer(CUSTOMER_IN_DEST)
+        self.status = TRANSPORT_WAITING
+        logger.info("Transport {} has dropped the customer {} in destination.".format(self.agent_id,
+                                                                                      self.get("current_customer")))
+        self.set("current_customer", None)
+        self.set("customer_in_transport", None)
+
+
+class SharingStrategyBehaviour(State):
+    """
+    Class from which to inherit to create a transport strategy.
+    You must overload the ```run`` coroutine
+
+    Helper functions:
+        * ``pick_up_customer``
+        * ``send_proposal``
+        * ``cancel_proposal``
+    """
+
+    async def on_start(self):
+        logger.debug("Strategy {} started in transport {}".format(type(self).__name__, self.agent.name))
+        self.agent.total_waiting_time = 0.0
+
+    async def pick_up_customer(self, customer_id, origin, dest):
+        # Save customer attributes and travel destination
+        self.set("current_customer", customer_id)
+        self.agent.current_customer_orig = origin
+        self.agent.current_customer_dest = dest
+
+        if not self.agent.is_customer_in_transport():
+            try:
+                # try to pick up the customer and move towards its destination
+                self.set("customer_in_transport", self.get("current_customer"))
+                await self.agent.move_to(self.agent.current_customer_dest)
+                self.agent.num_assignments += 1
+            except PathRequestException:
+                # if there is no path to customer's destination, cancel it
+                await self.agent.cancel_customer()
+                self.agent.status = TRANSPORT_WAITING
+            except AlreadyInDestination:
+                # if the transport is already in the customer's destination, drop the customer off
+                logger.error("++++++++++ transport {} is already in customers destination {}".format(
+                    self.agent.name, self.agent.current_customer_dest))
+                await self.agent.drop_customer()
+            else:
+                # if there is no error moving to the destination,
+                # inform the customer that it has been picked up
+                await self.agent.inform_customer(TRANSPORT_IN_CUSTOMER_PLACE)
+                self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+                logger.info("Transport {} has picked up the customer {}.".format(
+                    self.agent.agent_id, self.get("current_customer")))
+
+    async def accept_customer(self, customer_id):
+        """
+        Sends a ``spade.message.Message`` to a customer to accept a booking.
+        It uses the REQUEST_PROTOCOL and the ACCEPT_PERFORMATIVE.
+
+        Args:
+            customer_id (str): The Agent JID of the transport
+        """
+        # COPIED FROM customer.py AND MODIFIED, MIGHT REQUIRE FURTHER MODIFICATION
+        reply = Message()
+        reply.to = str(customer_id)
+        reply.set_metadata("protocol", REQUEST_PROTOCOL)
+        reply.set_metadata("performative", ACCEPT_PERFORMATIVE)
+        content = {
+            "transport_id": str(self.agent.jid),
+            "position": self.agent.get("current_pos")
+        }
+        reply.body = json.dumps(content)
+        await self.send(reply)
+        self.agent.set("current_costumer", customer_id)
+        logger.info("Transport {} accepted booking from customer {}".format(self.agent.name, customer_id))
+
+    async def refuse_customer(self, customer_id):
+        """
+        Sends an ``spade.message.Message`` to a customer to refuse a booking.
+        It uses the REQUEST_PROTOCOL and the REFUSE_PERFORMATIVE.
+
+        Args:
+            customer_id (str): The Agent JID of the transport
+        """
+        # COPIED FROM customer.py AND MODIFIED, MIGHT REQUIRE FURTHER MODIFICATION
+        reply = Message()
+        reply.to = str(customer_id)
+        reply.set_metadata("protocol", REQUEST_PROTOCOL)
+        reply.set_metadata("performative", REFUSE_PERFORMATIVE)
+        content = {
+            "transport_id": str(self.agent.jid),
+            "position": self.agent.get("current_pos")
+        }
+        reply.body = json.dumps(content)
+
+        await self.send(reply)
+        logger.info("Transport {} refused booking from customer {}".format(self.agent.name,
+                                                                           customer_id))
+
+    async def deassign_customer(self):
+        """
+        Triggered when, by any reason, a customer cancels their already accepted booking
+        """
+        # Delete saved values (destination, etc.) belonging to booked customer
+        self.agent.set("current_customer", None)
+        self.agent.current_customer_orig = None
+        self.agent.current_customer_dest = None
+
+    async def run(self):
+        raise NotImplementedError
