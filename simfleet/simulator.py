@@ -327,6 +327,9 @@ class SimulatorAgent(Agent):
             target = customer.get("destination")
             strategy = customer.get("strategy")
             line = customer.get("line")
+            # New parameter to determine the maximum walking distance a customer finds reasonable
+            # to walk to get their car
+            max_walking_dist = customer.get("max_walking_dist") if "max_walking_dist" in customer else None
             icon = customer.get("icon")
             delay = customer["delay"] if "delay" in customer else None
 
@@ -345,6 +348,7 @@ class SimulatorAgent(Agent):
                 delayed=delayed,
                 speed=speed,
                 line=line,
+                max_walking_dist=max_walking_dist
             )
 
             self.set_icon(agent, icon, default="customer")
@@ -1144,6 +1148,7 @@ class SimulatorAgent(Agent):
         delayed=False,
         speed=None,
         line=None,
+        max_walking_dist=None
     ):
         agent = CustomerFactory.create_agent(
             domain=self.jid.domain,
@@ -1160,6 +1165,7 @@ class SimulatorAgent(Agent):
             speed=speed,
             target=target,
             line=line,
+            max_walking_dist=max_walking_dist
         )
 
         if self.simulation_running:

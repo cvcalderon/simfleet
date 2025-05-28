@@ -40,8 +40,6 @@ class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
                                                                              self.agent.get_fleetmanagers())
 
             self.agent.set_fleetmanagers(fleetmanager_list)
-            self.agent.status = CUSTOMER_WAITING
-            return
 
             #Código antiguo
             #msg = await self.receive(timeout=30)
@@ -82,7 +80,9 @@ class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
                 performative = msg.get_metadata("performative")
                 protocol = msg.get_metadata("protocol")
                 if protocol == QUERY_PROTOCOL:
-                    if performative == INFORM_PERFORMATIVE:
+                    #Analizar porque después de utilizar un instance.join() el agente recibe el mensaje del director en este lugar
+                    #Añadido un filtro para descartar dirección del director
+                    if performative == INFORM_PERFORMATIVE and (msg.sender != self.agent.directory_id and msg.sender != None):
                         self.agent.available_transports = content
                         logger.debug("Customer {} got dict of available transports {}".format(self.agent.name,
                                                                                               self.agent.available_transports))
@@ -140,6 +140,8 @@ class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
                     self.set_next_state(CUSTOMER_WAITING)
                     return
 
+        self.set_next_state(CUSTOMER_WAITING)
+        return
 
 class SharingCustomerWaitingForApprovalState(SharingCustomerStrategyBehaviour):
 
@@ -206,7 +208,7 @@ class SharingCustomerInTransportState(SharingCustomerStrategyBehaviour):
 
     async def on_start(self):
         await super().on_start()
-        #self.agent.status = CUSTOMER_IN_TRANSPORT
+        self.agent.status = CUSTOMER_IN_TRANSPORT
         logger.debug("{} in Customer In Transport State".format(self.agent.jid))
 
     async def run(self):
@@ -222,15 +224,15 @@ class SharingCustomerInDestState(SharingCustomerStrategyBehaviour):
 
     async def on_start(self):
         await super().on_start()
-        #self.agent.status = CUSTOMER_IN_DEST
+        self.agent.status = CUSTOMER_IN_DEST
         logger.debug("{} in Customer In Dest State".format(self.agent.jid))
 
     async def run(self):
         logger.info(f"Customer {self.agent.name} has reached their destination")
-        return # self.set_next_state(CUSTOMER_IN_DEST)
+        return #self.set_next_state(CUSTOMER_IN_DEST)
 
 
-class FSMCustomerStrategyBehaviour(FSMSimfleetBehaviour):
+class FSMSharingCustomerStrategyBehaviour(FSMSimfleetBehaviour):
     def setup(self):
         # Create states
         self.add_state(CUSTOMER_WAITING, SharingCustomerWaitingState(), initial=True)

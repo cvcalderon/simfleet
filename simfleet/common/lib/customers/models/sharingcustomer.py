@@ -155,7 +155,7 @@ class SharingCustomerStrategyBehaviour(State):
             content (dict): Optional content dictionary
         """
         if content is None or len(content) == 0:
-            content = {"customer_id": self.agent.jid}
+            content = {"customer_id": str(self.agent.jid)}
         if self.agent.fleetmanagers is not None:
             for fleetmanager in self.agent.fleetmanagers.keys():
                 msg = Message()

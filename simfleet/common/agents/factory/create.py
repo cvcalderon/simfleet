@@ -38,7 +38,8 @@ class Factory(ABC):
                      services,
                      capacity,
                      line,
-                     lines
+                     lines,
+                     max_walking_dist
                      ):
         """
                 Abstract method that must be implemented by all subclasses to create a specific agent.
@@ -75,7 +76,8 @@ class DirectoryFactory(Factory):
                      services=None,
                      capacity=None,
                      line=None,
-                     lines=None
+                     lines=None,
+                     max_walking_dist=None
                      ):
         """
                         Create a directory agent.
@@ -125,7 +127,8 @@ class FleetManagerFactory(Factory):
                      services=None,
                      capacity=None,
                      line=None,
-                     lines=None
+                     lines=None,
+                     max_walking_dist=None
                     ):
         """
                         Create a fleetmanager agent.
@@ -187,7 +190,8 @@ class TransportFactory(Factory):
                      services=None,
                      capacity=None,
                      line=None,
-                     lines=None
+                     lines=None,
+                     max_walking_dist=None
                     ):
         """
         Create a Transport agent.
@@ -297,7 +301,8 @@ class CustomerFactory(Factory):
                      services=None,
                      capacity=None,
                      line=None,
-                     lines=None
+                     lines=None,
+                     max_walking_dist=None
                     ):
         """
         Create a Customer agent.
@@ -350,6 +355,10 @@ class CustomerFactory(Factory):
 
         agent.set_target_position(target)
 
+        # NEW set maximum walking distance if defined
+        if max_walking_dist:
+            agent.set_max_walking_dist(max_walking_dist)
+
         if speed:
             agent.set_speed(speed)
 
@@ -384,7 +393,8 @@ class StationFactory(Factory):
                     services=None,
                     capacity=None,
                     line=None,
-                    lines=None
+                    lines=None,
+                    max_walking_dist=None
                     ):
 
         """
@@ -470,7 +480,8 @@ class TransportStopFactory(Factory):
                     services=None,
                     capacity=None,
                     line=None,
-                    lines=None
+                    lines=None,
+                    max_walking_dist=None
                     ):
 
         """
@@ -551,7 +562,8 @@ class VehicleFactory(Factory):
                     services = None,
                     capacity=None,
                     line=None,
-                    lines=None
+                    lines=None,
+                    max_walking_dist=None
                     ):
         """
         Create a Vehicle agent.

@@ -8,11 +8,12 @@ from spade.message import Message
 
 from simfleet.common.agents.transport import TransportAgent
 
-from simfleet.utils.status import TRANSPORT_WAITING, TRANSPORT_IN_CUSTOMER_PLACE, TRANSPORT_MOVING_TO_DESTINATION
+from simfleet.utils.status import TRANSPORT_WAITING, TRANSPORT_IN_CUSTOMER_PLACE, TRANSPORT_MOVING_TO_STATION, TRANSPORT_MOVING_TO_DESTINATION, CUSTOMER_IN_DEST, CUSTOMER_LOCATION
 
 from simfleet.communications.protocol import (
     REQUEST_PROTOCOL,
-    INFORM_PERFORMATIVE
+    INFORM_PERFORMATIVE,
+    ACCEPT_PERFORMATIVE
 )
 
 from simfleet.utils.helpers import (
@@ -75,12 +76,36 @@ class SharingAgent(TransportAgent):
         """
         Drops the customer that the transport is carring in the current location.
         """
-        await self.inform_customer(CUSTOMER_IN_DEST)
+        customers = self.get("current_customer")
+        customer_id = next(iter(customers.items()))[0]
+
+        await self.inform_customer(customer_id, CUSTOMER_IN_DEST)
         self.status = TRANSPORT_WAITING
         logger.info("Transport {} has dropped the customer {} in destination.".format(self.agent_id,
-                                                                                      self.get("current_customer")))
-        self.set("current_customer", None)
+                                                                                      customer_id))
+
+        self.remove_customer_in_transport(customer_id)
+
+        #self.set("current_customer", None)
+        #self.set("current_customer", {})
         self.set("customer_in_transport", None)
+
+    async def set_position(self, coords=None):
+        """
+        Sets the position of the transport. If no position is provided it is located in a random position.
+
+        Args:
+            coords (list): a list coordinates (longitude and latitude)
+        """
+
+        await super().set_position(coords)
+        self.set("current_pos", coords)
+
+        # if the transport has arrived to its self.dest position
+        if self.is_in_destination():
+            logger.info("Transport {} has arrived to destination. Status: {}".format(self.agent_id, self.status))
+            await self.drop_customer()
+
 
 
 class SharingStrategyBehaviour(State):
@@ -100,32 +125,43 @@ class SharingStrategyBehaviour(State):
 
     async def pick_up_customer(self, customer_id, origin, dest):
         # Save customer attributes and travel destination
-        self.set("current_customer", customer_id)
-        self.agent.current_customer_orig = origin
-        self.agent.current_customer_dest = dest
+        #self.set("current_customer", customer_id)
+        #self.agent.current_customer_orig = origin
+        #self.agent.current_customer_dest = dest
+
+        self.agent.add_customer_in_transport(
+            customer_id=customer_id, origin=origin, dest=dest
+        )
 
         if not self.agent.is_customer_in_transport():
             try:
                 # try to pick up the customer and move towards its destination
-                self.set("customer_in_transport", self.get("current_customer"))
-                await self.agent.move_to(self.agent.current_customer_dest)
-                self.agent.num_assignments += 1
+                #self.set("customer_in_transport", self.get("current_customer"))
+                self.set("customer_in_transport", customer_id)
+                #await self.agent.move_to(self.agent.current_customer_dest)
+                await self.agent.move_to(dest)
+                #self.agent.num_assignments += 1
             except PathRequestException:
                 # if there is no path to customer's destination, cancel it
                 await self.agent.cancel_customer()
                 self.agent.status = TRANSPORT_WAITING
             except AlreadyInDestination:
                 # if the transport is already in the customer's destination, drop the customer off
+                #logger.error("++++++++++ transport {} is already in customers destination {}".format(
+                #    self.agent.name, self.agent.current_customer_dest))
                 logger.error("++++++++++ transport {} is already in customers destination {}".format(
-                    self.agent.name, self.agent.current_customer_dest))
+                    self.agent.name, dest))
                 await self.agent.drop_customer()
             else:
                 # if there is no error moving to the destination,
                 # inform the customer that it has been picked up
-                await self.agent.inform_customer(TRANSPORT_IN_CUSTOMER_PLACE)
+                #await self.agent.inform_customer(self.get("current_customer"), TRANSPORT_IN_CUSTOMER_PLACE)
+                await self.agent.inform_customer(customer_id, TRANSPORT_IN_CUSTOMER_PLACE)
                 self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+                #logger.info("Transport {} has picked up the customer {}.".format(
+                #    self.agent.agent_id, self.get("current_customer")))
                 logger.info("Transport {} has picked up the customer {}.".format(
-                    self.agent.agent_id, self.get("current_customer")))
+                    self.agent.agent_id, customer_id))
 
     async def accept_customer(self, customer_id):
         """
