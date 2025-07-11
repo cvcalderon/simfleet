@@ -13,6 +13,13 @@ from simfleet.communications.protocol import (
     INFORM_PERFORMATIVE,
 )
 
+from simfleet.communications.protocol import (
+    REGISTER_PROTOCOL,
+    REQUEST_PERFORMATIVE,
+    ACCEPT_PERFORMATIVE,
+    REFUSE_PERFORMATIVE,
+)
+
 class ServiceStationAgent(QueueStationAgent):
     """
         ServiceStationAgent is responsible for managing service stations (e.g., charging or refueling stations).
@@ -45,7 +52,15 @@ class ServiceStationAgent(QueueStationAgent):
         logger.debug("Agent[{}]: Service station running".format(self.name))
         self.add_behaviour(self.servicebehaviour)
 
-    def add_service(self, service_name, slots, one_shot_behaviour, **arguments):
+        # Activar registro de transporte
+        template = Template()
+        template.set_metadata("protocol", REGISTER_PROTOCOL)
+
+        register_behaviour = TransportRegistrationForStationBehaviour()
+        self.add_behaviour(register_behaviour, template)
+
+
+    def add_service(self, service_name, mode, slots, one_shot_behaviour, **arguments):
         """
             Adds a new service to the agent's service list with defined slots and behavior.
 
@@ -57,6 +72,7 @@ class ServiceStationAgent(QueueStationAgent):
         """
         if service_name not in self.services_list:
             self.services_list[service_name] = {
+                'mode': mode,
                 'slots': slots,
                 'slots_in_use': 0,
                 'one_shot_behaviour': one_shot_behaviour,
@@ -75,6 +91,35 @@ class ServiceStationAgent(QueueStationAgent):
                 "Agent[{}]: The service ({}) doesn't exists.".format(
                     self.name, service_name
                 )
+            )
+
+    # NEW: Station Sharing
+    def add_service_agent(self, service_name, mode, max_agents, **arguments):
+        """
+        Registra un servicio basado en agentes transporte en la estación.
+        Crea una entrada en services_list con modo 'agent' y una lista vacía de JIDs.
+
+        Args:
+            service_name (str): Nombre del servicio (por ejemplo, "bike_sharing").
+            **arguments: Argumentos adicionales específicos del servicio.
+        """
+        if service_name not in self.services_list:
+            self.services_list[service_name] = {
+                "mode": mode,
+                "max_agents": max_agents,
+                "agents": [],
+                "args": arguments,
+            }
+
+            # También creamos su cola correspondiente
+            self.add_queue(service_name)
+
+            logger.debug(
+                f"Agent[{self.name}]: Agent-based service '{service_name}' registered."
+            )
+        else:
+            logger.warning(
+                f"Agent[{self.name}]: Service '{service_name}' already exists."
             )
 
     def remove_service(self, service_name):
@@ -123,6 +168,60 @@ class ServiceStationAgent(QueueStationAgent):
         if self.services_list[service_name]["slots_in_use"] >= self.services_list[service_name]["slots"]:
             return False
         return True
+
+
+    # NEW: Station Sharing
+
+    #def register_agent(self, service_name, agent_jid):
+    #    if service_name in self.services_list and self.services_list[service_name]["mode"] == "agent":
+    #        self.services_list[service_name]["agents"].append(agent_jid)
+    #        logger.debug(f"Agent[{self.name}]: Registered agent [{agent_jid}] to service '{service_name}'.")
+    #    else:
+    #        logger.warning(
+    #            f"Agent[{self.name}]: Cannot register agent — service '{service_name}' not found or invalid mode.")
+
+    def register_agent(self, service_name, agent_jid):
+        service = self.services_list.get(service_name, {})
+        if service.get("mode") == "agent":
+            if not self.is_station_full(service_name):
+                if agent_jid not in service["agents"]:
+                    service["agents"].append(agent_jid)
+                    logger.debug(f"Agent[{self.name}]: Registered agent [{agent_jid}] to service '{service_name}'.")
+                else:
+                    logger.info(f"Agent[{self.name}]: Agent [{agent_jid}] already registered.")
+            else:
+                logger.warning(
+                    f"Agent[{self.name}]: Service '{service_name}' is full! Cannot register more agents.")
+        else:
+            logger.warning(
+                f"Agent[{self.name}]: Cannot register agent — service '{service_name}' not found or invalid mode.")
+
+    def is_station_full(self, service_name):
+        service = self.services_list.get(service_name, {})
+        if service.get("mode") == "agent":
+            return len(service["agents"]) >= service.get("max_agents")
+        return False
+
+    def has_available_agent(self, service_name):
+        return (
+            service_name in self.services_list and
+            self.services_list[service_name]["mode"] == "agent" and
+            len(self.services_list[service_name]["agents"]) > 0
+        )
+
+    def available_agents(self, service_name):
+        return len(self.services_list[service_name]["agents"])
+
+    def assign_agent(self, service_name):
+        if self.has_available_transport(service_name):
+            return self.services_list[service_name]["agents"].pop(0)
+        return None
+
+    #def release_transport(self, service_name, agent_jid):
+    #    if service_name in self.services_list and self.services_list[service_name]["mode"] == "agent":
+    #        self.services_list[service_name]["agents"].append(agent_jid)
+    #        logger.debug(f"Agent[{self.name}]: Agent [{agent_jid}] returned to service '{service_name}'.")
+
 
     async def send_inform_service(self, agent_id, content):
         """
@@ -223,58 +322,78 @@ class ServiceStationAgent(QueueStationAgent):
                 )
             )
 
+        async def inform_transport_assignment(self, customer_jid, service_name, transport_jid):
+            """
+            Informa al customer que se le ha asignado un transporte para el servicio solicitado.
+            """
+            msg = Message()
+            msg.to = str(customer_jid)
+            msg.set_metadata("protocol", REQUEST_PROTOCOL)
+            msg.set_metadata("performative", INFORM_PERFORMATIVE)
+            content = {
+                "service_name": service_name,
+                "transport_id": transport_jid
+            }
+            msg.body = json.dumps(content)
+            await self.send(msg)
+            logger.info(
+                f"Agent[{self.name}]: Notified customer [{customer_jid}] about transport [{transport_jid}] for service [{service_name}]"
+            )
+
         async def on_start(self):
             """
                 Called when the behavior starts, logging the event.
             """
             logger.debug("Agent[{}]: Standard behaviour ({}) started".format(self.agent.name, type(self).__name__))
 
-        async def run(self):
-            """
-                Main execution loop that processes the waiting lists and assigns services to agents
-                if slots are available. It dequeues agents from the queue and starts the respective service.
-            """
-            template1 = Template()
-            template1.set_metadata("protocol", REQUEST_PROTOCOL)
-            template1.set_metadata("performative", INFORM_PERFORMATIVE)
+        # async def run(self):
+        #     """
+        #         Main execution loop that processes the waiting lists and assigns services to agents
+        #         if slots are available. It dequeues agents from the queue and starts the respective service.
+        #     """
+        #     template1 = Template()
+        #     template1.set_metadata("protocol", REQUEST_PROTOCOL)
+        #     template1.set_metadata("performative", INFORM_PERFORMATIVE)
+        #
+        #     # Iterate through the available service types and their corresponding queues
+        #     for service_name, queue in self.agent.waiting_lists.items():
+        #
+        #         if len(queue) > 0:
+        #
+        #             if self.agent.service_available(service_name):
+        #
+        #                 # Dequeue the first agent from the queue for the given service
+        #                 agent_info = self.agent.queuebehaviour.dequeue_first_agent_to_waiting_list(service_name)
+        #
+        #                 if agent_info is not None:
+        #                     agent, kwargs = agent_info
+        #
+        #                     # Increase the number of slots in use for this service
+        #                     self.increase_slots_used(service_name)
+        #
+        #                     # Inform the agent that they are being served
+        #                     content = {"station_id": self.agent.name, "serving": True}
+        #                     await self.inform_service(str(agent), content)
+        #
+        #                     logger.info(
+        #                         "Agent[{}]: The agent [{}] with args: ({}) has slots used: ({})".format(
+        #                             self.agent.name,
+        #                             agent,
+        #                             kwargs,
+        #                             self.get_slot_number_used(service_name)
+        #                         )
+        #                     )
+        #
+        #                     # Get service-specific arguments
+        #                     arguments_station = self.agent.show_service_arguments(service_name)
+        #                     arguments_station["service_name"] = service_name
+        #                     kwargs.update(arguments_station)
+        #
+        #                     # Retrieve and instantiate the appropriate service behavior
+        #                     one_shot_behaviour = self.agent.services_list[service_name]["one_shot_behaviour"]
+        #                     one_shot_behaviour = one_shot_behaviour(str(agent), **kwargs)
+        #
+        #                     # Add the behavior to the agent
+        #                     self.agent.add_behaviour(one_shot_behaviour, template1)
 
-            # Iterate through the available service types and their corresponding queues
-            for service_name, queue in self.agent.waiting_lists.items():
 
-                if len(queue) > 0:
-
-                    if self.agent.service_available(service_name):
-
-                        # Dequeue the first agent from the queue for the given service
-                        agent_info = self.agent.queuebehaviour.dequeue_first_agent_to_waiting_list(service_name)
-
-                        if agent_info is not None:
-                            agent, kwargs = agent_info
-
-                            # Increase the number of slots in use for this service
-                            self.increase_slots_used(service_name)
-
-                            # Inform the agent that they are being served
-                            content = {"station_id": self.agent.name, "serving": True}
-                            await self.inform_service(str(agent), content)
-
-                            logger.info(
-                                "Agent[{}]: The agent [{}] with args: ({}) has slots used: ({})".format(
-                                    self.agent.name,
-                                    agent,
-                                    kwargs,
-                                    self.get_slot_number_used(service_name)
-                                )
-                            )
-
-                            # Get service-specific arguments
-                            arguments_station = self.agent.show_service_arguments(service_name)
-                            arguments_station["service_name"] = service_name
-                            kwargs.update(arguments_station)
-
-                            # Retrieve and instantiate the appropriate service behavior
-                            one_shot_behaviour = self.agent.services_list[service_name]["one_shot_behaviour"]
-                            one_shot_behaviour = one_shot_behaviour(str(agent), **kwargs)
-
-                            # Add the behavior to the agent
-                            self.agent.add_behaviour(one_shot_behaviour, template1)
