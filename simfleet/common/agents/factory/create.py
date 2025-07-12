@@ -439,16 +439,30 @@ class StationFactory(Factory):
 
         # Station service management
         for service in services:
-            type_ = service["type"]
-            behaviour = service["behaviour"]
-            slots = service["slots"]
-            args = service["args"]
+            mode = service["mode"]
 
-            if type(behaviour) is str:
-                one_shot_behaviour = load_class(behaviour)
-            else:
-                one_shot_behaviour = default_strategy
-            agent.add_service(type_, slots, one_shot_behaviour, **args)
+            if mode == "behaviour":
+
+                type_ = service["type"]
+                behaviour = service["behaviour"]
+                slots = service["slots"]
+                args = service["args"]
+
+                if type(behaviour) is str:
+                    one_shot_behaviour = load_class(behaviour)
+                else:
+                    one_shot_behaviour = default_strategy
+                agent.add_service(type_, mode, slots, one_shot_behaviour, **args)
+
+            elif mode == "agent":
+
+                type_ = service["type"]
+                #type_ = "sharing-station"
+                slots = service["slots"]
+                args = service["args"]
+
+                agent.add_service_agent(type_, mode, slots, **args)
+                agent.ser
 
         return agent
 
