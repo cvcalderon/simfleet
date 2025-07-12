@@ -26,6 +26,14 @@ class SharingCustomerAgent(PedestrianAgent):
         self.current_transport_pos = None
         self.previous_closest_transport = None
 
+        # NEW: Station Sharing
+        self.station_dic = None         # Comparte con buscustomer
+        self.type_service = "sharing"   # Comparte con buscustomer
+        self.destination_station = None    # Comparte con buscustomer
+        self.current_station = None        # Comparte con buscustomer
+
+
+
         # ATRIBUTES FOR EVENT AND CALLBACK MANAGEMENT
         # self.__observers = defaultdict(list)
         # Customer arrived to transport event. Triggers when the customer stops its
@@ -126,6 +134,20 @@ class SharingCustomerAgent(PedestrianAgent):
         self.set("arrived_to_transport", True)
 
 
+    # NEW: Station Sharing
+    def setup_stations(self):
+        """
+        Sets up the current and destination stations for the customer based on the nearest available stations.
+        """
+        if self.current_station is None and self.destination_station is None:
+            self.current_station = self.nearst_agent(self.station_dic, self.get_position())
+            self.destination_station = self.nearst_agent(self.station_dic, self.customer_dest)
+
+            logger.debug("Customer {} set current_station {} and destination_station {}".format(self.name,
+                                                                                      self.current_station[0],
+                                                                                      self.destination_station[0]))
+
+
 
 class SharingCustomerStrategyBehaviour(State):
 
@@ -190,6 +212,45 @@ class SharingCustomerStrategyBehaviour(State):
         reply.body = json.dumps(content)
         await self.send(reply)
         logger.info("Customer {} sent booking to transport {}".format(self.agent.name, transport_id))
+
+    async def request_a_transport(self, content):
+        """
+            Request a transport to sharing-station
+
+            Args:
+                content (dict, optional): Information needed for registration.
+        """
+        if content is None:
+            content = {}
+        msg = Message()
+        msg.to = self.agent.current_station[0]
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", REQUEST_PERFORMATIVE)
+        msg.body = json.dumps(content)
+        logger.debug("Customer {} asked to register to stop {} with destination {}".format(self.agent.name,
+                                                                                           self.agent.current_station[0],
+                                                                                           self.agent.destination_station[
+                                                                                               1]))
+        await self.send(msg)
+
+
+    async def request_a_place_for_transport(self, content):
+        """
+            Request a transport to sharing-station
+
+            Args:
+                content (dict, optional): Information needed for registration.
+        """
+        if content is None:
+            content = {}
+        msg = Message()
+        msg.to = self.agent.destination_station[0]
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        msg.body = json.dumps(content)
+        logger.debug("Customer {} asked to register transport {}".format(self.agent.name,
+                                                                         self.agent.destination_station[0]))
+        await self.send(msg)
 
 
     async def cancel_proposal(self, transport_id, content=None):
