@@ -8,7 +8,8 @@ from simfleet.utils.abstractstrategies import FSMSimfleetBehaviour
 from simfleet.common.lib.customers.models.sharingcustomer import SharingCustomerStrategyBehaviour
 
 from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE, REFUSE_PERFORMATIVE, CANCEL_PERFORMATIVE
-from simfleet.utils.status import CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT, CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST
+from simfleet.utils.status import CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT, \
+    CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST, CUSTOMER_IN_STATION, CUSTOMER_MOVING_TO_DEST
 from simfleet.utils.helpers import (
     PathRequestException,
     AlreadyInDestination,
@@ -258,3 +259,292 @@ class FSMSharingCustomerStrategyBehaviour(FSMSimfleetBehaviour):
         self.add_transition(CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST)  # arrived to destination
 
         self.add_transition(CUSTOMER_IN_DEST, CUSTOMER_IN_DEST)
+
+
+
+
+
+################################################################
+#                                                              #
+#                       Customer Strategy                      #
+#                                                              #
+################################################################
+class SharingStationCustomerWaitingState(SharingCustomerStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = CUSTOMER_WAITING
+        logger.debug("{} in Customer Waiting State".format(self.agent.jid))
+        #await asyncio.sleep(1)
+
+    async def run(self):
+
+        """
+           Manages the movement of the customer to the bus stop.
+        """
+
+        if self.agent.station_dic is None:
+            # Obtain the list of sharing-station
+            self.agent.station_dic = await self.agent.get_list_agent_position(self.agent.type_service, self.agent.station_dic)
+
+            self.set_next_state(CUSTOMER_WAITING)
+            return
+        else:
+
+            self.agent.setup_stations()
+
+            # Si el agente no puede caminar la distancia hacia la estación continua en bucle
+            if self.agent.current_station == None:
+                self.set_next_state(CUSTOMER_WAITING)
+
+                return
+
+            logger.debug("Closest station: {}".format(self.agent.current_station))
+            station_id = self.agent.current_station[0]
+            station_position = self.agent.current_station[1]
+
+            if station_position != self.agent.get("current_pos"):
+                self.agent.pedestrian_dest = station_position
+
+                # Check if the transport is close enough for the customer to walk to it
+                if not self.agent.can_walk(station_position):
+                    #closest_transport = None
+                    self.agent.current_station = None
+                    logger.info(f"Customer {self.agent.name} cannot walk to their closest transport")
+                # delete that transport from the available_transports list
+                #del self.agent.available_transports[transport_id]
+                if self.agent.current_station is not None:
+                    #await self.send_proposal(station_id)  # maybe str(transport_id)
+                    #self.set_next_state(CUSTOMER_WAITING_FOR_APPROVAL)
+                    #return
+
+                    logger.info(
+                        "Agent {} on route to destination {}".format(self.agent.name, station_position)
+                    )
+
+                    try:
+                        logger.debug("{} move_to destination {}".format(self.agent.name, station_position))
+
+                        await self.agent.move_to(station_position)
+                        #self.set_next_state(CUSTOMER_MOVING_TO_DEST)
+                        self.set_next_state(CUSTOMER_MOVING_TO_DEST)
+                        return
+
+                    except AlreadyInDestination:
+                        logger.debug(
+                            "{} is already in the destination' {} position. . .".format(
+                                self.agent.name, station_position
+                            )
+                        )
+                        #self.set_next_state(CUSTOMER_WAITING_TO_MOVE)
+                        self.agent.arrived_to_transport()
+
+                        # Testear las 2 líneas
+                        content = {"service_name": self.agent.type_service, "object_type": "customer"}
+                        await self.request_a_transport(content)
+
+                        self.set_next_state(CUSTOMER_IN_STATION)
+                        return
+
+                else:
+                    logger.debug("Closest transport to customer {} was None".format(self.agent.name))
+                    # self.agent.available_transports = []
+                    self.set_next_state(CUSTOMER_WAITING)
+                    return
+
+            else:
+                self.set_next_state(CUSTOMER_IN_STATION)
+                return
+
+
+class SharingStationCustomerMovingToDestState(SharingCustomerStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = CUSTOMER_MOVING_TO_DEST
+        logger.debug("{} in Customer Moving To Transport State".format(self.agent.jid))
+
+    async def run(self):
+        if self.agent.get("arrived_to_transport"):
+            logger.warning("Customer {} is already in their transport place".format(self.agent.jid))
+
+            #Testear las 2 líneas
+            #content = {"service_name": self.agent.type_service, "object_type": "customer"}
+            #await self.request_a_transport(content)
+
+            if not self.agent.get_position() == self.agent.customer_dest:
+                content = {"service_name": self.agent.type_service, "object_type": "customer"}
+                await self.request_a_transport(content)
+                return self.set_next_state(CUSTOMER_IN_STATION)
+            else:
+                return self.set_next_state(CUSTOMER_IN_DEST)
+
+            #return self.set_next_state(CUSTOMER_IN_STATION)
+        self.agent.arrived_to_transport_event.clear()
+        self.agent.watch_value("arrived_to_transport", self.agent.arrived_to_transport_callback)
+        await self.agent.arrived_to_transport_event.wait()
+
+        if not self.agent.get_position() == self.agent.customer_dest:
+            content = {"service_name": self.agent.type_service, "object_type": "customer"}
+            await self.request_a_transport(content)
+            return self.set_next_state(CUSTOMER_IN_STATION)
+        else:
+            return self.set_next_state(CUSTOMER_IN_DEST)
+
+        #Testear las dos líneas
+        #content = {"service_name": self.agent.type_service, "object_type": "customer"}
+        #await self.request_a_transport(content)
+
+        #return self.set_next_state(CUSTOMER_IN_STATION)
+
+
+class SharingStationCustomerInStationState(SharingCustomerStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = CUSTOMER_IN_STATION
+        logger.debug("{} in Customer in Station State".format(self.agent.jid))
+
+    async def run(self):
+
+        # Send registration petition to the bus stop
+        #self.agent.arguments["jid"] = str(self.agent.jid)
+        #self.agent.arguments["destination_stop"] = self.agent.destination_stop[1]
+
+        #content = {"service_name": self.agent.type_service, "object_type": "customer"}
+        #await self.request_a_transport(content)
+
+        #await self.register_to_stop(content)
+        # Wait for registration acceptance
+        msg = await self.receive(timeout=30)
+
+        if msg:
+            sender = str(msg.sender)
+            performative = msg.get_metadata("performative")
+            content = json.loads(msg.body)
+
+            if performative == ACCEPT_PERFORMATIVE:
+                #self.agent.registered_in = sender
+                logger.info("Customer {} registered in bus stop {}".format(self.agent.name, sender))
+                #self.set_next_state(CUSTOMER_WAITING_FOR_APPROVAL)
+                self.set_next_state(CUSTOMER_IN_STATION)
+                return
+            elif performative == INFORM_PERFORMATIVE:
+
+                station_origin = self.agent.current_station[1]
+                station_dest = self.agent.destination_station[1]
+                transport_id = content["transport_id"]
+
+                content = {"customer_id": str(self.agent.jid), "origin": station_origin, "dest": station_dest}
+                await self.send_proposal(transport_id, content)
+                #logger.info("Customer {} registered in bus stop {}".format(self.agent.name, sender))
+                self.set_next_state(CUSTOMER_IN_TRANSPORT)
+
+            elif performative == REFUSE_PERFORMATIVE:
+                # Entraría en bucle si no hay transportes disponibles en la estación origen
+                logger.warning("Station {} has not transport for {}".format(sender, self.agent.name))
+                self.set_next_state(CUSTOMER_IN_STATION)
+                return
+        else:
+            self.set_next_state(CUSTOMER_IN_STATION)
+            return
+
+
+
+class SharingStationCustomerInTransportState(SharingCustomerStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = CUSTOMER_IN_TRANSPORT
+        logger.debug("{} in Customer In Transport State".format(self.agent.jid))
+
+    async def run(self):
+        #await self.inform_transport()
+        # block strategy execution
+        self.agent.arrived_to_destination_event.clear()
+        self.agent.watch_value("arrived_to_destination", self.agent.arrived_to_destination_callback)
+        await self.agent.arrived_to_destination_event.wait()
+
+        content = {"service_name": self.agent.type_service}
+        await self.request_a_place_for_transport(content)
+
+        return self.set_next_state(CUSTOMER_IN_DEST)
+
+
+class SharingStationCustomerInDestState(SharingCustomerStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = CUSTOMER_IN_DEST
+        logger.debug("{} in Customer In Dest State".format(self.agent.jid))
+
+    async def run(self):
+        try:
+            # wait for the transport to inform the customer that the destination station has been reached
+            msg = await self.receive(timeout=10)
+            if msg:
+
+                sender = msg.sender
+                performative = msg.get_metadata("performative")
+                content = json.loads(msg.body)
+                available_place = content["available_place"]
+
+                if performative == INFORM_PERFORMATIVE:
+                    logger.info("Customer {} has reached their destination".format(self.agent.name))
+
+                    content = {"available_place": available_place}
+                    await self.inform_transport(content)
+
+                    if self.agent.destination_station[1] != self.agent.customer_dest:
+
+                        self.agent.pedestrian_dest = self.agent.customer_dest
+
+                        logger.info(
+                            "Agent {} on route to destination {}".format(self.agent.name, self.agent.customer_dest)
+                        )
+
+                        try:
+                            logger.debug("{} move_to destination {}".format(self.agent.name, self.agent.customer_dest))
+
+                            await self.agent.move_to(self.agent.customer_dest)
+                            self.set_next_state(CUSTOMER_MOVING_TO_DEST)
+                            return
+                        except AlreadyInDestination:
+                            logger.debug(
+                                "{} is already in the destination' {} position. . .".format(
+                                    self.agent.name, self.agent.customer_dest
+                                )
+                            )
+                            self.set_next_state(CUSTOMER_IN_DEST)
+                            return
+            self.set_next_state(CUSTOMER_IN_DEST)
+            return
+        except Exception as e:
+            logger.critical("Agent {}, Exception {} in CustomerInDestState".format(self.agent.name, e))
+
+
+
+class FSMSharingStationCustomerStrategyBehaviour(FSMSimfleetBehaviour):
+    def setup(self):
+        # Create states
+        self.add_state(CUSTOMER_WAITING, SharingStationCustomerWaitingState(), initial=True)
+        self.add_state(CUSTOMER_MOVING_TO_DEST, SharingStationCustomerMovingToDestState())
+        self.add_state(CUSTOMER_IN_STATION, SharingStationCustomerInStationState())
+        self.add_state(CUSTOMER_IN_TRANSPORT, SharingStationCustomerInTransportState())
+        self.add_state(CUSTOMER_IN_DEST, SharingStationCustomerInDestState())
+
+        # Create transitions
+        self.add_transition(CUSTOMER_WAITING, CUSTOMER_WAITING)  # get list of transports
+        self.add_transition(CUSTOMER_WAITING, CUSTOMER_MOVING_TO_DEST)  # send booking proposal
+        self.add_transition(CUSTOMER_WAITING, CUSTOMER_IN_STATION)  # send booking proposal
+
+        self.add_transition(CUSTOMER_MOVING_TO_DEST, CUSTOMER_IN_STATION)  # booking is rejected
+        self.add_transition(CUSTOMER_MOVING_TO_DEST, CUSTOMER_IN_DEST)  # booking accepted
+
+        self.add_transition(CUSTOMER_IN_STATION, CUSTOMER_IN_TRANSPORT)  # arrived to transport, picked up by it
+        self.add_transition(CUSTOMER_IN_STATION, CUSTOMER_IN_STATION)
+
+        self.add_transition(CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST)  # arrived to destination
+
+        self.add_transition(CUSTOMER_IN_DEST, CUSTOMER_IN_DEST)
+        self.add_transition(CUSTOMER_IN_DEST, CUSTOMER_MOVING_TO_DEST)
