@@ -28,7 +28,7 @@ class SharingCustomerAgent(PedestrianAgent):
 
         # NEW: Station Sharing
         self.station_dic = None         # Comparte con buscustomer
-        self.type_service = "sharing"   # Comparte con buscustomer
+        self.type_service = "bike-sharing"   # Comparte con buscustomer
         self.destination_station = None    # Comparte con buscustomer
         self.current_station = None        # Comparte con buscustomer
 
