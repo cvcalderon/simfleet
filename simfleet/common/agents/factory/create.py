@@ -459,10 +459,12 @@ class StationFactory(Factory):
                 type_ = service["type"]
                 #type_ = "sharing-station"
                 slots = service["slots"]
-                args = service["args"]
+                #args = service["args"]
+                args = service.get("args")
+                args = args or {}
 
+                agent.set_fleet_type(type_)
                 agent.add_service_agent(type_, mode, slots, **args)
-                agent.ser
 
         return agent
 

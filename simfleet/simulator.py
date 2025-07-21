@@ -521,11 +521,11 @@ class SimulatorAgent(Agent):
                     with self.agent.simulation_mutex:
                         all_agents = (
                             list(self.agent.manager_agents.values())
-                            + list(self.agent.transport_agents.values())
-                            + list(self.agent.customer_agents.values())
                             + list(self.agent.station_agents.values())
-                            + list(self.agent.vehicle_agents.values())
                             + list(self.agent.bus_stop_agents.values())
+                            + list(self.agent.transport_agents.values())
+                            + list(self.agent.vehicle_agents.values())
+                            + list(self.agent.customer_agents.values())
                         )
                         while not all([agent.is_ready() for agent in all_agents]):
                             logger.debug("Waiting for all agents to be ready")
@@ -535,25 +535,25 @@ class SimulatorAgent(Agent):
                             logger.debug(
                                 f"Running strategy {self.agent.default_strategies['fleetmanager']} to manager {manager.name}"
                             )
-                        for transport in self.agent.transport_agents.values():
-                            transport.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['transport']} to transport {transport.name}"
-                            )
-                        for customer in self.agent.customer_agents.values():
-                            customer.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['customer']} to customer {customer.name}"
-                            )
                         for station in self.agent.station_agents.values():
                             station.run_strategy()
                             logger.debug(
                                 f"Running strategy {self.agent.default_strategies['station']} to station {station.name}"
                             )
+                        for transport in self.agent.transport_agents.values():
+                            transport.run_strategy()
+                            logger.debug(
+                                f"Running strategy {self.agent.default_strategies['transport']} to transport {transport.name}"
+                            )
                         for vehicle in self.agent.vehicle_agents.values():
                             vehicle.run_strategy()
                             logger.debug(
                                 f"Running strategy {self.agent.default_strategies['vehicle']} to vehicle {vehicle.name}"
+                            )
+                        for customer in self.agent.customer_agents.values():
+                            customer.run_strategy()
+                            logger.debug(
+                                f"Running strategy {self.agent.default_strategies['customer']} to customer {customer.name}"
                             )
                         # for stop in self.agent.bus_stop_agents.values():
                         #    stop.run_strategy()

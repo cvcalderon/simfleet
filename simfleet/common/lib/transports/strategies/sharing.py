@@ -313,15 +313,13 @@ class FSMStationTransportStrategyBehaviour(FSMSimfleetBehaviour):
     def setup(self):
         # Create states
         self.add_state(TRANSPORT_WAITING, StationTransportWaitingState(), initial=True)
-        self.add_state(TRANSPORT_BOOKED, StationTransportBookedState())
         self.add_state(TRANSPORT_MOVING_TO_DESTINATION, StationTransportMovingToDestinationState())
+        self.add_state(TRANSPORT_IN_DEST, StationTransportInDestinationState())
 
         # Create transitions
         self.add_transition(TRANSPORT_WAITING, TRANSPORT_WAITING)  # waiting for messages
-        self.add_transition(TRANSPORT_WAITING, TRANSPORT_BOOKED)  # booking
+        self.add_transition(TRANSPORT_WAITING, TRANSPORT_MOVING_TO_DESTINATION)  # booking
 
-        self.add_transition(TRANSPORT_BOOKED, TRANSPORT_BOOKED)  # waiting for customer to arrive and messages
-        self.add_transition(TRANSPORT_BOOKED, TRANSPORT_WAITING)  # booking cancelled
-        self.add_transition(TRANSPORT_BOOKED, TRANSPORT_MOVING_TO_DESTINATION)  # customer arrived, start movement
-
-        self.add_transition(TRANSPORT_MOVING_TO_DESTINATION, TRANSPORT_WAITING)  # transport is free again
+        self.add_transition(TRANSPORT_MOVING_TO_DESTINATION, TRANSPORT_IN_DEST)  # waiting for customer to arrive and messages
+        self.add_transition(TRANSPORT_IN_DEST, TRANSPORT_IN_DEST)  # booking cancelled
+        self.add_transition(TRANSPORT_IN_DEST, TRANSPORT_WAITING)  # customer arrived, start movement
