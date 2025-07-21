@@ -489,7 +489,7 @@ class TransportRegistrationForStationBehaviour(CyclicBehaviour):
     async def on_start(self):
         logger.debug(f"Behaviour [{type(self).__name__}] started in station {self.agent.name}")
 
-    async def accept_registration(self, transport_jid):
+    async def accept_registration_2(self, transport_jid):
         msg = Message()
         msg.to = str(transport_jid)
         msg.set_metadata("protocol", REGISTER_PROTOCOL)
@@ -497,6 +497,23 @@ class TransportRegistrationForStationBehaviour(CyclicBehaviour):
         msg.body = json.dumps({"message": "Registered in station"})
         await self.send(msg)
         logger.info(f"Station [{self.agent.name}]: Accepted registration from {transport_jid}")
+
+
+    async def accept_registration(self, agent_id):
+        """
+        Sends an acceptance message to a transport agent, confirming its registration in the fleet.
+
+        Args:
+            agent_id (str): The ID of the transport agent to be accepted.
+        """
+        reply = Message()
+        content = {"fleet_type": self.agent.fleet_type}
+        reply.to = str(agent_id)
+        reply.set_metadata("protocol", REGISTER_PROTOCOL)
+        reply.set_metadata("performative", ACCEPT_PERFORMATIVE)
+        reply.body = json.dumps(content)
+        await self.send(reply)
+        logger.info(f"Station [{self.agent.name}]: Accepted registration from {agent_id}")
 
     async def refuse_registration(self, transport_jid):
         msg = Message()
@@ -517,7 +534,7 @@ class TransportRegistrationForStationBehaviour(CyclicBehaviour):
             if performative == REQUEST_PERFORMATIVE:
                 try:
                     content = json.loads(msg.body)
-                    service_name = content.get("service_name")  # default
+                    service_name = content.get("fleet_type")  # default
 
                     if service_name in self.agent.services_list and self.agent.services_list[service_name]["mode"] == "agent":
 

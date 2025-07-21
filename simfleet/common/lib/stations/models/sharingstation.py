@@ -33,8 +33,8 @@ class SharingStationAgent(ServiceStationAgent):
             to_json(): Returns the bus stop information in JSON format.
             run_strategy(): Sets the strategy behavior for the stop.
     """
-    def __init__(self, agentjid, password, **kwargs):
-        ServiceStationAgent.__init__(agentjid, password)
+    def __init__(self, agentjid, password):
+        ServiceStationAgent.__init__(self, agentjid, password)
 
         # Bus stop attributes
         self.station_name = None
@@ -43,15 +43,23 @@ class SharingStationAgent(ServiceStationAgent):
         # Atribut afegit perque funcione
         self.type = None
 
+        #Sharing-Station variables
+        self.max_register_agents = 0
+
+
     async def setup(self):
         """
             Sets up the bus stop agent by defining its type and behaviors.
         """
         await super().setup()
         logger.info("Stop agent {} running".format(self.name))
-        self.set_type("sharing-station")
+        self.set_type("bike-sharing")
         #self.set_type("stop")
-        self.set_service_name("sharing-station")
+        #self.set_service_name("bike-sharing")
+
+        service = self.services_list.get(self.fleet_type, {})
+        self.set_max_register_agents(service["args"]["max_register_agents"])
+
         try:
             template1 = Template()
             template1.set_metadata("protocol", REGISTER_PROTOCOL)
@@ -93,6 +101,12 @@ class SharingStationAgent(ServiceStationAgent):
         Sets the service_name of the sharing station.
         """
         self.service_name = name
+
+    def set_max_register_agents(self, agents):
+        self.max_register_agents = agents
+
+    def all_agents_registered(self):
+        return self.max_register_agents == self.available_agents(self.fleet_type)
 
     def set_type(self, station_type):
         """
@@ -148,16 +162,15 @@ class RegistrationBehaviour(CyclicBehaviour):
             )
         )
 
-        service = self.agent.services_list.get(self.agent.service_name, {})
-
+        service = self.agent.services_list.get(self.agent.fleet_type, {})
 
         content = {
             "jid": str(self.agent.jid),
-            "type": "sharing-station",
+            "type": self.agent.fleet_type,
             "station_name": self.agent.station_name,
             "position": self.get("current_pos"),
             "max_transports": service.get("max_agents"),
-            "available_transports": self.agent.available_agents(self.agent.service_name)
+            "available_transports": self.agent.available_agents(self.agent.fleet_type)
         }
         msg = Message()
         msg.to = str(self.agent.directory_id)
@@ -168,7 +181,7 @@ class RegistrationBehaviour(CyclicBehaviour):
 
     async def run(self):
         try:
-            if not self.agent.registration:
+            if not self.agent.registration and self.agent.all_agents_registered():
                 await self.send_registration()
             msg = await self.receive(timeout=10)
             if msg:
