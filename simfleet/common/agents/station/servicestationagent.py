@@ -223,21 +223,21 @@ class ServiceStationAgent(QueueStationAgent):
     #        logger.debug(f"Agent[{self.name}]: Agent [{agent_jid}] returned to service '{service_name}'.")
 
 
-    async def send_inform_service(self, agent_id, content):
-        """
-        Sends a message to a transport agent to inform them that their service has been completed.
-
-        Args:
-            agent_id (str): The ID of the agent.
-            content (dict): The content of the message.
-        """
-        reply = Message()
-        reply.to = str(self.agent_id)
-        reply.set_metadata("protocol", REQUEST_PROTOCOL)
-        reply.set_metadata("performative", INFORM_PERFORMATIVE)
-        content = {"services": self.show_services()}
-        reply.body = json.dumps(content)
-        await self.send(reply)
+    # async def send_inform_service(self, agent_id, content):
+    #     """
+    #     Sends a message to a transport agent to inform them that their service has been completed.
+    #
+    #     Args:
+    #         agent_id (str): The ID of the agent.
+    #         content (dict): The content of the message.
+    #     """
+    #     reply = Message()
+    #     reply.to = str(self.agent_id)
+    #     reply.set_metadata("protocol", REQUEST_PROTOCOL)
+    #     reply.set_metadata("performative", INFORM_PERFORMATIVE)
+    #     content = {"services": self.show_services()}
+    #     reply.body = json.dumps(content)
+    #     await self.send(reply)
 
     def to_json(self):
         data = super().to_json()

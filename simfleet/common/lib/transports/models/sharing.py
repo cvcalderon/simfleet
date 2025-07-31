@@ -56,19 +56,6 @@ class SharingAgent(TransportAgent):
     def set_status(self, state=TRANSPORT_WAITING):  # new
         self.status = state
 
-    async def send_status_fleetmanager(self):
-        msg = Message()
-        msg.to = str(self.fleetmanager_id)
-        msg.set_metadata("protocol", REQUEST_PROTOCOL)
-        msg.set_metadata("performative", INFORM_PERFORMATIVE)
-        msg.body = json.dumps({
-            "name": self.name,
-            "jid": str(self.jid),
-            "status": self.status,
-            "position": self.get_position()
-        })
-        await self.send(msg)
-
     def is_customer_in_transport(self):
         return self.get("customer_in_transport") is not None
 
@@ -79,7 +66,7 @@ class SharingAgent(TransportAgent):
         customers = self.get("current_customer")
         customer_id = next(iter(customers.items()))[0]
 
-        await self.inform_customer(customer_id, CUSTOMER_IN_DEST)
+        #await self.inform_customer(customer_id, CUSTOMER_IN_DEST)
         self.status = TRANSPORT_WAITING
         logger.info("Transport {} has dropped the customer {} in destination.".format(self.agent_id,
                                                                                       customer_id))
@@ -123,6 +110,19 @@ class SharingStrategyBehaviour(State):
         logger.debug("Strategy {} started in transport {}".format(type(self).__name__, self.agent.name))
         self.agent.total_waiting_time = 0.0
 
+    async def send_status_fleetmanager(self):
+        msg = Message()
+        msg.to = str(self.agent.fleetmanager_id)
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        msg.body = json.dumps({
+            "name": self.agent.name,
+            "jid": str(self.agent.jid),
+            "status": self.agent.status,
+            "position": self.agent.get_position()
+        })
+        await self.send(msg)
+
     async def pick_up_customer(self, customer_id, origin, dest):
         # Save customer attributes and travel destination
         #self.set("current_customer", customer_id)
@@ -143,7 +143,7 @@ class SharingStrategyBehaviour(State):
                 #self.agent.num_assignments += 1
             except PathRequestException:
                 # if there is no path to customer's destination, cancel it
-                await self.agent.cancel_customer()
+                await self.cancel_customer()
                 self.agent.status = TRANSPORT_WAITING
             #except AlreadyInDestination:
                 # if the transport is already in the customer's destination, drop the customer off
@@ -156,7 +156,7 @@ class SharingStrategyBehaviour(State):
                 # if there is no error moving to the destination,
                 # inform the customer that it has been picked up
                 #await self.agent.inform_customer(self.get("current_customer"), TRANSPORT_IN_CUSTOMER_PLACE)
-                await self.agent.inform_customer(customer_id, TRANSPORT_IN_CUSTOMER_PLACE)
+                await self.inform_customer(customer_id, TRANSPORT_IN_CUSTOMER_PLACE)
                 self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
                 #logger.info("Transport {} has picked up the customer {}.".format(
                 #    self.agent.agent_id, self.get("current_customer")))
@@ -184,7 +184,7 @@ class SharingStrategyBehaviour(State):
                 #self.agent.num_assignments += 1
             except PathRequestException:
                 # if there is no path to customer's destination, cancel it
-                await self.agent.cancel_customer()
+                await self.cancel_customer()
                 self.agent.set_registration(status=False)  # Registro esta a FALSE para que se registre nuevamente en la estación.
                 self.agent.status = TRANSPORT_WAITING
             else:
@@ -235,6 +235,53 @@ class SharingStrategyBehaviour(State):
         await self.send(reply)
         logger.info("Transport {} refused booking from customer {}".format(self.agent.name,
                                                                            customer_id))
+
+    async def inform_customer(self, customer_id, status, data=None):
+        """
+        Sends a message to inform the customer of the transport's new status.
+
+        Args:
+            customer_id (str): The ID of the customer.
+            status (int): The new status code.
+            data (dict, optional): Additional information about the status.
+        """
+        if data is None:
+            data = {}
+        msg = Message()
+        msg.to = customer_id
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        data["status"] = status
+        msg.body = json.dumps(data)
+        await self.send(msg)
+
+
+    async def cancel_customer(self, customer_id, data=None):
+        """
+        Cancels the assignment of a customer and informs them via a message.
+
+        Args:
+            customer_id (str): The ID of the customer.
+            data (dict, optional): Additional cancellation-related information.
+        """
+        logger.error(
+            "Agent[{}]: The agent could not get a path to customer [{}].".format(
+                self.agent.agent_id, self.agent.get("current_customer")
+            )
+        )
+        if data is None:
+            data = {}
+        reply = Message()
+        reply.to = customer_id
+        reply.set_metadata("protocol", REQUEST_PROTOCOL)
+        reply.set_metadata("performative", CANCEL_PERFORMATIVE)
+        reply.body = json.dumps(data)
+        logger.debug(
+            "Agent[{}]: The agent sent cancel proposal to customer [{}]".format(
+                self.agent.agent_id, customer_id
+            )
+        )
+        await self.send(reply)
 
     async def deassign_customer(self):
         """

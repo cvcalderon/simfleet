@@ -103,20 +103,20 @@ class QueueStationAgent(GeoLocatedAgent):
                 "Agent[{}]: The queue ({}) has been removed. ".format(self.name, name)
             )
 
-    async def request_agent_position(self, agent_id, content):
-        """
-        Requests the position of an agent by sending a message.
-
-        Args:
-            agent_id (str): The ID of the agent.
-            content (dict): The content of the message.
-        """
-        reply = Message()
-        reply.to = str(agent_id)
-        reply.set_metadata("protocol", COORDINATION_PROTOCOL)
-        reply.set_metadata("performative", REQUEST_PERFORMATIVE)
-        reply.body = json.dumps(content)
-        await self.send(reply)
+    # async def request_agent_position(self, agent_id, content):
+    #     """
+    #     Requests the position of an agent by sending a message.
+    #
+    #     Args:
+    #         agent_id (str): The ID of the agent.
+    #         content (dict): The content of the message.
+    #     """
+    #     reply = Message()
+    #     reply.to = str(agent_id)
+    #     reply.set_metadata("protocol", COORDINATION_PROTOCOL)
+    #     reply.set_metadata("performative", REQUEST_PERFORMATIVE)
+    #     reply.body = json.dumps(content)
+    #     await self.send(reply)
 
     def to_json(self):
         data = super().to_json()
