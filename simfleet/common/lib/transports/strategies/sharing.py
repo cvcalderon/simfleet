@@ -33,7 +33,7 @@ class SharingWaitingState(SharingStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING
-        await self.agent.send_status_fleetmanager()
+        await self.send_status_fleetmanager()
         logger.debug("{} in Transport Waiting State".format(self.agent.jid))
         logger.warning(f"Transport {self.agent.jid} is free again")
 
@@ -59,7 +59,7 @@ class SharingBookedState(SharingStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_BOOKED
-        await self.agent.send_status_fleetmanager()
+        await self.send_status_fleetmanager()
         logger.debug("{} in Transport Booked State".format(self.agent.jid))
 
     async def run(self):

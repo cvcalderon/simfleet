@@ -445,7 +445,7 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
                         details={}
                     )
 
-                    await self.agent.inform_customer(
+                    await self.inform_customer(
                         customer_id=content["customer_id"], status=TRANSPORT_MOVING_TO_CUSTOMER
                     )
 
@@ -483,7 +483,7 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
 
             except AlreadyInDestination:
 
-                await self.agent.inform_customer(
+                await self.inform_customer(
                     customer_id=content["customer_id"], status=TRANSPORT_IN_CUSTOMER_PLACE
                 )
                 self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
@@ -553,7 +553,7 @@ class ElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
                         self.agent.agent_id, self.agent.status
                     )
                 )
-                await self.agent.inform_customer(
+                await self.inform_customer(
                     customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE
                 )
                 self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
@@ -572,7 +572,7 @@ class ElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
             return
         except AlreadyInDestination:
 
-            await self.agent.inform_customer(
+            await self.inform_customer(
                 customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE
             )
             self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
@@ -660,7 +660,7 @@ class ElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
                         self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
 
                     except PathRequestException:
-                        await self.agent.cancel_customer(customer_id=customer_id)
+                        await self.cancel_customer(customer_id=customer_id)
                         self.agent.status = TRANSPORT_WAITING
                         self.set_next_state(TRANSPORT_WAITING)
                     except AlreadyInDestination:
@@ -717,7 +717,7 @@ class ElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
                     details={},
                 )
 
-                await self.agent.inform_customer(
+                await self.inform_customer(
                     customer_id=customer_id, status=CUSTOMER_IN_DEST
                 )
                 self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
@@ -742,7 +742,7 @@ class ElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
                 details={},
             )
 
-            await self.agent.inform_customer(
+            await self.inform_customer(
                 customer_id=customer_id, status=CUSTOMER_IN_DEST
             )
             self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
