@@ -70,25 +70,6 @@ class TransportAgent(VehicleAgent):
             self.add_behaviour(self.strategy(), template1 | template2)
             self.running_strategy = True
 
-    async def inform_customer(self, customer_id, status, data=None):
-        """
-        Sends a message to inform the customer of the transport's new status.
-
-        Args:
-            customer_id (str): The ID of the customer.
-            status (int): The new status code.
-            data (dict, optional): Additional information about the status.
-        """
-        if data is None:
-            data = {}
-        msg = Message()
-        msg.to = customer_id
-        msg.set_metadata("protocol", REQUEST_PROTOCOL)
-        msg.set_metadata("performative", INFORM_PERFORMATIVE)
-        data["status"] = status
-        msg.body = json.dumps(data)
-        await self.send(msg)
-
     async def inform_customer_moving(self, customer_id, status, data=None):
         """
         Sends a message to the customer to inform them of the transport's movement.
@@ -107,33 +88,6 @@ class TransportAgent(VehicleAgent):
         data["status"] = status
         msg.body = json.dumps(data)
         await self.send(msg)
-
-    async def cancel_customer(self, customer_id, data=None):
-        """
-        Cancels the assignment of a customer and informs them via a message.
-
-        Args:
-            customer_id (str): The ID of the customer.
-            data (dict, optional): Additional cancellation-related information.
-        """
-        logger.error(
-            "Agent[{}]: The agent could not get a path to customer [{}].".format(
-                self.agent_id, self.get("current_customer")
-            )
-        )
-        if data is None:
-            data = {}
-        reply = Message()
-        reply.to = customer_id
-        reply.set_metadata("protocol", REQUEST_PROTOCOL)
-        reply.set_metadata("performative", CANCEL_PERFORMATIVE)
-        reply.body = json.dumps(data)
-        logger.debug(
-            "Agent[{}]: The agent sent cancel proposal to customer [{}]".format(
-                self.agent_id, customer_id
-            )
-        )
-        await self.send(reply)
 
     def add_customer_in_transport(self, customer_id, origin=None, dest=None):
         """

@@ -141,7 +141,7 @@ class SimfleetAgent(Agent):
         """
         self.fleet_type = fleet_type
 
-    #New version send for spade 4
+    #New version send for spade 4 - Send msg but "from" disappear
     async def send(self, msg: Message) -> None:
         """
             Sends a message to another agent, ensuring that the sender's JID is correctly included in the message.
