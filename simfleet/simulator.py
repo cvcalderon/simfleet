@@ -202,23 +202,23 @@ class SimulatorAgent(Agent):
 
         all_agents = []
         try:
-            all_agents += await self.async_create_agents_batch_transport(
-                self.config["transports"]
-            )
-        except Exception as e:
-            logger.exception("EXCEPTION creating Transport agents batch {}".format(e))
-        try:
-            all_agents += await self.async_create_agents_batch_customer(
-                self.config["customers"]
-            )
-        except Exception as e:
-            logger.exception("EXCEPTION creating Customer agents batch {}".format(e))
-        try:
             all_agents += await self.async_create_agents_batch_station(
                 self.config["stations"]
             )
         except Exception as e:
             logger.exception("EXCEPTION creating Station agents batch {}".format(e))
+        try:
+            all_agents += await self.async_create_agents_batch_stop(
+                self.config["stops"]
+            )
+        except Exception as e:
+            logger.exception("EXCEPTION creating Stop agents batch {}".format(e))
+        try:
+            all_agents += await self.async_create_agents_batch_transport(
+                self.config["transports"]
+            )
+        except Exception as e:
+            logger.exception("EXCEPTION creating Transport agents batch {}".format(e))
         try:
             all_agents += await self.async_create_agents_batch_vehicle(
                 self.config["vehicles"]
@@ -226,11 +226,11 @@ class SimulatorAgent(Agent):
         except Exception as e:
             logger.exception("EXCEPTION creating Vehicles agents batch {}".format(e))
         try:
-            all_agents += await self.async_create_agents_batch_stop(
-                self.config["stops"]
+            all_agents += await self.async_create_agents_batch_customer(
+                self.config["customers"]
             )
         except Exception as e:
-            logger.exception("EXCEPTION creating Stop agents batch {}".format(e))
+            logger.exception("EXCEPTION creating Customer agents batch {}".format(e))
 
         assert all([asyncio.iscoroutine(x) for x in all_agents])
         await self.gather_batch(all_agents)
@@ -1077,7 +1077,7 @@ class SimulatorAgent(Agent):
             jid_directory=self.get_directory().jid,
             fleet_type=fleet_type,
         )
-        if self.simulation_time:
+        if self.simulation_running:
             agent.run_strategy()
 
         self.add_manager(agent)
