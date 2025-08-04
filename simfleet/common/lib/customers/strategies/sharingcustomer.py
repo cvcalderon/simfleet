@@ -7,7 +7,7 @@ from spade.message import Message
 from simfleet.utils.abstractstrategies import FSMSimfleetBehaviour
 from simfleet.common.lib.customers.models.sharingcustomer import SharingCustomerStrategyBehaviour
 
-from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE, REFUSE_PERFORMATIVE, CANCEL_PERFORMATIVE
+from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE, REFUSE_PERFORMATIVE, CANCEL_PERFORMATIVE, REQUEST_PROTOCOL
 from simfleet.utils.status import CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT, \
     CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST, CUSTOMER_IN_STATION, CUSTOMER_MOVING_TO_DEST
 from simfleet.utils.helpers import (
@@ -421,15 +421,18 @@ class SharingStationCustomerInStationState(SharingCustomerStrategyBehaviour):
         if msg:
             sender = str(msg.sender)
             performative = msg.get_metadata("performative")
+            protocol = msg.get_metadata("protocol")
             content = json.loads(msg.body)
 
-            if performative == ACCEPT_PERFORMATIVE:
+            logger.warning("DEBUG: Customer {} msg - {}".format(self.agent.name, msg))
+
+            if performative == ACCEPT_PERFORMATIVE and protocol == REQUEST_PROTOCOL:
                 #self.agent.registered_in = sender
                 logger.info("Customer {} registered in bus stop {}".format(self.agent.name, sender))
                 #self.set_next_state(CUSTOMER_WAITING_FOR_APPROVAL)
                 self.set_next_state(CUSTOMER_IN_STATION)
                 return
-            elif performative == INFORM_PERFORMATIVE:
+            elif performative == INFORM_PERFORMATIVE and protocol == REQUEST_PROTOCOL:
 
                 station_origin = self.agent.current_station[1]
                 station_dest = self.agent.destination_station[1]
@@ -437,14 +440,18 @@ class SharingStationCustomerInStationState(SharingCustomerStrategyBehaviour):
 
                 content = {"customer_id": str(self.agent.jid), "origin": station_origin, "dest": station_dest}
                 await self.send_proposal(transport_id, content)
+                self.agent.set("current_transport", transport_id)
                 #logger.info("Customer {} registered in bus stop {}".format(self.agent.name, sender))
                 self.set_next_state(CUSTOMER_IN_TRANSPORT)
+                return
 
             elif performative == REFUSE_PERFORMATIVE:
                 # Entraría en bucle si no hay transportes disponibles en la estación origen
                 logger.warning("Station {} has not transport for {}".format(sender, self.agent.name))
                 self.set_next_state(CUSTOMER_IN_STATION)
                 return
+            else:
+                self.set_next_state(CUSTOMER_IN_STATION)
         else:
             self.set_next_state(CUSTOMER_IN_STATION)
             return
@@ -487,13 +494,14 @@ class SharingStationCustomerInDestState(SharingCustomerStrategyBehaviour):
                 sender = msg.sender
                 performative = msg.get_metadata("performative")
                 content = json.loads(msg.body)
-                available_place = content["available_place"]
 
                 if performative == INFORM_PERFORMATIVE:
                     logger.info("Customer {} has reached their destination".format(self.agent.name))
 
-                    content = {"available_place": available_place}
-                    await self.inform_transport(content)
+                    if "available_place" in content:
+                        available_place = content["available_place"]
+                        content = {"available_place": available_place, "station": str(sender)}
+                        await self.inform_transport(content)
 
                     if self.agent.destination_station[1] != self.agent.customer_dest:
 
@@ -505,6 +513,8 @@ class SharingStationCustomerInDestState(SharingCustomerStrategyBehaviour):
 
                         try:
                             logger.debug("{} move_to destination {}".format(self.agent.name, self.agent.customer_dest))
+
+                            self.set("arrived_to_transport", False)
 
                             await self.agent.move_to(self.agent.customer_dest)
                             self.set_next_state(CUSTOMER_MOVING_TO_DEST)

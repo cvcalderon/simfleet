@@ -283,6 +283,22 @@ class SharingStrategyBehaviour(State):
         )
         await self.send(reply)
 
+    async def inform_station(self, station_id, content):
+        """
+            Inform to station
+
+            Args:
+                content (dict, optional): Information needed for registration.
+        """
+        if content is None:
+            content = {}
+        msg = Message()
+        msg.to = station_id
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        msg.body = json.dumps(content)
+        await self.send(msg)
+
     async def deassign_customer(self):
         """
         Triggered when, by any reason, a customer cancels their already accepted booking

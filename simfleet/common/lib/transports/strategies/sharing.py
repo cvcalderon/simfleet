@@ -276,34 +276,34 @@ class StationTransportInDestinationState(SharingStrategyBehaviour):
             self.set_next_state(TRANSPORT_IN_DEST)
             return
         logger.debug("Transport {} received: {}".format(self.agent.jid, msg))
+        sender = msg.sender
         content = json.loads(msg.body)
         performative = msg.get_metadata("performative")
 
         if performative == INFORM_PERFORMATIVE:
-            try:
-                await self.pick_up_customer_in_station(content["customer_id"], content["origin"], content["dest"])
-                # CHECK APPROPRIATE UPDATE OF STATUS
-                self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
-                return
-            except PathRequestException:
-                logger.error("Transport {} could not get a path to customer {}. Cancelling..."
-                             .format(self.agent.name, content["customer_id"]))
-                await self.refuse_customer(content["customer_id"])
-                self.agent.set_registration(
-                    status=False)  # Registro esta a FALSE para que se registre nuevamente en la estación.
+
+            available = content.get("available_place")
+
+            logger.warning("DEBUG: Agent {} - available: {}".format(self.agent.jid, available))
+
+            if available:
+                station = content["station"]
+                self.agent.fleetmanager_id = station
+                content = {"service_name": self.agent.fleet_type, "register": True}
+                await self.inform_station(station, content)
+
+                logger.warning("DEBUG: Transport {} - Fleetmanager: {} - content: {}".format(self.agent.jid, self.agent.fleetmanager_id, content))
+
                 self.set_next_state(TRANSPORT_WAITING)
                 return
-            except Exception as e:
-                logger.error("Unexpected error in transport {}: {}".format(self.agent.name, e))
-                await self.refuse_customer(content["customer_id"])
-                self.agent.set_registration(
-                    status=False)  # Registro esta a FALSE para que se registre nuevamente en la estación.
-                self.set_next_state(TRANSPORT_WAITING)
+            else:
+                self.set_next_state(TRANSPORT_IN_DEST)
                 return
+
         else:
             logger.debug("Transport {} received an unexpected message from {} with content {}"
                          .format(self.agent.name, msg.sender, content))
-            self.set_next_state(TRANSPORT_WAITING)
+            self.set_next_state(TRANSPORT_IN_DEST)
             return
 
 

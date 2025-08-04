@@ -88,6 +88,11 @@ class SharingCustomerAgent(PedestrianAgent):
             logger.debug("Customer {} has arrived to its moving destination. Status: {}".format(self.agent_id, self.status))
             # inform the transport
             await self.arrived_to_transport()
+        elif self.destination_station[1] == self.get_position():
+            logger.debug(
+                "Customer {} has arrived to its moving destination. Status: {}".format(self.agent_id, self.status))
+            # inform the transport
+            self.set("arrived_to_destination", True)
 
     def run_strategy(self):
         # CHECK IF IT NEEDS MODIFICATION
