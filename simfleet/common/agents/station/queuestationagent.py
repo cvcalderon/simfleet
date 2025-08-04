@@ -287,6 +287,8 @@ class QueueStationAgent(GeoLocatedAgent):
 
                     if "args" in content:
                         arguments = content["args"]
+                    else:
+                        arguments = {}
 
                     # Check proximity before enqueuing
                     template3 = Template()

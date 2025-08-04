@@ -213,7 +213,7 @@ class ServiceStationAgent(QueueStationAgent):
         return len(self.services_list[service_name]["agents"])
 
     def assign_agent(self, service_name):
-        if self.has_available_transport(service_name):
+        if self.has_available_agent(service_name):
             return self.services_list[service_name]["agents"].pop(0)
         return None
 
@@ -337,7 +337,7 @@ class ServiceStationAgent(QueueStationAgent):
             msg.body = json.dumps(content)
             await self.send(msg)
             logger.info(
-                f"Agent[{self.name}]: Notified customer [{customer_jid}] about transport [{transport_jid}] for service [{service_name}]"
+                f"Agent[{self.agent.name}]: Notified customer [{customer_jid}] about transport [{transport_jid}] for service [{service_name}]"
             )
 
         async def on_start(self):
