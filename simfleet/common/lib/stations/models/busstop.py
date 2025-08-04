@@ -78,7 +78,7 @@ class BusStopAgent(QueueStationAgent):
                     self.agent_id, e
                 )
             )
-        self.ready = True
+        #self.ready = True
 
     #Cambiar en mas lugares
     def set_name(self, name):
@@ -176,6 +176,7 @@ class RegistrationBehaviour(CyclicBehaviour):
                 performative = msg.get_metadata("performative")
                 if performative == ACCEPT_PERFORMATIVE:
                     self.set_registration(True)
+                    self.ready = True
                     logger.debug("Registration in the directory")
         except CancelledError:
             logger.debug("Cancelling async tasks...")

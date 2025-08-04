@@ -63,7 +63,7 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
                     )
                 )
                 self.add_behaviour(register_behaviour, template)
-            self.ready = True
+            #self.ready = True
         except Exception as e:
             logger.error(
                 "EXCEPTION creating RegisterBehaviour in agent [{}]: {}".format(
@@ -163,6 +163,13 @@ class RegistrationBehaviour(CyclicBehaviour):
         await self.send(msg)
 
     async def run(self):
+
+        logger.warning(
+            "Agent[{}]: DEBBUG - Registe: [{}].".format(
+                self.agent.name, self.agent.registration
+            )
+        )
+
         try:
             if not self.agent.registration and self.agent.fleetmanager_id != None:
                 await self.send_registration()
@@ -172,6 +179,7 @@ class RegistrationBehaviour(CyclicBehaviour):
                 if performative == ACCEPT_PERFORMATIVE:
                     content = json.loads(msg.body)
                     self.agent.set_registration(True, content)
+                    self.agent.ready = True
                     logger.info(
                         "Agent[{}]: Registration in the fleet manager [{}] accepted.".format(
                             self.agent.name, self.agent.fleetmanager_id
