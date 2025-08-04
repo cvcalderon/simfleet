@@ -87,7 +87,7 @@ class SharingStationAgent(ServiceStationAgent):
                     self.agent_id, e
                 )
             )
-        self.ready = True
+        #self.ready = True
 
     #Cambiar en mas lugares
     def set_name(self, name):
@@ -188,6 +188,7 @@ class RegistrationBehaviour(CyclicBehaviour):
                 performative = msg.get_metadata("performative")
                 if performative == ACCEPT_PERFORMATIVE:
                     self.set_registration(True)
+                    self.agent.ready = True
                     logger.debug("Registration in the directory")
         except CancelledError:
             logger.debug("Cancelling async tasks...")
@@ -220,11 +221,11 @@ class SharingStationStrategyBehaviour(CyclicBehaviour):
 
         if not self.agent.is_station_full(service_name):
             await self.inform_customer(agent, True)
-            logger.debug(f"Agent[{self.name}]: Inform to the agent [{agent}] that the station is not full.")
+            logger.debug(f"Agent[{self.agent.name}]: Inform to the agent [{agent}] that the station is not full.")
             return True
         else:
             await self.inform_customer(agent, False)
-            logger.warning(f"Agent[{self.name}]: Inform to the agent [{agent}] that the station is full.")
+            logger.warning(f"Agent[{self.agent.name}]: Inform to the agent [{agent}] that the station is full.")
             return False
 
 
@@ -258,4 +259,15 @@ class SharingStationStrategyBehaviour(CyclicBehaviour):
             service_name = content["service_name"]
 
             if performative == INFORM_PERFORMATIVE:
-                await self.check_available_place(service_name, sender)
+
+                if "register" in content:
+                    register = content["register"]
+                else:
+                    register = None
+
+                if register and register!=None:
+
+                    self.agent.register_agent(service_name, sender)
+
+                elif register==None:
+                    await self.check_available_place(service_name, sender)
