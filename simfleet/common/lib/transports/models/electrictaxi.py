@@ -9,6 +9,7 @@ from simfleet.communications.protocol import (
     PROPOSE_PERFORMATIVE,
     CANCEL_PERFORMATIVE,
     REQUEST_PERFORMATIVE,
+    INFORM_PERFORMATIVE,
 )
 
 from simfleet.common.mixins.chargeable import ChargeableMixin

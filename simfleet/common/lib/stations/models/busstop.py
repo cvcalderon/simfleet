@@ -176,7 +176,7 @@ class RegistrationBehaviour(CyclicBehaviour):
                 performative = msg.get_metadata("performative")
                 if performative == ACCEPT_PERFORMATIVE:
                     self.set_registration(True)
-                    self.ready = True
+                    self.agent.ready = True
                     logger.debug("Registration in the directory")
         except CancelledError:
             logger.debug("Cancelling async tasks...")
