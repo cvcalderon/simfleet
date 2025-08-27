@@ -236,7 +236,7 @@ class SimulatorAgent(Agent):
         await self.gather_batch(all_agents)
 
     async def gather_batch(self, all_coroutines):
-        agents_batch = 200
+        agents_batch = 40
         number = max(len(all_coroutines), 0)
         iterations = [agents_batch] * (number // agents_batch)
         if number % agents_batch:
