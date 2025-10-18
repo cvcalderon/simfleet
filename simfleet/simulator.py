@@ -178,11 +178,12 @@ class SimulatorAgent(Agent):
                 if "password" in manager
                 else faker_factory.password()
             )
+            class_ = manager["class"]
             fleet_type = manager["fleet_type"]
             strategy = manager.get("strategy")
             icon = manager.get("icon")
             agent = self.create_fleetmanager_agent(
-                name, password, fleet_type=fleet_type, strategy=strategy
+                name, password, class_, fleet_type=fleet_type, strategy=strategy
             )
 
             self.set_icon(agent, icon, default=fleet_type)
@@ -1064,12 +1065,13 @@ class SimulatorAgent(Agent):
         await agent.start()
 
     def create_fleetmanager_agent(
-        self, name, password, fleet_type, strategy=None, icon=None
+        self, name, password, class_, fleet_type, strategy=None, icon=None
     ):
         agent = FleetManagerFactory.create_agent(
             domain=self.jid.domain,
             name=name,
             password=password,
+            class_=class_,
             default_strategy=self.default_strategies["fleetmanager"],
             strategy=strategy,
             jid_directory=self.get_directory().jid,

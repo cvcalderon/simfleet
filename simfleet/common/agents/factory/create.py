@@ -147,7 +147,15 @@ class FleetManagerFactory(Factory):
                         """
         jid = f"{name}@{domain}"
         logger.debug("Creating FleetManager agent: {}".format(jid))
-        agent = FleetManagerAgent(jid, password)
+
+        # Load and instantiate agent class
+        if type(class_) is str:
+            agent_class = load_class(class_)
+            agent = agent_class(jid, password)
+        else:
+            raise Exception("The agent needs a class in path format.")
+
+        #agent = FleetManagerAgent(jid, password)
         agent.set_id(name)
         agent.set_directory(jid_directory)
 
