@@ -8,7 +8,7 @@ from spade.behaviour import OneShotBehaviour
 
 from simfleet.common.simfleetagent import SimfleetAgent
 
-from simfleet.utils.helpers import new_random_position, distance_in_meters
+from simfleet.utils.helpers import new_random_position
 from simfleet.communications.protocol import INFORM_PERFORMATIVE, QUERY_PROTOCOL, REQUEST_PERFORMATIVE, CANCEL_PERFORMATIVE
 
 class GeoLocatedAgent(SimfleetAgent):
@@ -95,53 +95,6 @@ class GeoLocatedAgent(SimfleetAgent):
         })
         return data
 
-    def near_agent(self, coords_1, coords_2):
-        """
-            Determines if two agents are near each other, within 100 meters.
-
-            Args:
-                coords_1 (list): The coordinates of the first agent.
-                coords_2 (list): The coordinates of the second agent.
-
-            Returns:
-                bool: True if the agents are near each other, False otherwise.
-        """
-        if geopy.distance.geodesic(coords_1, coords_2).km > 0.1:
-            return False
-        return True
-
-
-    def nearst_agent(self, agent_list, position):
-        """
-            Finds the closest agent from a list of agents to the specified position.
-
-            Args:
-                agent_list (dict): A dictionary of agents with their positions.
-                position (list): The position to compare against.
-
-            Returns:
-                tuple: The closest agent's JID and position.
-        """
-
-        agent_positions = []
-        for key in agent_list.keys():
-            dic = agent_list.get(key)
-            agent_positions.append((dic["jid"], dic["position"]))
-
-        closest_agent = min(
-            agent_positions,
-            key=lambda x: distance_in_meters(x[1], position),
-        )
-        logger.debug("Closest agent {}".format(closest_agent))
-        agent = closest_agent[0]
-        result = (
-            agent,
-            agent_list[agent]["position"],
-        )
-        logger.info(
-            "Agent[{}]: The agent selected agent ({}).".format(self.name, agent)
-        )
-        return result
 
     def set_boundingbox(self, bbox):
         """
