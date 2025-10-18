@@ -1,5 +1,7 @@
 import json
+import ast
 from loguru import logger
+from rich.status import Status
 
 from spade.behaviour import State
 from spade.message import Message
@@ -15,6 +17,9 @@ from simfleet.communications.protocol import (
 )
 
 from simfleet.common.agents.transport import TransportAgent
+
+from spade.presence import PresenceManager
+from spade.presence import PresenceType, PresenceShow, PresenceInfo
 
 class TaxiAgent(TransportAgent):
     """
@@ -38,8 +43,51 @@ class TaxiAgent(TransportAgent):
         self.set("assigned_customer", {})
         self.fleetmanager_id = kwargs.get('fleet', None)
 
+        # Presence variable
+        self.status_info = None
+
     async def setup(self):
+
         await super().setup()
+
+        # Presence
+        # -------------------------
+        self.presence.on_subscribe = self.on_subscribe
+        self.presence.on_subscribed = self.on_subscribed
+        self.presence.on_available = self.on_available
+        # -------------------------
+
+        self.presence.subscribe(self.fleetmanager_id)
+
+
+    # Presence
+    # -------------------------
+    def on_available(self, peer_jid, presence_info, last_presence):
+        """Marca un transporte como 'available' cuando se vuelve activo."""
+        logger.info(f"[{self.name}] Agent {peer_jid.split('@')[0]} is {presence_info.show.value}")
+
+    def on_subscribed(self, peer_jid):
+        logger.info(f"[{self.name}] Agent {peer_jid.split('@')[0]} has accepted the subscription")
+        contacts = self.presence.get_contacts()
+        logger.info(f"[{self.name}] Contacts List: {contacts}")
+
+        if self.status_info is None:
+            self.status_info = (self.get("current_pos"), 0)
+
+        self.presence.set_presence(
+            presence_type=PresenceType.AVAILABLE,
+            show=PresenceShow.CHAT,
+            status=str(self.status_info),
+        )
+        # self.presence.subscribe(str(peer_jid))
+
+    def on_subscribe(self, peer_jid):
+        logger.info(f"[{self.name}] Agent {peer_jid.split('@')[0]} asked for subscription. Let's approve it")
+        self.presence.approve_subscription(peer_jid)
+        #self.presence.subscribe(peer_jid)
+
+    # -------------------------
+
 
     async def add_assigned_taxicustomer(self, customer_id, origin=None, dest=None):
         customers = self.get("assigned_customer")
@@ -48,6 +96,28 @@ class TaxiAgent(TransportAgent):
 
     async def remove_assigned_taxicustomer(self):
         self.set("assigned_customer", {})
+
+
+    # Using Presence
+    #-------------------------
+
+    async def update_presence_info(self, type: str, status: str):
+
+        if type == "available":
+            self.presence.set_presence(
+                presence_type=PresenceType.AVAILABLE,
+                show=PresenceShow.CHAT,
+                status=status,
+            )
+
+        elif type == "busy":
+            self.presence.set_presence(
+                presence_type=PresenceType.UNAVAILABLE,
+                show=PresenceShow.CHAT,
+                status=status,
+            )
+
+
 
 class TaxiStrategyBehaviour(State):
     """
@@ -83,6 +153,30 @@ class TaxiStrategyBehaviour(State):
                 self.agent.name, type(self).__name__
             )
         )
+
+    async def assigned_taxicustomer(self, customer_id, origin=None, dest=None):
+
+        await self.agent.add_assigned_taxicustomer(customer_id, origin, dest)
+
+        await self.agent.update_presence_info(type="busy", status=str(self.agent.status_info))
+
+    async def unassigned_taxicustomer(self):
+
+        await self.agent.remove_assigned_taxicustomer()
+
+        self.prepare_status_info()
+
+        await self.agent.update_presence_info(type="available", status=str(self.agent.status_info))
+
+    def prepare_status_info(self):
+
+        position, value = self.agent.status_info
+        value += 1
+
+        new_info = (self.agent.get("current_pos"), value)
+
+        self.agent.status_info = new_info
+
 
     async def send_proposal(self, customer_id, content=None):
         """

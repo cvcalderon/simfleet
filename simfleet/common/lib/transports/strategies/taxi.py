@@ -117,7 +117,12 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                     customer_id=content["customer_id"], status=TRANSPORT_MOVING_TO_CUSTOMER
                 )
 
-                await self.agent.add_assigned_taxicustomer(
+               # await self.agent.add_assigned_taxicustomer(
+               #     customer_id=content["customer_id"],
+               #     origin=content["origin"], dest=content["dest"]
+               # )
+
+                await self.assigned_taxicustomer(
                     customer_id=content["customer_id"],
                     origin=content["origin"], dest=content["dest"]
                 )
@@ -300,7 +305,9 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
                         self.agent.add_customer_in_transport(
                             customer_id=customer_id, dest=dest
                         )
-                        await self.agent.remove_assigned_taxicustomer()
+                        #await self.agent.remove_assigned_taxicustomer()
+
+                        await self.unassigned_taxicustomer()
 
                         logger.info(
                             "Agent[{}]: The agent on route to [{}] destination.".format(self.agent.name, customer_id)
