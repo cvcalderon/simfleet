@@ -57,7 +57,13 @@ class TaxiAgent(TransportAgent):
         self.presence.on_available = self.on_available
         # -------------------------
 
-        self.presence.subscribe(self.fleetmanager_id)
+        if self.status_info is None:
+            self.status_info = (self.get("current_pos"), 0)
+
+        if self.fleetmanager_id:
+            self.presence.subscribe(self.fleetmanager_id)
+
+        self.publish_presence()
 
 
     # Presence
@@ -71,14 +77,7 @@ class TaxiAgent(TransportAgent):
         contacts = self.presence.get_contacts()
         logger.info(f"[{self.name}] Contacts List: {contacts}")
 
-        if self.status_info is None:
-            self.status_info = (self.get("current_pos"), 0)
-
-        self.presence.set_presence(
-            presence_type=PresenceType.AVAILABLE,
-            show=PresenceShow.CHAT,
-            status=str(self.status_info),
-        )
+        self.publish_presence()
         # self.presence.subscribe(str(peer_jid))
 
     def on_subscribe(self, peer_jid):
@@ -87,6 +86,14 @@ class TaxiAgent(TransportAgent):
         #self.presence.subscribe(peer_jid)
 
     # -------------------------
+
+
+    def publish_presence(self):
+        self.presence.set_presence(
+            presence_type=PresenceType.AVAILABLE,
+            show=PresenceShow.CHAT,
+            status=str(self.status_info),
+        )
 
 
     async def add_assigned_taxicustomer(self, customer_id, origin=None, dest=None):

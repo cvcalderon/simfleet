@@ -58,6 +58,8 @@ class LogisticFleetManagerAgent(FleetManagerAgent):
         self.presence.on_available = self.on_available
         # -------------------------
 
+        self.publish_presence()
+
 
 
     # Presence
@@ -71,11 +73,7 @@ class LogisticFleetManagerAgent(FleetManagerAgent):
         contacts = self.presence.get_contacts()
         logger.info(f"[{self.name}] Contacts List: {contacts}")
 
-        self.presence.set_presence(
-            presence_type=PresenceType.AVAILABLE,
-            show=PresenceShow.CHAT,
-            status="FleetManager ready",
-        )
+        self.publish_presence()
         # self.presence.subscribe(str(peer_jid))
 
     def on_subscribe(self, peer_jid):
@@ -84,6 +82,13 @@ class LogisticFleetManagerAgent(FleetManagerAgent):
         self.presence.subscribe(peer_jid)
 
     # -------------------------
+
+    def publish_presence(self):
+        self.presence.set_presence(
+            presence_type=PresenceType.AVAILABLE,
+            show=PresenceShow.CHAT,
+            status="FleetManager ready",
+        )
 
     def _is_available(self, presence_type):
 

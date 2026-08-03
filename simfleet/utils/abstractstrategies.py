@@ -48,7 +48,6 @@ class FSMSimfleetBehaviour(FSMBehaviour):
             event_type="initial_event",
             details={}
         )
-        await super().on_start()
 
     async def on_end(self) -> None:
         """
@@ -58,5 +57,3 @@ class FSMSimfleetBehaviour(FSMBehaviour):
             event_type="final_event",
             details={}
         )
-        await super().on_end()
-
