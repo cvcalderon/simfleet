@@ -1,19 +1,11 @@
-import asyncio
 import json
-import time
 import ast
 
-from asyncio import Queue
-
 from simfleet.utils.helpers import distance_in_meters
-from spade.presence import PresenceManager
-from spade.message import Message
+from spade.presence import PresenceNotFound
 from loguru import logger
 
 from simfleet.common.lib.fleet.models.logisticfleetmanager import LogisticFleetManagerStrategyBehaviour
-
-from simfleet.communications.protocol import REQUEST_PROTOCOL, REQUEST_PERFORMATIVE, QUERY_PROTOCOL, INFORM_PERFORMATIVE
-from simfleet.utils.status import TRANSPORT_WAITING
 
 
 ################################################################
@@ -22,10 +14,74 @@ from simfleet.utils.status import TRANSPORT_WAITING
 #                                                              #
 ################################################################
 
-class NearRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
-    """
-    The default strategy for the FleetManager agent. By default it delegates all requests to all transports.
-    """
+class PresenceRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
+    """Selects a transport from presence data and falls back to registered transports."""
+
+    sort_key = staticmethod(lambda candidate: candidate[0])
+
+    async def _broadcast_to_registered_transports(self, msg):
+        transports = self.get_transport_agents() or {}
+        if not transports:
+            logger.warning(
+                "Agent[{}]: no registered transports available for broadcast.".format(
+                    self.agent.name
+                )
+            )
+            return
+
+        logger.warning(
+            "Agent[{}]: no valid presence candidates. Broadcasting to {} registered transports.".format(
+                self.agent.name, len(transports)
+            )
+        )
+        for transport in transports.values():
+            msg.to = str(transport["jid"])
+            logger.debug(
+                "Manager sent request to transport {}".format(transport["name"])
+            )
+            await self.send(msg)
+
+    def _get_presence_candidates(self, origin):
+        candidates = []
+        contacts = self.agent.presence.get_contacts()
+
+        for jid in contacts:
+            try:
+                presence = self.agent.presence.get_contact_presence(jid)
+            except PresenceNotFound:
+                logger.debug(
+                    "Agent[{}]: skipping [{}], no presence information yet.".format(
+                        self.agent.name, jid
+                    )
+                )
+                continue
+
+            if not self.agent._is_available(presence.type):
+                continue
+
+            try:
+                status_presence = ast.literal_eval(presence.status)
+                pos, clients = status_presence
+            except (SyntaxError, ValueError, TypeError):
+                logger.debug(
+                    "Agent[{}]: skipping [{}], invalid presence status: {!r}.".format(
+                        self.agent.name, jid, presence.status
+                    )
+                )
+                continue
+
+            if pos is None:
+                logger.debug(
+                    "Agent[{}]: skipping [{}], presence has no position.".format(
+                        self.agent.name, jid
+                    )
+                )
+                continue
+
+            dist = distance_in_meters(pos, origin)
+            candidates.append((dist, clients, str(jid), pos))
+
+        return candidates
 
     async def run(self):
         if not self.agent.registration:
@@ -34,241 +90,59 @@ class NearRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
         msg = await self.receive(timeout=5)
 
         logger.debug("Manager received message: {}".format(msg))
-        if msg:
+        if not msg:
+            return
 
-            content = json.loads(msg.body)
+        content = json.loads(msg.body)
+        origin = content.get("origin")
 
-            if "origin" in content:
-                origin = content["origin"]
-
-            contacts = self.agent.presence.get_contacts()
-            candidates = []
-
-            for jid, contact in contacts.items():
-
-                presence = self.agent.presence.get_contact_presence(jid)
-
-                current_presence = presence.type
-                status_presence = ast.literal_eval(presence.status) #Castear a tupla
-
-                if not self.agent._is_available(current_presence):
-                    continue
-
-                pos, clients = status_presence
-                dist = distance_in_meters(pos, origin)
-
-                candidates.append((dist, clients, str(jid), pos))
-
-            if not candidates:
-                logger.warning("Agent[{}]: no available transports. Falling back to broadcast.".format(self.agent.name))
-                return
-
-            # Orden: primero menor distancia, luego menor nº de clientes
-            #candidates.sort(key=lambda t: (t[0], t[1]))
-
-            # Orden: primero menor nº de clientes, luego menor distancia
-            #candidates.sort(key=lambda t: (t[1], t[0]))
-
-            # Orden: primero menor distancia solo
-            candidates.sort(key=lambda t: t[0])
-
-            # Orden: primero menor nº de clientes
-            #candidates.sort(key=lambda t: t[1])
-
-            best_dist, best_clients, best_jid, best_pos = candidates[0]
-
-            logger.info(
-                "Agent [{}]: Candidate {}".format(self.agent.name, candidates[0])
+        if origin is None:
+            logger.warning(
+                "Agent[{}]: request has no origin. Falling back to broadcast.".format(
+                    self.agent.name
+                )
             )
+            await self._broadcast_to_registered_transports(msg)
+            return
 
-            msg.to = str(best_jid)
-            await self.send(msg)
+        candidates = self._get_presence_candidates(origin)
+
+        if not candidates:
+            await self._broadcast_to_registered_transports(msg)
+            return
+
+        candidates.sort(key=self.sort_key)
+        best_dist, best_clients, best_jid, best_pos = candidates[0]
+
+        logger.info("Agent [{}]: Candidate {}".format(self.agent.name, candidates[0]))
+
+        msg.to = str(best_jid)
+        await self.send(msg)
 
 
-class FewerCustomersRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
+class NearRequestBehaviour(PresenceRequestBehaviour):
     """
-    The default strategy for the FleetManager agent. By default it delegates all requests to all transports.
+    Selects the nearest available transport according to presence data.
     """
-
-    async def run(self):
-        if not self.agent.registration:
-            await self.send_registration()
-
-        msg = await self.receive(timeout=5)
-
-        logger.debug("Manager received message: {}".format(msg))
-        if msg:
-
-            content = json.loads(msg.body)
-
-            if "origin" in content:
-                origin = content["origin"]
-
-            contacts = self.agent.presence.get_contacts()
-            candidates = []
-
-            for jid, contact in contacts.items():
-
-                presence = self.agent.presence.get_contact_presence(jid)
-
-                current_presence = presence.type
-                status_presence = ast.literal_eval(presence.status) #Castear a tupla
-
-                if not self.agent._is_available(current_presence):
-                    continue
-
-                pos, clients = status_presence
-                dist = distance_in_meters(pos, origin)
-
-                candidates.append((dist, clients, str(jid), pos))
-
-            if not candidates:
-                logger.warning("Agent[{}]: no available transports. Falling back to broadcast.".format(self.agent.name))
-                return
-
-            # Orden: primero menor distancia, luego menor nº de clientes
-            #candidates.sort(key=lambda t: (t[1], t[0]))
-
-            # Orden: primero menor nº de clientes, luego menor distancia
-            #candidates.sort(key=lambda t: (t[0], t[1]))
-
-            # Orden: primero menor distancia solo
-            #candidates.sort(key=lambda t: t[0])
-
-            # Orden: primero menor nº de clientes
-            candidates.sort(key=lambda t: t[1])
-
-            best_dist, best_clients, best_jid, best_pos = candidates[0]
-
-            logger.info(
-                "Agent [{}]: Candidate {}".format(self.agent.name, candidates[0])
-            )
-
-            msg.to = str(best_jid)
-            await self.send(msg)
+    sort_key = staticmethod(lambda candidate: candidate[0])
 
 
-class FewerCustomersAndNearRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
+class FewerCustomersRequestBehaviour(PresenceRequestBehaviour):
     """
-    The default strategy for the FleetManager agent. By default it delegates all requests to all transports.
+    Selects the available transport with the fewest assigned customers.
     """
-
-    async def run(self):
-        if not self.agent.registration:
-            await self.send_registration()
-
-        msg = await self.receive(timeout=5)
-
-        logger.debug("Manager received message: {}".format(msg))
-        if msg:
-
-            content = json.loads(msg.body)
-
-            if "origin" in content:
-                origin = content["origin"]
-
-            contacts = self.agent.presence.get_contacts()
-            candidates = []
-
-            for jid, contact in contacts.items():
-
-                presence = self.agent.presence.get_contact_presence(jid)
-
-                current_presence = presence.type
-                status_presence = ast.literal_eval(presence.status) #Castear a tupla
-
-                if not self.agent._is_available(current_presence):
-                    continue
-
-                pos, clients = status_presence
-                dist = distance_in_meters(pos, origin)
-
-                candidates.append((dist, clients, str(jid), pos))
-
-            if not candidates:
-                logger.warning("Agent[{}]: no available transports. Falling back to broadcast.".format(self.agent.name))
-                return
-
-            # Orden: primero menor distancia, luego menor nº de clientes
-            #candidates.sort(key=lambda t: (t[0], t[1]))
-
-            # Orden: primero menor nº de clientes, luego menor distancia
-            candidates.sort(key=lambda t: (t[1], t[0]))
-
-            # Orden: primero menor distancia solo
-            #candidates.sort(key=lambda t: t[0])
-
-            # Orden: primero menor nº de clientes
-            #candidates.sort(key=lambda t: t[1])
-
-            best_dist, best_clients, best_jid, best_pos = candidates[0]
-
-            logger.info(
-                "Agent [{}]: Candidate {}".format(self.agent.name, candidates[0])
-            )
-
-            msg.to = str(best_jid)
-            await self.send(msg)
+    sort_key = staticmethod(lambda candidate: candidate[1])
 
 
-class NearAndFewerCustomersRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
+class FewerCustomersAndNearRequestBehaviour(PresenceRequestBehaviour):
     """
-    The default strategy for the FleetManager agent. By default it delegates all requests to all transports.
+    Selects by fewer assigned customers first, then nearest distance.
     """
+    sort_key = staticmethod(lambda candidate: (candidate[1], candidate[0]))
 
-    async def run(self):
-        if not self.agent.registration:
-            await self.send_registration()
 
-        msg = await self.receive(timeout=5)
-
-        logger.debug("Manager received message: {}".format(msg))
-        if msg:
-
-            content = json.loads(msg.body)
-
-            if "origin" in content:
-                origin = content["origin"]
-
-            contacts = self.agent.presence.get_contacts()
-            candidates = []
-
-            for jid, contact in contacts.items():
-
-                presence = self.agent.presence.get_contact_presence(jid)
-
-                current_presence = presence.type
-                status_presence = ast.literal_eval(presence.status) #Castear a tupla
-
-                if not self.agent._is_available(current_presence):
-                    continue
-
-                pos, clients = status_presence
-                dist = distance_in_meters(pos, origin)
-
-                candidates.append((dist, clients, str(jid), pos))
-
-            if not candidates:
-                logger.warning("Agent[{}]: no available transports. Falling back to broadcast.".format(self.agent.name))
-                return
-
-            # Orden: primero menor distancia, luego menor nº de clientes
-            candidates.sort(key=lambda t: (t[0], t[1]))
-
-            # Orden: primero menor nº de clientes, luego menor distancia
-            #candidates.sort(key=lambda t: (t[1], t[0]))
-
-            # Orden: primero menor distancia solo
-            #candidates.sort(key=lambda t: t[0])
-
-            # Orden: primero menor nº de clientes
-            #candidates.sort(key=lambda t: t[1])
-
-            best_dist, best_clients, best_jid, best_pos = candidates[0]
-
-            logger.info(
-                "Agent [{}]: Candidate {}".format(self.agent.name, candidates[0])
-            )
-
-            msg.to = str(best_jid)
-            await self.send(msg)
+class NearAndFewerCustomersRequestBehaviour(PresenceRequestBehaviour):
+    """
+    Selects by nearest distance first, then fewer assigned customers.
+    """
+    sort_key = staticmethod(lambda candidate: (candidate[0], candidate[1]))
