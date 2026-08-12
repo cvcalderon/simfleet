@@ -275,6 +275,9 @@ class SimulatorAgent(Agent):
             current_autonomy = transport.get("current_autonomy")
             speed = transport.get("speed")
             optional = transport.get("optional")
+            # New implementation v1
+            registration = transport.get("registration")
+            # ---------------------
             line = transport.get("line")
             capacity = transport.get("capacity")
             icon = transport.get("icon")
@@ -299,6 +302,7 @@ class SimulatorAgent(Agent):
                 delayed=delayed,
                 capacity=capacity,
                 line=line,
+                registration=registration,
             )
             self.set_icon(agent, icon, default="transport")
 
@@ -376,6 +380,9 @@ class SimulatorAgent(Agent):
             position = station.get("position")
             services = station.get("services")
             icon = station.get("icon")
+            # New implementation v1
+            registration = station.get("registration")
+            # ---------------------
             agent = self.create_station_agent(
                 name=station["name"],
                 password=password,
@@ -383,6 +390,7 @@ class SimulatorAgent(Agent):
                 class_=class_,
                 services=services,
                 strategy=strategy,
+                registration=registration,
             )
             self.set_icon(agent, icon, default="electric_station")
 
@@ -433,6 +441,9 @@ class SimulatorAgent(Agent):
             speed = transport.get("speed")
             target = transport.get("destination")
             strategy = transport.get("strategy")
+            # New implementation v1
+            registration = transport.get("registration")
+            # ---------------------
             icon = transport.get("icon")
             delay = transport["delay"] if "delay" in transport else None
 
@@ -449,6 +460,7 @@ class SimulatorAgent(Agent):
                 strategy=strategy,
                 delayed=delayed,
                 target=target,
+                registration=registration,
             )
             self.set_icon(agent, icon, default="drone")
 
@@ -1102,6 +1114,7 @@ class SimulatorAgent(Agent):
         delayed=False,
         capacity=None,
         line=None,
+        registration=None,
     ):
 
         agent = TransportFactory.create_agent(
@@ -1124,6 +1137,7 @@ class SimulatorAgent(Agent):
             capacity=capacity,
             line=line,
             lines=self.bus_lines,
+            registration=registration,
         )
 
         if self.simulation_running:
@@ -1179,7 +1193,7 @@ class SimulatorAgent(Agent):
         return agent
 
     def create_station_agent(
-        self, name, password, position, class_, services, strategy=None
+        self, name, password, position, class_, services, strategy=None, registration=None
     ):
 
         agent = StationFactory.create_agent(
@@ -1195,6 +1209,7 @@ class SimulatorAgent(Agent):
             bbox=self.config.coords[1],
             position=position,
             services=services,
+            registration=registration,
         )
         if self.simulation_running:
             agent.run_strategy()
@@ -1215,6 +1230,7 @@ class SimulatorAgent(Agent):
         speed=None,
         delayed=False,
         target=None,
+        registration=None,
     ):
 
         agent = VehicleFactory.create_agent(
@@ -1230,6 +1246,7 @@ class SimulatorAgent(Agent):
             position=position,
             speed=speed,
             target=target,
+            registration=registration,
         )
 
         if self.simulation_running:

@@ -14,6 +14,21 @@ class Factory(ABC):
         and implement the create_agent method.
 
     """
+
+    # New implementation v1
+
+    @classmethod
+    def configure_registration(cls, agent, registration, domain):
+        if registration:
+            fleet = registration.get("fleet")
+            presence = registration.get("presence", False)
+
+            if fleet:
+                fleet_jid = "{}@{}".format(fleet, domain)
+                agent.configure_registration(fleet_jid, presence)
+
+    # ---------------------
+
     @classmethod
     @abstractmethod
     def create_agent(cls,
@@ -199,7 +214,8 @@ class TransportFactory(Factory):
                      capacity=None,
                      line=None,
                      lines=None,
-                     max_walking_dist=None
+                     max_walking_dist=None,
+                     registration=None
                     ):
         """
         Create a Transport agent.
@@ -243,6 +259,14 @@ class TransportFactory(Factory):
 
         agent.set_id(name)
         agent.set_directory(jid_directory)
+
+        # New implementation v1
+        cls.configure_registration(
+            agent,
+            registration,
+            domain
+        )
+        # ---------------------
 
         # Load strategy if provided
         if type(strategy) is str:
@@ -402,7 +426,8 @@ class StationFactory(Factory):
                     capacity=None,
                     line=None,
                     lines=None,
-                    max_walking_dist=None
+                    max_walking_dist=None,
+                    registration=None
                     ):
 
         """
@@ -436,6 +461,14 @@ class StationFactory(Factory):
 
         agent.set_id(name)
         agent.set_directory(jid_directory)
+
+        # New implementation v1
+        cls.configure_registration(
+            agent,
+            registration,
+            domain
+        )
+        # ---------------------
 
         # Set route host, and additional attributes
         agent.set_route_host(route_host)
@@ -587,7 +620,8 @@ class VehicleFactory(Factory):
                     capacity=None,
                     line=None,
                     lines=None,
-                    max_walking_dist=None
+                    max_walking_dist=None,
+                    registration=None
                     ):
         """
         Create a Vehicle agent.
@@ -613,6 +647,14 @@ class VehicleFactory(Factory):
         agent = VehicleAgent(jid, password)
         agent.set_id(name)
         agent.set_directory(jid_directory)
+
+        # New implementation v1
+        cls.configure_registration(
+            agent,
+            registration,
+            domain
+        )
+        # ---------------------
 
         # Load strategy if provided
         if type(strategy) is str:
