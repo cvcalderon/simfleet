@@ -51,6 +51,9 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
             Sets up the vehicle agent, registers it with the fleet manager, and ensures that
             the agent has the required behaviors for communication.
         """
+
+        await super().setup()
+
         try:
             template = Template()
             template.set_metadata("protocol", REGISTER_PROTOCOL)

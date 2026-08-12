@@ -65,6 +65,9 @@ class QueueStationAgent(GeoLocatedAgent):
         """
         Configures the agent, setting up the behavior templates to handle different performative messages.
         """
+
+        await super().setup()
+
         logger.debug("Agent[{}]: Queue station running".format(self.name))
 
         template1 = Template()

@@ -37,6 +37,9 @@ class CustomerAgent(GeoLocatedAgent):
             Sets up the customer agent, ensuring that the agent is prepared for travel by creating the required
             behaviours and assigning a travel strategy.
         """
+
+        await super().setup()
+
         try:
             template = Template()
             template.set_metadata("protocol", TRAVEL_PROTOCOL)

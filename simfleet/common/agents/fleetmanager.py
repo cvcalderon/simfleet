@@ -53,6 +53,7 @@ class FleetManagerAgent(SimfleetAgent):
             Sets up the FleetManager agent by registering a behavior that handles the registration of transport agents.
             This method is called automatically when the agent is started.
         """
+        await super().setup()
         logger.info("FleetManager agent {} running".format(self.name))
         try:
             template = Template()

@@ -29,6 +29,8 @@ class GeoLocatedAgent(SimfleetAgent):
 
         self.icon = None
 
+    async def setup(self):
+        await super().setup()
 
     def set_icon(self, icon):
         """
