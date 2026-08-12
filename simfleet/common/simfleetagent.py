@@ -10,6 +10,7 @@ from spade.message import Message
 from simfleet.utils.helpers import distance_in_meters
 
 from simfleet.utils.statistics import StatisticsStore
+from spade.presence import PresenceType, PresenceShow
 
 class SimfleetAgent(Agent):
     """
@@ -47,13 +48,120 @@ class SimfleetAgent(Agent):
         self.directory_id = None
         self.status = None
         self.fleet_type = None
-        self.registration = None
 
         self.init_time = None   #Change
         self.end_time = None    #Change
 
+        # New - Implementation v1
+        self.registration = None
+
+        self.registration_fleet = None
+        self.registration_presence = False
+
+        # --------------------------
+
         self.events_store = StatisticsStore(agent_name=str(agentjid), class_type=type(self))
 
+    async def setup(self):
+        await super().setup()
+
+        # New - Implementation v1
+        self.presence.on_subscribe = self.on_subscribe
+        self.presence.on_subscribed = self.on_subscribed
+        self.presence.on_available = self.on_available
+        self.presence.on_unavailable = self.on_unavailable
+        # --------------------------
+
+    # New - Implementation v1
+    # Presence callbacks
+    def on_subscribe(self, peer_jid):
+        logger.debug(
+            "Agent[{}]: Agent {} requested presence subscription".format(
+                self.name,
+                peer_jid
+            )
+        )
+
+        if self.can_accept_presence_subscription(peer_jid):
+            self.approve_presence_subscription(peer_jid)
+
+            logger.debug(
+                "Agent[{}]: Presence subscription approved for {}".format(
+                    self.name,
+                    peer_jid
+                )
+            )
+
+            if self.should_subscribe_back(peer_jid):
+                self.subscribe_to_presence(peer_jid)
+
+        else:
+            logger.debug(
+                "Agent[{}]: Presence subscription not approved for {}".format(
+                    self.name,
+                    peer_jid
+                )
+            )
+
+    def on_subscribed(self, peer_jid):
+        logger.debug(
+            "Agent[{}]: Agent {} accepted presence subscription".format(
+                self.name,
+                peer_jid
+            )
+        )
+
+    def on_available(self, peer_jid, presence_info, last_presence):
+        logger.debug(
+            "Agent[{}]: Agent {} is available".format(
+                self.name,
+                peer_jid
+            )
+        )
+
+    def on_unavailable(self, peer_jid, presence_info, last_presence):
+        logger.debug(
+            "Agent[{}]: Agent {} is unavailable".format(
+                self.name,
+                peer_jid
+            )
+        )
+
+    #Authorization
+    def can_accept_presence_subscription(self, peer_jid):
+        if self.registration_presence and self.registration_fleet:
+            return str(peer_jid) == str(self.registration_fleet)
+
+        return False
+
+    def should_subscribe_back(self, peer_jid):
+        return False
+
+    # Presence operations
+    def subscribe_to_presence(self, agent_id):
+        self.presence.subscribe(agent_id)
+
+    def approve_presence_subscription(self, agent_id):
+        self.presence.approve_subscription(agent_id)
+
+    def get_presence_contacts(self):
+        return self.presence.get_contacts()
+
+    def set_agent_presence(
+        self,
+        status="",
+        presence_type=PresenceType.AVAILABLE,
+        show=PresenceShow.CHAT,
+        priority=0
+    ):
+        self.presence.set_presence(
+            presence_type=presence_type,
+            show=show,
+            status=status,
+            priority=priority,
+        )
+
+    # --------------------------
 
     async def stop(self):
         """
@@ -123,6 +231,35 @@ class SimfleetAgent(Agent):
             self.fleet_type = content["fleet_type"]
         self.registration = status
 
+        if status:
+            self.start_registration_presence()
+
+
+    # New - Implementation v1
+    #Registration
+    def configure_registration(self, fleet, presence=False):
+        """
+        Configures the agent registration information.
+
+        Args:
+            fleet (str): JID of the agent responsible for the registration.
+            presence (bool): Indicates whether presence should be enabled
+                after registration.
+        """
+        self.registration_fleet = fleet
+        self.registration_presence = presence
+
+    def get_registration_fleet(self):
+        return self.registration_fleet
+
+    def get_registration_presence(self):
+        return self.registration_presence
+
+    def start_registration_presence(self):
+        if self.registration_presence and self.registration_fleet:
+            self.subscribe_to_presence(self.registration_fleet)
+
+    # --------------------------
 
     def watch_value(self, key, callback):
         """
