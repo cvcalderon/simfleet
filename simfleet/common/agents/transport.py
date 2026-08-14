@@ -37,6 +37,7 @@ class TransportAgent(VehicleAgent):
         """
     def __init__(self, agentjid, password):
         super().__init__(agentjid=agentjid, password=password)
+        self.set("assigned_customer", {})
         self.set("current_customer", {})
         self.num_assignments = 0
         self.completed_assignments = 0
@@ -137,6 +138,19 @@ class TransportAgent(VehicleAgent):
         del self.get("current_customer")[customer_id]
 
         self.num_assignments -= 1
+
+    def add_assigned_customer(self, customer_id, origin=None, dest=None):
+        customers = self.get("assigned_customer")
+
+        customers[str(customer_id)] = {
+            "origin": origin,
+            "destination": dest
+        }
+
+        self.set("assigned_customer", customers)
+
+    def remove_assigned_customer(self):
+        self.set("assigned_customer", {})
 
     async def set_position(self, coords=None):
         """

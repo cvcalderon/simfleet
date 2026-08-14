@@ -154,7 +154,7 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                 )
 
                 await self.cancel_proposal(content["customer_id"])
-                await self.agent.remove_assigned_taxicustomer()
+                self.agent.remove_assigned_customer()
                 self.agent.status = TRANSPORT_WAITING
                 self.agent.set_available()
                 self.set_next_state(TRANSPORT_WAITING)
@@ -177,7 +177,7 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                 )
 
                 await self.cancel_proposal(content["customer_id"])
-                await self.agent.remove_assigned_taxicustomer()
+                self.agent.remove_assigned_customer()
                 self.agent.status = TRANSPORT_WAITING
                 self.agent.set_available()
                 self.set_next_state(TRANSPORT_WAITING)
@@ -233,7 +233,7 @@ class TaxiMovingToCustomerState(TaxiStrategyBehaviour):
                             )
                         )
 
-                        await self.agent.remove_assigned_taxicustomer()
+                        self.agent.remove_assigned_customer()
                         self.agent.status = TRANSPORT_WAITING
                         self.agent.set_available()
                         self.set_next_state(TRANSPORT_WAITING)
@@ -261,7 +261,7 @@ class TaxiMovingToCustomerState(TaxiStrategyBehaviour):
                 )
             )
             await self.cancel_proposal(customer_id)
-            await self.agent.remove_assigned_taxicustomer()
+            self.agent.remove_assigned_customer()
             self.agent.status = TRANSPORT_WAITING
             self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
@@ -280,7 +280,7 @@ class TaxiMovingToCustomerState(TaxiStrategyBehaviour):
                 "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
             )
             await self.cancel_proposal(customer_id)
-            await self.agent.remove_assigned_taxicustomer()
+            self.agent.remove_assigned_customer()
             self.agent.status = TRANSPORT_WAITING
             self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
@@ -398,7 +398,7 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
         elif performative == CANCEL_PERFORMATIVE:
 
             if self.agent.get("assigned_customer"):
-                await self.agent.remove_assigned_taxicustomer()
+                self.agent.remove_assigned_customer()
 
             current_customers = self.agent.get("current_customer")
 

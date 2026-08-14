@@ -37,10 +37,11 @@ class TaxiAgent(TransportAgent):
             async remove_assigned_taxicustomer():
                 Removes all assigned customers from the taxi's customer list.
         """
-    def __init__(self, agentjid, password, **kwargs):
-        super().__init__(agentjid, password)
+   # OLD
+    #def __init__(self, agentjid, password, **kwargs):
+    #    super().__init__(agentjid, password)
 
-        self.set("assigned_customer", {})
+    #    self.set("assigned_customer", {})
         #OLD
         #self.fleetmanager_id = kwargs.get('fleet', None)
         # Presence variable
@@ -97,13 +98,13 @@ class TaxiAgent(TransportAgent):
     #     )
 
 
-    async def add_assigned_taxicustomer(self, customer_id, origin=None, dest=None):
-        customers = self.get("assigned_customer")
-        customers[customer_id] = {"origin": origin, "destination": dest}
-        self.set("assigned_customer", customers)
-
-    async def remove_assigned_taxicustomer(self):
-        self.set("assigned_customer", {})
+    # async def add_assigned_taxicustomer(self, customer_id, origin=None, dest=None):
+    #     customers = self.get("assigned_customer")
+    #     customers[customer_id] = {"origin": origin, "destination": dest}
+    #     self.set("assigned_customer", customers)
+    #
+    # async def remove_assigned_taxicustomer(self):
+    #     self.set("assigned_customer", {})
 
 
     # Using Presence
@@ -174,7 +175,7 @@ class TaxiStrategyBehaviour(State):
         origin=None,
         dest=None
     ):
-        await self.agent.add_assigned_taxicustomer(
+        self.agent.add_assigned_customer(
             customer_id,
             origin,
             dest
@@ -183,7 +184,7 @@ class TaxiStrategyBehaviour(State):
         self.agent.set_busy()
 
     async def unassigned_taxicustomer(self):
-        await self.agent.remove_assigned_taxicustomer()
+        self.agent.remove_assigned_customer()
 
     # async def unassigned_taxicustomer(self):
     #
