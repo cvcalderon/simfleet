@@ -5,6 +5,7 @@ from loguru import logger
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
+from spade.presence import PresenceNotFound, PresenceType, PresenceShow
 
 from simfleet.common.simfleetagent import SimfleetAgent
 
@@ -78,18 +79,98 @@ class FleetManagerAgent(SimfleetAgent):
     # New implementation v1
 
     def can_accept_presence_subscription(self, peer_jid):
-        vehicles = self.get("vehicle_agents") or {}
+        return self.is_registered_vehicle(peer_jid)
 
-        for vehicle in vehicles.values():
-            if str(vehicle.get("jid")) == str(peer_jid):
+    def is_registered_vehicle(self, vehicle_jid):
+        for vehicle in self.get_vehicle_agents().values():
+            if str(vehicle.get("jid")) == str(vehicle_jid):
                 return True
 
         return False
 
     def should_subscribe_back(self, peer_jid):
-        return self.can_accept_presence_subscription(peer_jid)
+        return self.is_registered_vehicle(peer_jid)
+
+    def get_vehicle_presence(self, vehicle_jid):
+        try:
+            return self.presence.get_contact_presence(vehicle_jid)
+
+        except PresenceNotFound:
+            logger.debug(
+                "Agent[{}]: No presence information for vehicle [{}].".format(
+                    self.name, vehicle_jid
+                )
+            )
+            return None
+
+    def get_vehicle_presence_data(self, presence):
+        if presence is None or not presence.status:
+            return None
+
+        try:
+            data = json.loads(presence.status)
+
+        except (json.JSONDecodeError, TypeError):
+            logger.debug(
+                "Agent[{}]: Invalid vehicle presence status: {!r}.".format(
+                    self.name, presence.status
+                )
+            )
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        return data
+
+    def is_vehicle_available(self, presence):
+        if presence is None:
+            return False
+
+        return (
+            presence.type == PresenceType.AVAILABLE
+            and presence.show == PresenceShow.CHAT
+        )
+
+    def get_available_vehicles(self):
+        available_vehicles = []
+
+        for vehicle in self.get_vehicle_agents().values():
+            vehicle_jid = vehicle.get("jid")
+
+            if not vehicle_jid:
+                continue
+
+            presence = self.get_vehicle_presence(vehicle_jid)
+
+            if not self.is_vehicle_available(presence):
+                continue
+
+            data = self.get_vehicle_presence_data(presence)
+
+            if data is None:
+                continue
+
+            available_vehicles.append(
+                {
+                    "vehicle": vehicle,
+                    "presence": presence,
+                    "data": data,
+                }
+            )
+
+        return available_vehicles
 
     # ---------------------
+
+    def get_vehicle_agents(self):
+        """
+        Returns the list of vehicle agents currently registered with the FleetManager.
+
+        Returns:
+            list: A list of vehicle agents.
+        """
+        return self.get("vehicle_agents")
 
     def set_id(self, agent_id):
         """
@@ -233,15 +314,6 @@ class FleetManagerStrategyBehaviour(StrategyBehaviour):
             Logs that the strategy has started in the Fleet Manager.
         """
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
-
-    def get_vehicle_agents(self):
-        """
-        Returns the list of vehicle agents currently registered with the FleetManager.
-
-        Returns:
-            list: A list of vehicle agents.
-        """
-        return self.get("vehicle_agents")
 
     async def send_registration(self):
         """

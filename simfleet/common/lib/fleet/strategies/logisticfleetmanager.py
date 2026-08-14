@@ -1,11 +1,9 @@
 import json
-import ast
 
-from simfleet.utils.helpers import distance_in_meters
-from spade.presence import PresenceNotFound
 from loguru import logger
 
-from simfleet.common.lib.fleet.models.logisticfleetmanager import LogisticFleetManagerStrategyBehaviour
+from simfleet.common.agents.fleetmanager import FleetManagerStrategyBehaviour
+from simfleet.utils.helpers import distance_in_meters
 
 
 ################################################################
@@ -14,72 +12,63 @@ from simfleet.common.lib.fleet.models.logisticfleetmanager import LogisticFleetM
 #                                                              #
 ################################################################
 
-class PresenceRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
-    """Selects a vehicle from presence data and falls back to registered vehicles."""
+class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
+    """
+    Selects an available vehicle using its presence information.
+    """
 
-    sort_key = staticmethod(lambda candidate: candidate[0])
+    requires_origin = True
+    requires_assignments = False
 
-    async def _broadcast_to_registered_transports(self, msg):
-        vehicles = self.get_vehicle_agents() or {}
-        if not vehicles:
-            logger.warning(
-                "Agent[{}]: no registered vehicles available for broadcast.".format(
-                    self.agent.name
-                )
-            )
-            return
+    sort_key = staticmethod(lambda candidate: candidate["distance"])
 
-        logger.warning(
-            "Agent[{}]: no valid presence candidates. Broadcasting to {} registered vehicles.".format(
-                self.agent.name, len(vehicles)
-            )
-        )
-        for vehicle in vehicles.values():
-            msg.to = str(vehicle["jid"])
-            logger.debug(
-                "Manager sent request to vehicle {}".format(vehicle["name"])
-            )
-            await self.send(msg)
-
-    def _get_presence_candidates(self, origin):
+    def get_presence_candidates(self, origin=None):
         candidates = []
-        contacts = self.agent.presence.get_contacts()
 
-        for jid in contacts:
-            try:
-                presence = self.agent.presence.get_contact_presence(jid)
-            except PresenceNotFound:
+        vehicles = self.agent.get_available_vehicles()
+
+        for item in vehicles:
+            vehicle = item["vehicle"]
+            data = item["data"]
+
+            position = data.get("p")
+
+            if position is None:
                 logger.debug(
-                    "Agent[{}]: skipping [{}], no presence information yet.".format(
-                        self.agent.name, jid
+                    "Agent[{}]: skipping vehicle [{}], presence has no position.".format(
+                        self.agent.name,
+                        vehicle.get("name")
                     )
                 )
                 continue
 
-            if not self.agent._is_available(presence.type):
-                continue
+            assignments = data.get("a")
 
-            try:
-                status_presence = ast.literal_eval(presence.status)
-                pos, clients = status_presence
-            except (SyntaxError, ValueError, TypeError):
+            if self.requires_assignments and assignments is None:
                 logger.debug(
-                    "Agent[{}]: skipping [{}], invalid presence status: {!r}.".format(
-                        self.agent.name, jid, presence.status
+                    "Agent[{}]: skipping vehicle [{}], presence has no assignments.".format(
+                        self.agent.name,
+                        vehicle.get("name")
                     )
                 )
                 continue
 
-            if pos is None:
-                logger.debug(
-                    "Agent[{}]: skipping [{}], presence has no position.".format(
-                        self.agent.name, jid
-                    )
-                )
-                continue
+            distance = None
 
-            dist = distance_in_meters(pos, origin)
-            candidates.append((dist, clients, str(jid), pos))
+            if origin is not None:
+                distance = distance_in_meters(
+                    position,
+                    origin
+                )
+
+            candidates.append(
+                {
+                    "distance": distance,
+                    "assignments": assignments,
+                    "jid": str(vehicle["jid"]),
+                    "position": position,
+                }
+            )
 
         return candidates
 
@@ -89,60 +78,114 @@ class PresenceRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
 
         msg = await self.receive(timeout=5)
 
-        logger.debug("Manager received message: {}".format(msg))
         if not msg:
             return
 
-        content = json.loads(msg.body)
-        origin = content.get("origin")
+        logger.debug(
+            "Manager received message: {}".format(msg)
+        )
 
-        if origin is None:
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
             logger.warning(
-                "Agent[{}]: request has no origin. Falling back to broadcast.".format(
+                "Agent[{}]: invalid request content.".format(
                     self.agent.name
                 )
             )
-            await self._broadcast_to_registered_transports(msg)
             return
 
-        candidates = self._get_presence_candidates(origin)
+        origin = content.get("origin")
+
+        if self.requires_origin and origin is None:
+            logger.warning(
+                "Agent[{}]: request has no origin.".format(
+                    self.agent.name
+                )
+            )
+            return
+
+        candidates = self.get_presence_candidates(origin)
 
         if not candidates:
-            await self._broadcast_to_registered_transports(msg)
+            logger.warning(
+                "Agent[{}]: no available vehicles found from presence data.".format(
+                    self.agent.name
+                )
+            )
             return
 
         candidates.sort(key=self.sort_key)
-        best_dist, best_clients, best_jid, best_pos = candidates[0]
 
-        logger.info("Agent [{}]: Candidate {}".format(self.agent.name, candidates[0]))
+        selected = candidates[0]
 
-        msg.to = str(best_jid)
+        logger.info(
+            "Agent[{}]: selected vehicle [{}].".format(
+                self.agent.name,
+                selected["jid"]
+            )
+        )
+
+        msg.to = selected["jid"]
         await self.send(msg)
 
 
 class NearRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects the nearest available vehicle according to presence data.
+    Selects the nearest available vehicle.
     """
-    sort_key = staticmethod(lambda candidate: candidate[0])
+
+    requires_origin = True
+    requires_assignments = False
+
+    sort_key = staticmethod(
+        lambda candidate: candidate["distance"]
+    )
 
 
-class FewerCustomersRequestBehaviour(PresenceRequestBehaviour):
+class FewerAssignmentsRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects the available vehicle with the fewest assigned customers.
+    Selects the available transport with the fewest completed assignments.
     """
-    sort_key = staticmethod(lambda candidate: candidate[1])
+
+    requires_origin = False
+    requires_assignments = True
+
+    sort_key = staticmethod(
+        lambda candidate: candidate["assignments"]
+    )
 
 
-class FewerCustomersAndNearRequestBehaviour(PresenceRequestBehaviour):
+class FewerAssignmentsAndNearRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects by fewer assigned customers first, then nearest distance.
+    Selects by fewer completed assignments first,
+    then by nearest distance.
     """
-    sort_key = staticmethod(lambda candidate: (candidate[1], candidate[0]))
+
+    requires_origin = True
+    requires_assignments = True
+
+    sort_key = staticmethod(
+        lambda candidate: (
+            candidate["assignments"],
+            candidate["distance"]
+        )
+    )
 
 
-class NearAndFewerCustomersRequestBehaviour(PresenceRequestBehaviour):
+class NearAndFewerAssignmentsRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects by nearest distance first, then fewer assigned customers.
+    Selects by nearest distance first,
+    then by fewer completed assignments.
     """
-    sort_key = staticmethod(lambda candidate: (candidate[0], candidate[1]))
+
+    requires_origin = True
+    requires_assignments = True
+
+    sort_key = staticmethod(
+        lambda candidate: (
+            candidate["distance"],
+            candidate["assignments"]
+        )
+    )
