@@ -113,14 +113,14 @@ class LogisticFleetManagerStrategyBehaviour(StrategyBehaviour):
         """
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
-    def get_transport_agents(self):
+    def get_vehicle_agents(self):
         """
         Returns the list of transport agents currently registered with the FleetManager.
 
         Returns:
             list: A list of transport agents.
         """
-        return self.get("transport_agents")
+        return self.get("vehicle_agents")
 
 
     async def send_registration(self):

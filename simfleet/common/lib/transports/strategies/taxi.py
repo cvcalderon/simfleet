@@ -145,13 +145,18 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                 self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
                 return
 
+
             except PathRequestException:
                 logger.error(
                     "Agent[{}]: The agent could not get a path to customer [{}]. Cancelling...".format(
                         self.agent.name, content["customer_id"]
                     )
                 )
+
                 await self.cancel_proposal(content["customer_id"])
+                await self.agent.remove_assigned_taxicustomer()
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
                 self.set_next_state(TRANSPORT_WAITING)
                 return
 
@@ -163,11 +168,18 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                 self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
                 self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
                 return
+
             except Exception as e:
                 logger.error(
-                    "Unexpected error in agent [{}]: {}".format(self.agent.name, e)
+                    "Unexpected error in agent [{}]: {}".format(
+                        self.agent.name, e
+                    )
                 )
+
                 await self.cancel_proposal(content["customer_id"])
+                await self.agent.remove_assigned_taxicustomer()
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
                 self.set_next_state(TRANSPORT_WAITING)
                 return
 
@@ -209,14 +221,21 @@ class TaxiMovingToCustomerState(TaxiStrategyBehaviour):
                 if msg:
 
                     performative = msg.get_metadata("performative")
+
                     if performative == REQUEST_PERFORMATIVE:
                         self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
                         return
+
                     elif performative == REFUSE_PERFORMATIVE:
                         logger.debug(
-                            "Agent[{}]: The agent got refusal from customer/station".format(self.agent.name)
+                            "Agent[{}]: The agent got refusal from customer/station".format(
+                                self.agent.name
+                            )
                         )
+
+                        await self.agent.remove_assigned_taxicustomer()
                         self.agent.status = TRANSPORT_WAITING
+                        self.agent.set_available()
                         self.set_next_state(TRANSPORT_WAITING)
                         return
 
@@ -242,9 +261,12 @@ class TaxiMovingToCustomerState(TaxiStrategyBehaviour):
                 )
             )
             await self.cancel_proposal(customer_id)
+            await self.agent.remove_assigned_taxicustomer()
             self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
             return
+
         except AlreadyInDestination:
 
             await self.inform_customer(
@@ -258,7 +280,9 @@ class TaxiMovingToCustomerState(TaxiStrategyBehaviour):
                 "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
             )
             await self.cancel_proposal(customer_id)
+            await self.agent.remove_assigned_taxicustomer()
             self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
             return
 
@@ -338,20 +362,53 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
                         self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
 
                     except PathRequestException:
+
                         await self.cancel_customer(customer_id=customer_id)
+
+                        if customer_id in self.agent.get("current_customer"):
+                            self.agent.remove_customer_in_transport(customer_id)
+
                         self.agent.status = TRANSPORT_WAITING
+                        self.agent.set_available()
                         self.set_next_state(TRANSPORT_WAITING)
+                        return
+
                     except AlreadyInDestination:
+                        self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
                         self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
+                        return
 
                     except Exception as e:
+
                         logger.error(
-                            "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
+                            "Unexpected error in transport [{}]: {}".format(
+                                self.agent.name, e
+                            )
                         )
 
+                        if customer_id in self.agent.get("current_customer"):
+                            self.agent.remove_customer_in_transport(customer_id)
+
+                        self.agent.status = TRANSPORT_WAITING
+                        self.agent.set_available()
+                        self.set_next_state(TRANSPORT_WAITING)
+                        return
+
+
         elif performative == CANCEL_PERFORMATIVE:
+
+            if self.agent.get("assigned_customer"):
+                await self.agent.remove_assigned_taxicustomer()
+
+            current_customers = self.agent.get("current_customer")
+
+            for customer_id in list(current_customers.keys()):
+                self.agent.remove_customer_in_transport(customer_id)
+
             self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
+
             return
         else:
             self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
@@ -409,9 +466,15 @@ class TaxiMovingToCustomerDestState(TaxiStrategyBehaviour):
                 )
             )
             await self.cancel_proposal(customer_id)
+
+            if customer_id in self.agent.get("current_customer"):
+                self.agent.remove_customer_in_transport(customer_id)
+
             self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
             return
+
         except AlreadyInDestination:
 
             # New statistics
@@ -427,12 +490,21 @@ class TaxiMovingToCustomerDestState(TaxiStrategyBehaviour):
             self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
             self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
             return
+
         except Exception as e:
             logger.error(
-                "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
+                "Unexpected error in transport [{}]: {}".format(
+                    self.agent.name, e
+                )
             )
+
             await self.cancel_proposal(customer_id)
+
+            if customer_id in self.agent.get("current_customer"):
+                self.agent.remove_customer_in_transport(customer_id)
+
             self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
             self.set_next_state(TRANSPORT_WAITING)
             return
 
@@ -470,6 +542,10 @@ class TaxiArrivedAtCustomerDestState(TaxiStrategyBehaviour):
                     if status == CUSTOMER_IN_DEST:
 
                         self.agent.remove_customer_in_transport(customer_id)
+
+                        self.agent.increment_completed_assignments()
+                        self.agent.set_available()
+
                         logger.debug(
                             "Agent[{}]: The agent has dropped the customer [{}] in destination.".format(
                                 self.agent.agent_id, customer_id
@@ -479,9 +555,16 @@ class TaxiArrivedAtCustomerDestState(TaxiStrategyBehaviour):
                         self.set_next_state(TRANSPORT_WAITING)
                         return
 
+
             elif performative == CANCEL_PERFORMATIVE:
+
+                if customer_id in self.agent.get("current_customer"):
+                    self.agent.remove_customer_in_transport(customer_id)
+
                 self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
                 self.set_next_state(TRANSPORT_WAITING)
+
                 return
             else:
                 self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)

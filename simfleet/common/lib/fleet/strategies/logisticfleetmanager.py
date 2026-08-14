@@ -15,29 +15,29 @@ from simfleet.common.lib.fleet.models.logisticfleetmanager import LogisticFleetM
 ################################################################
 
 class PresenceRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
-    """Selects a transport from presence data and falls back to registered transports."""
+    """Selects a vehicle from presence data and falls back to registered vehicles."""
 
     sort_key = staticmethod(lambda candidate: candidate[0])
 
     async def _broadcast_to_registered_transports(self, msg):
-        transports = self.get_transport_agents() or {}
-        if not transports:
+        vehicles = self.get_vehicle_agents() or {}
+        if not vehicles:
             logger.warning(
-                "Agent[{}]: no registered transports available for broadcast.".format(
+                "Agent[{}]: no registered vehicles available for broadcast.".format(
                     self.agent.name
                 )
             )
             return
 
         logger.warning(
-            "Agent[{}]: no valid presence candidates. Broadcasting to {} registered transports.".format(
-                self.agent.name, len(transports)
+            "Agent[{}]: no valid presence candidates. Broadcasting to {} registered vehicles.".format(
+                self.agent.name, len(vehicles)
             )
         )
-        for transport in transports.values():
-            msg.to = str(transport["jid"])
+        for vehicle in vehicles.values():
+            msg.to = str(vehicle["jid"])
             logger.debug(
-                "Manager sent request to transport {}".format(transport["name"])
+                "Manager sent request to vehicle {}".format(vehicle["name"])
             )
             await self.send(msg)
 
@@ -122,14 +122,14 @@ class PresenceRequestBehaviour(LogisticFleetManagerStrategyBehaviour):
 
 class NearRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects the nearest available transport according to presence data.
+    Selects the nearest available vehicle according to presence data.
     """
     sort_key = staticmethod(lambda candidate: candidate[0])
 
 
 class FewerCustomersRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects the available transport with the fewest assigned customers.
+    Selects the available vehicle with the fewest assigned customers.
     """
     sort_key = staticmethod(lambda candidate: candidate[1])
 
