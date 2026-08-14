@@ -20,37 +20,37 @@ from simfleet.utils.abstractstrategies import StrategyBehaviour
 
 class FleetManagerAgent(SimfleetAgent):
     """
-    The FleetManagerAgent is responsible for managing the fleet of transport agents. It registers transport agents
-    into its fleet and coordinates the requests between transports and customers.
+    The FleetManagerAgent is responsible for managing the fleet of vehicle agents. It registers vehicle agents
+    into its fleet and coordinates the requests between vehicles and customers.
 
     Attributes:
-        transports_in_fleet (int): The number of transports currently registered in the fleet.
+        vehicles_in_fleet (int): The number of vehicles currently registered in the fleet.
         fleet_icon (str): The icon representing the fleet in visual representations.
     """
 
     def __init__(self, agentjid, password):
         """
             Initializes the FleetManager agent with the given JID (Jabber ID) and password. It also initializes
-            its internal structures to track the transport agents within the fleet.
+            its internal structures to track the vehicle agents within the fleet.
         """
 
         super().__init__(agentjid, password)
 
-        self.transports_in_fleet = 0
+        self.vehicles_in_fleet = 0
         self.fleet_icon = None
         self.clear_agents()
 
 
     def clear_agents(self):
         """
-        Clears the stored set of transport agents and resets the simulation clock. This method is useful for
+        Clears the stored set of vehicle agents and resets the simulation clock. This method is useful for
         resetting the fleet manager state between simulations or sessions.
         """
-        self.set("transport_agents", {})
+        self.set("vehicle_agents", {})
 
     async def setup(self):
         """
-            Sets up the FleetManager agent by registering a behavior that handles the registration of transport agents.
+            Sets up the FleetManager agent by registering a behavior that handles the registration of vehicle agents.
             This method is called automatically when the agent is started.
         """
         await super().setup()
@@ -58,7 +58,7 @@ class FleetManagerAgent(SimfleetAgent):
         try:
             template = Template()
             template.set_metadata("protocol", REGISTER_PROTOCOL)
-            register_behaviour = TransportRegistrationForFleetBehaviour()
+            register_behaviour = VehicleRegistrationForFleetBehaviour()
             self.add_behaviour(register_behaviour, template)
             while not self.has_behaviour(register_behaviour):
                 logger.warning(
@@ -74,6 +74,22 @@ class FleetManagerAgent(SimfleetAgent):
                     self.agent_id, e
                 )
             )
+
+    # New implementation v1
+
+    def can_accept_presence_subscription(self, peer_jid):
+        vehicles = self.get("vehicle_agents") or {}
+
+        for vehicle in vehicles.values():
+            if str(vehicle.get("jid")) == str(peer_jid):
+                return True
+
+        return False
+
+    def should_subscribe_back(self, peer_jid):
+        return self.can_accept_presence_subscription(peer_jid)
+
+    # ---------------------
 
     def set_id(self, agent_id):
         """
@@ -95,7 +111,7 @@ class FleetManagerAgent(SimfleetAgent):
 
     def run_strategy(self):
         """
-        Runs the fleet management strategy, registering a behavior for handling transport and customer requests.
+        Runs the fleet management strategy, registering a behavior for handling vehicle and customer requests.
         """
         if not self.running_strategy:
             template = Template()
@@ -104,44 +120,52 @@ class FleetManagerAgent(SimfleetAgent):
             self.running_strategy = True
 
 
-class TransportRegistrationForFleetBehaviour(CyclicBehaviour):
+class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
     """
-        This behavior manages the registration of new transport agents in the fleet. It receives requests from
-        transport agents and registers them if their fleet type matches the FleetManager's type.
+        This behavior manages the registration of new vehicle agents in the fleet. It receives requests from
+        vehicle agents and registers them if their fleet type matches the FleetManager's type.
     """
     async def on_start(self):
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
-    def add_transport(self, agent):
+    def add_vehicle(self, agent):
         """
-        Adds a new transport agent to the fleet's internal store.
+        Adds a new vehicle agent to the fleet's internal store.
 
         Args:
-            agent (dict): The details of the transport agent to be added.
+            agent (dict): The details of the vehicle agent to be added.
         """
-        self.agent.transports_in_fleet += 1
-        self.get("transport_agents")[agent["name"]] = agent
+        vehicles = self.get("vehicle_agents")
 
-    def remove_transport(self, key):
+        if agent["name"] not in vehicles:
+            self.agent.vehicles_in_fleet += 1
+
+        vehicles[agent["name"]] = agent
+
+    def remove_vehicle(self, key):
         """
-        Removes a transport agent from the fleet's internal store by its key.
+        Removes a vehicle agent from the fleet's internal store by its key.
 
         Args:
-            key (str): The unique key representing the transport agent.
+            key (str): The unique key representing the vehicle agent.
         """
-        if key in self.get("transport_agents"):
-            del self.get("transport_agents")[key]
-            logger.debug("Deregistration of the TransporterAgent {}".format(key))
-            self.agent.transports_in_fleet -= 1
+        if key in self.get("vehicle_agents"):
+            del self.get("vehicle_agents")[key]
+            logger.debug(
+                "Deregistration of the VehicleAgent {}".format(key)
+            )
+            self.agent.vehicles_in_fleet -= 1
         else:
-            logger.debug("Cancelation of the registration in the Fleet")
+            logger.debug(
+                "Cancelation of the registration in the Fleet"
+            )
 
     async def accept_registration(self, agent_id):
         """
-        Sends an acceptance message to a transport agent, confirming its registration in the fleet.
+        Sends an acceptance message to a vehicle agent, confirming its registration in the fleet.
 
         Args:
-            agent_id (str): The ID of the transport agent to be accepted.
+            agent_id (str): The ID of the vehicle agent to be accepted.
         """
         reply = Message()
         content = {"icon": self.agent.fleet_icon, "fleet_type": self.agent.fleet_type}
@@ -153,10 +177,10 @@ class TransportRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def reject_registration(self, agent_id):
         """
-        Sends a rejection message to a transport agent, declining its registration request.
+        Sends a rejection message to a vehicle agent, declining its registration request.
 
         Args:
-            agent_id (str): The ID of the transport agent to be rejected.
+            agent_id (str): The ID of the vehicle agent to be rejected.
         """
         reply = Message()
         reply.to = str(agent_id)
@@ -167,7 +191,7 @@ class TransportRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def run(self):
         """
-            Listens for registration requests from transport agents and processes them by accepting or rejecting
+            Listens for registration requests from vehicle agents and processes them by accepting or rejecting
             them based on the fleet type.
         """
         try:
@@ -177,7 +201,7 @@ class TransportRegistrationForFleetBehaviour(CyclicBehaviour):
                 if performative == REQUEST_PERFORMATIVE:
                     content = json.loads(msg.body)
                     if content["fleet_type"] == self.agent.fleet_type:
-                        self.add_transport(content)
+                        self.add_vehicle(content)
                         await self.accept_registration(msg.sender)
                         logger.debug(
                             "Registration in the {} fleet to {}".format(self.agent.name,content.get("name"))
@@ -200,7 +224,7 @@ class TransportRegistrationForFleetBehaviour(CyclicBehaviour):
 
 class FleetManagerStrategyBehaviour(StrategyBehaviour):
     """
-    The FleetManagerStrategyBehaviour class defines the main strategy for coordinating customer and transport
+    The FleetManagerStrategyBehaviour class defines the main strategy for coordinating customer and vehicle
     agents in the fleet. This behavior needs to implement a `_process` method for custom strategies.
     """
 
@@ -210,14 +234,14 @@ class FleetManagerStrategyBehaviour(StrategyBehaviour):
         """
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
-    def get_transport_agents(self):
+    def get_vehicle_agents(self):
         """
-        Returns the list of transport agents currently registered with the FleetManager.
+        Returns the list of vehicle agents currently registered with the FleetManager.
 
         Returns:
-            list: A list of transport agents.
+            list: A list of vehicle agents.
         """
-        return self.get("transport_agents")
+        return self.get("vehicle_agents")
 
     async def send_registration(self):
         """

@@ -37,11 +37,15 @@ class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
 
         logger.debug("Manager received message: {}".format(msg))
         if msg:
-            for transport in self.get_transport_agents().values():
-                msg.to = str(transport["jid"])
+            for vehicle in self.get_vehicle_agents().values():
+                msg.to = str(vehicle["jid"])
+
                 logger.debug(
-                    "Manager sent request to transport {}".format(transport["name"])
+                    "Manager sent request to vehicle {}".format(
+                        vehicle["name"]
+                    )
                 )
+
                 await self.send(msg)
 
 
