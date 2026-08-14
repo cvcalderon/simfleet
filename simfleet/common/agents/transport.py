@@ -30,7 +30,8 @@ class TransportAgent(VehicleAgent):
 
         Attributes:
             current_customer (dict): Stores information about the current assigned customer.
-            num_assignments (int): Tracks the number of assignments completed.
+            num_assignments (int): Tracks the current number of active assignments.
+            completed_assignments (int): Tracks the accumulated number of assignments received.
             transport_type (str): Represents the type of transport (e.g., bus, taxi).
             customer_in_transport_event (asyncio.Event): Event that tracks when a customer boards the transport.
         """
@@ -38,6 +39,7 @@ class TransportAgent(VehicleAgent):
         super().__init__(agentjid=agentjid, password=password)
         self.set("current_customer", {})
         self.num_assignments = 0
+        self.completed_assignments = 0
 
         # Customer in transport event
         self.customer_in_transport_event = asyncio.Event()
@@ -88,6 +90,23 @@ class TransportAgent(VehicleAgent):
         data["status"] = status
         msg.body = json.dumps(data)
         await self.send(msg)
+
+    # New implementation v1
+
+    def increment_completed_assignments(self):
+        self.completed_assignments += 1
+
+    def get_completed_assignments(self):
+        return self.completed_assignments
+
+    def get_presence_status(self):
+        status = super().get_presence_status()
+
+        status["a"] = self.completed_assignments
+
+        return status
+
+    # ---------------------
 
     def add_customer_in_transport(self, customer_id, origin=None, dest=None):
         """

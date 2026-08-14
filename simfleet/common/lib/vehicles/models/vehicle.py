@@ -6,6 +6,7 @@ from asyncio import CancelledError, sleep
 from spade.message import Message
 from spade.template import Template
 from spade.behaviour import CyclicBehaviour, State
+from spade.presence import PresenceType, PresenceShow
 
 from simfleet.common.mixins.movable import MovableMixin
 from simfleet.common.geolocatedagent import GeoLocatedAgent
@@ -27,9 +28,6 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         The VehicleAgent class represents a vehicle in the system. It inherits from both MovableMixin and GeoLocatedAgent,
         combining the functionality of movement and geolocation. This agent can register with a fleet manager, move to a
         destination, and execute strategies defined by specific behaviors.
-
-        Attributes:
-            fleetmanager_id (str): The ID of the fleet manager the vehicle is registered with.
     """
     def __init__(self, agentjid, password):
         """
@@ -43,7 +41,7 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         GeoLocatedAgent.__init__(self, agentjid, password)
         MovableMixin.__init__(self)
 
-        self.fleetmanager_id = None
+        #self.fleetmanager_id = None    #OLD
         self.vehicle_dest = None
 
     async def setup(self):
@@ -53,6 +51,10 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         """
 
         await super().setup()
+
+        if not self.get_registration_fleet():
+            self.ready = True
+            return
 
         try:
             template = Template()
@@ -74,19 +76,20 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
                 )
             )
 
-    def set_fleetmanager(self, fleetmanager_id):
-        """
-        Sets the fleet manager's JID for the vehicle.
-
-        Args:
-            fleetmanager_id (str): The JID of the fleet manager to be set for this vehicle.
-        """
-        logger.info(
-            "Agent[{}]: Setting fleet {} for agent {}".format(
-                self.name, fleetmanager_id.split("@")[0], self.name
-            )
-        )
-        self.fleetmanager_id = fleetmanager_id
+    #OLD
+    # def set_fleetmanager(self, fleetmanager_id):
+    #     """
+    #     Sets the fleet manager's JID for the vehicle.
+    #
+    #     Args:
+    #         fleetmanager_id (str): The JID of the fleet manager to be set for this vehicle.
+    #     """
+    #     logger.info(
+    #         "Agent[{}]: Setting fleet {} for agent {}".format(
+    #             self.name, fleetmanager_id.split("@")[0], self.name
+    #         )
+    #     )
+    #     self.fleetmanager_id = fleetmanager_id
 
     def set_target_position(self, coords=None):
         """
@@ -127,6 +130,47 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         super().set_position(coords)
         self.set("current_pos", coords)
 
+    # New implementation v1
+    def get_presence_status(self):
+        return {
+            "p": self.get_position()
+        }
+
+    def publish_presence(
+        self,
+        presence_type=PresenceType.AVAILABLE,
+        show=PresenceShow.CHAT,
+        priority=0
+    ):
+        status = json.dumps(self.get_presence_status())
+
+        self.set_agent_presence(
+            status=status,
+            presence_type=presence_type,
+            show=show,
+            priority=priority
+        )
+
+    def set_available(self):
+        if not self.get_registration_presence():
+            return
+
+        self.publish_presence(
+            presence_type=PresenceType.AVAILABLE,
+            show=PresenceShow.CHAT
+        )
+
+    def set_busy(self):
+        if not self.get_registration_presence():
+            return
+
+        self.publish_presence(
+            presence_type=PresenceType.AVAILABLE,
+            show=PresenceShow.DND
+        )
+
+    # ---------------------
+
     def to_json(self):
         data = super().to_json()
         data.update({
@@ -148,9 +192,15 @@ class RegistrationBehaviour(CyclicBehaviour):
         """
         Send a ``spade.message.Message`` with a proposal to manager to register.
         """
+        # New implementation v1
+
+        registration_fleet = self.agent.get_registration_fleet()
+
         logger.debug(
             "Agent[{}]: The agent sent proposal to register to manager [{}]".format(
-                self.agent.name, self.agent.fleetmanager_id
+                #self.agent.name, self.agent.fleetmanager_id
+                self.agent.name,
+                registration_fleet
             )
         )
         content = {
@@ -159,11 +209,14 @@ class RegistrationBehaviour(CyclicBehaviour):
             "fleet_type": self.agent.fleet_type,
         }
         msg = Message()
-        msg.to = str(self.agent.fleetmanager_id)
+        #msg.to = str(self.agent.fleetmanager_id)
+        msg.to = str(registration_fleet)
         msg.set_metadata("protocol", REGISTER_PROTOCOL)
         msg.set_metadata("performative", REQUEST_PERFORMATIVE)
         msg.body = json.dumps(content)
         await self.send(msg)
+
+        # ---------------------
 
     async def run(self):
 
@@ -174,8 +227,15 @@ class RegistrationBehaviour(CyclicBehaviour):
         )
 
         try:
-            if not self.agent.registration and self.agent.fleetmanager_id != None:
+            #OLD
+            #if not self.agent.registration and self.agent.fleetmanager_id != None:
+            #    await self.send_registration()
+
+            # New implementation v1
+            if not self.agent.registration and self.agent.get_registration_fleet():
                 await self.send_registration()
+            # ---------------------
+
             msg = await self.receive(timeout=10)
             if msg:
                 performative = msg.get_metadata("performative")
@@ -183,15 +243,16 @@ class RegistrationBehaviour(CyclicBehaviour):
                     content = json.loads(msg.body)
                     self.agent.set_registration(True, content)
                     self.agent.ready = True
+                    self.agent.set_available()
                     logger.info(
-                        "Agent[{}]: Registration in the fleet manager [{}] accepted.".format(
-                            self.agent.name, self.agent.fleetmanager_id
+                        "Agent[{}]: Registration in agent [{}] accepted.".format(
+                            self.agent.name, self.agent.get_registration_fleet() #self.agent.fleetmanager_id
                         )
                     )
                     self.kill(exit_code="Fleet Registration Accepted")
                 elif performative == REFUSE_PERFORMATIVE:
                     logger.warning(
-                        "Registration in the fleet manager was rejected (check fleet type)."
+                        "Registration in agent was rejected (check fleet type)."
                     )
                     self.kill(exit_code="Fleet Registration Rejected")
         except CancelledError:
