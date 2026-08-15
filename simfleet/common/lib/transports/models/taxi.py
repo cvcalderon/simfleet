@@ -38,9 +38,11 @@ class TaxiAgent(TransportAgent):
                 Removes all assigned customers from the taxi's customer list.
         """
    # OLD
-    #def __init__(self, agentjid, password, **kwargs):
-    #    super().__init__(agentjid, password)
+    def __init__(self, agentjid, password, **kwargs):
+        super().__init__(agentjid, password)
 
+        self.initial_position = None
+        self.return_position = None
     #    self.set("assigned_customer", {})
         #OLD
         #self.fleetmanager_id = kwargs.get('fleet', None)
@@ -67,6 +69,32 @@ class TaxiAgent(TransportAgent):
 
         #self.publish_presence()
 
+    # New implementation v1
+
+    def set_initial_position(self, coords=None):
+        super().set_initial_position(coords)
+
+        position = self.get_position()
+
+        if position:
+            self.initial_position = list(position)
+
+    def get_initial_position(self):
+        return self.initial_position
+
+    def set_return_position(self, position):
+        if position:
+            self.return_position = list(position)
+        else:
+            self.return_position = None
+
+    def get_return_position(self):
+        return self.return_position
+
+    def clear_return_position(self):
+        self.return_position = None
+
+    # ---------------------
 
     # Presence
     # -------------------------
