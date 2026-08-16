@@ -11,7 +11,7 @@ from simfleet.communications.protocol import (
     PROPOSE_PERFORMATIVE,
     CANCEL_PERFORMATIVE,
     INFORM_PERFORMATIVE,
-#    REQUEST_PERFORMATIVE,
+    REQUEST_PERFORMATIVE,
 #    ACCEPT_PERFORMATIVE,
 #    QUERY_PROTOCOL,
 )
@@ -322,6 +322,46 @@ class TaxiStrategyBehaviour(State):
             )
         )
         await self.send(reply)
+
+    async def request_return_position(self):
+        fleetmanager = self.agent.get_registration_fleet()
+
+        if not fleetmanager:
+            logger.warning(
+                "Agent[{}]: No fleet manager configured for taxi return.".format(
+                    self.agent.name
+                )
+            )
+            return
+
+        msg = Message()
+
+        msg.to = str(fleetmanager)
+        msg.set_metadata(
+            "protocol",
+            REQUEST_PROTOCOL
+        )
+        msg.set_metadata(
+            "performative",
+            REQUEST_PERFORMATIVE
+        )
+
+        msg.body = json.dumps(
+            {
+                "request_type": "taxi_return",
+                "position": self.agent.get_position(),
+            }
+        )
+
+        logger.debug(
+            "Agent[{}]: Requesting return point from [{}] at position {}.".format(
+                self.agent.name,
+                fleetmanager,
+                self.agent.get_position()
+            )
+        )
+
+        await self.send(msg)
 
     async def run(self):
         raise NotImplementedError

@@ -19,7 +19,8 @@ from simfleet.utils.helpers import (
 )
 from simfleet.utils.status import TRANSPORT_WAITING, TRANSPORT_WAITING_FOR_APPROVAL, TRANSPORT_MOVING_TO_CUSTOMER, \
     TRANSPORT_ARRIVED_AT_CUSTOMER, TRANSPORT_IN_CUSTOMER_PLACE, TRANSPORT_MOVING_TO_DESTINATION, \
-    TRANSPORT_ARRIVED_AT_DESTINATION, CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST
+    TRANSPORT_ARRIVED_AT_DESTINATION, CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST, TRANSPORT_WAITING_FOR_RETURN , \
+    TRANSPORT_MOVING_TO_RETURN
 
 
 ################################################################
@@ -544,15 +545,16 @@ class TaxiArrivedAtCustomerDestState(TaxiStrategyBehaviour):
                         self.agent.remove_customer_in_transport(customer_id)
 
                         self.agent.increment_completed_assignments()
-                        self.agent.set_available()
+                        #self.agent.set_available()
+                        self.agent.set_busy()
 
                         logger.debug(
-                            "Agent[{}]: The agent has dropped the customer [{}] in destination.".format(
+                            "Agent[{}]: The agent has completed the service for customer [{}].".format(
                                 self.agent.agent_id, customer_id
                             )
                         )
-                        self.agent.status = TRANSPORT_WAITING
-                        self.set_next_state(TRANSPORT_WAITING)
+                        self.agent.status = TRANSPORT_WAITING_FOR_RETURN
+                        self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
                         return
 
 
@@ -569,6 +571,192 @@ class TaxiArrivedAtCustomerDestState(TaxiStrategyBehaviour):
             else:
                 self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
                 return
+
+class TaxiWaitingForReturnState(TaxiStrategyBehaviour):
+    """
+    Represents the state where the taxi waits for a return point
+    assigned by the FleetManager.
+    """
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_WAITING_FOR_RETURN
+        self.return_requested = False
+
+    async def run(self):
+
+        if self.agent.get_return_position():
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+        if not self.return_requested:
+            await self.request_return_position()
+            self.return_requested = True
+
+        msg = await self.receive(timeout=5)
+
+        if not msg:
+            self.return_requested = False
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+        performative = msg.get_metadata("performative")
+
+        if performative != INFORM_PERFORMATIVE:
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "Agent[{}]: Invalid return point response.".format(
+                    self.agent.name
+                )
+            )
+
+            self.return_requested = False
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+        if content.get("request_type") != "taxi_return":
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+        return_position = content.get("return_position")
+
+        if return_position is None:
+            self.return_requested = False
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+        self.agent.set_return_position(
+            return_position
+        )
+
+        logger.info(
+            "Agent[{}]: Return position received: {}".format(
+                self.agent.name,
+                return_position
+            )
+        )
+
+        try:
+            await self.agent.move_to(
+                return_position
+            )
+
+            self.agent.status = TRANSPORT_MOVING_TO_RETURN
+            self.set_next_state(
+                TRANSPORT_MOVING_TO_RETURN
+            )
+            return
+
+        except AlreadyInDestination:
+            logger.info(
+                "Agent[{}]: The taxi is already at the return point {}.".format(
+                    self.agent.name,
+                    return_position
+                )
+            )
+
+            self.agent.clear_return_position()
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+
+        except PathRequestException:
+            logger.error(
+                "Agent[{}]: The taxi could not get a path to return point {}.".format(
+                    self.agent.name,
+                    return_position
+                )
+            )
+
+            self.agent.clear_return_position()
+
+            self.return_requested = False
+
+            self.agent.status = TRANSPORT_WAITING_FOR_RETURN
+
+            self.set_next_state(
+                TRANSPORT_WAITING_FOR_RETURN
+            )
+            return
+
+        except Exception as e:
+            logger.error(
+                "Unexpected error returning taxi [{}]: {}".format(
+                    self.agent.name,
+                    e
+                )
+            )
+
+            self.agent.clear_return_position()
+            self.return_requested = False
+            self.agent.status = TRANSPORT_WAITING_FOR_RETURN
+
+            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            return
+
+
+class TaxiMovingToReturnState(TaxiStrategyBehaviour):
+    """
+    Represents the state where the taxi moves to its assigned
+    return point before becoming available again.
+    """
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_MOVING_TO_RETURN
+
+    async def run(self):
+
+        return_position = self.agent.get_return_position()
+
+        if return_position is None:
+            logger.warning(
+                "Agent[{}]: No return position available while returning.".format(
+                    self.agent.name
+                )
+            )
+
+            self.agent.status = TRANSPORT_WAITING_FOR_RETURN
+
+            self.set_next_state(
+                TRANSPORT_WAITING_FOR_RETURN
+            )
+            return
+
+        if not self.agent.is_in_destination():
+
+            await asyncio.sleep(1)
+
+            self.set_next_state(
+                TRANSPORT_MOVING_TO_RETURN
+            )
+            return
+
+        logger.info(
+            "Agent[{}]: The taxi has arrived at return point {}.".format(
+                self.agent.name,
+                return_position
+            )
+        )
+
+        self.agent.clear_return_position()
+
+        self.agent.status = TRANSPORT_WAITING
+        self.agent.set_available()
+
+        self.set_next_state(
+            TRANSPORT_WAITING
+        )
+        return
 
 
 class FSMTaxiBehaviour(FSMSimfleetBehaviour):
@@ -595,6 +783,7 @@ class FSMTaxiBehaviour(FSMSimfleetBehaviour):
         self.add_state(TRANSPORT_ARRIVED_AT_CUSTOMER, TaxiArrivedAtCustomerState())
         self.add_state(TRANSPORT_MOVING_TO_DESTINATION, TaxiMovingToCustomerDestState())
         self.add_state(TRANSPORT_ARRIVED_AT_DESTINATION, TaxiArrivedAtCustomerDestState())
+        self.add_state(TRANSPORT_WAITING_FOR_RETURN, TaxiWaitingForReturnState())
 
         # Define transitions between states
 
@@ -627,6 +816,9 @@ class FSMTaxiBehaviour(FSMSimfleetBehaviour):
         # Transitions from 'Arrived At Destination' state
         self.add_transition(TRANSPORT_ARRIVED_AT_DESTINATION, TRANSPORT_ARRIVED_AT_DESTINATION)  # Stay at destination
         self.add_transition(TRANSPORT_ARRIVED_AT_DESTINATION, TRANSPORT_WAITING)  # Drop customer and return to waiting
+        self.add_transition(TRANSPORT_ARRIVED_AT_DESTINATION, TRANSPORT_WAITING_FOR_RETURN)
+        self.add_transition(TRANSPORT_WAITING_FOR_RETURN, TRANSPORT_WAITING_FOR_RETURN)
+
 
         # Additional transitions for customer movement and destination states
         self.add_transition(TRANSPORT_MOVING_TO_CUSTOMER, TRANSPORT_MOVING_TO_CUSTOMER)  # Still en route to customer
