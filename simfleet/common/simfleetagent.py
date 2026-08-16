@@ -1,3 +1,4 @@
+import json
 import time
 import asyncio
 import geopy.distance
@@ -6,11 +7,13 @@ from loguru import logger
 from spade.agent import Agent
 from collections import defaultdict
 from spade.message import Message
+from slixmpp import JID
 
 from simfleet.utils.helpers import distance_in_meters
 
 from simfleet.utils.statistics import StatisticsStore
-from spade.presence import PresenceType, PresenceShow
+from spade.presence import PresenceInfo, PresenceType, PresenceShow
+from simfleet.communications.protocol import REGISTER_PROTOCOL, INFORM_PERFORMATIVE
 
 class SimfleetAgent(Agent):
     """
@@ -74,6 +77,19 @@ class SimfleetAgent(Agent):
 
     # New - Implementation v1
     # Presence callbacks
+    @staticmethod
+    def bare_jid(jid):
+        if jid is None:
+            return None
+
+        try:
+            return str(JID(str(jid)).bare)
+        except Exception:
+            return str(jid).split("/")[0]
+
+    def is_same_jid(self, jid_a, jid_b):
+        return self.bare_jid(jid_a) == self.bare_jid(jid_b)
+
     def on_subscribe(self, peer_jid):
         logger.debug(
             "Agent[{}]: Agent {} requested presence subscription".format(
@@ -95,6 +111,14 @@ class SimfleetAgent(Agent):
             if self.should_subscribe_back(peer_jid):
                 self.subscribe_to_presence(peer_jid)
 
+            if (
+                self.registration_presence
+                and self.registration_fleet
+                and self.is_same_jid(peer_jid, self.registration_fleet)
+                and hasattr(self, "set_available")
+            ):
+                self.set_available()
+
         else:
             logger.debug(
                 "Agent[{}]: Presence subscription not approved for {}".format(
@@ -110,6 +134,14 @@ class SimfleetAgent(Agent):
                 peer_jid
             )
         )
+
+        if (
+            self.registration_presence
+            and self.registration_fleet
+            and self.is_same_jid(peer_jid, self.registration_fleet)
+            and hasattr(self, "set_available")
+        ):
+            self.set_available()
 
     def on_available(self, peer_jid, presence_info, last_presence):
         logger.debug(
@@ -130,7 +162,7 @@ class SimfleetAgent(Agent):
     #Authorization
     def can_accept_presence_subscription(self, peer_jid):
         if self.registration_presence and self.registration_fleet:
-            return str(peer_jid) == str(self.registration_fleet)
+            return self.is_same_jid(peer_jid, self.registration_fleet)
 
         return False
 
@@ -139,10 +171,10 @@ class SimfleetAgent(Agent):
 
     # Presence operations
     def subscribe_to_presence(self, agent_id):
-        self.presence.subscribe(agent_id)
+        self.presence.subscribe(self.bare_jid(agent_id))
 
     def approve_presence_subscription(self, agent_id):
-        self.presence.approve_subscription(agent_id)
+        self.presence.approve_subscription(self.bare_jid(agent_id))
 
     def get_presence_contacts(self):
         return self.presence.get_contacts()
@@ -154,12 +186,76 @@ class SimfleetAgent(Agent):
         show=PresenceShow.CHAT,
         priority=0
     ):
-        self.presence.set_presence(
-            presence_type=presence_type,
-            show=show,
-            status=status,
-            priority=priority,
+        self.presence.current_presence = PresenceInfo(
+            presence_type,
+            show,
+            status,
+            priority,
         )
+
+        presence_to = None
+
+        if self.registration_presence and self.registration_fleet:
+            presence_to = self.bare_jid(self.registration_fleet)
+
+        logger.debug(
+            "Agent[{}]: publishing presence to [{}] with show [{}] and status [{}].".format(
+                self.name,
+                presence_to,
+                show,
+                status,
+            )
+        )
+
+        self.client.send_presence(
+            pto=presence_to,
+            ptype=None if presence_type == PresenceType.AVAILABLE else presence_type.value,
+            pshow=None if show == PresenceShow.NONE else show.value,
+            pstatus=status,
+            ppriority=str(priority),
+        )
+
+        if presence_to:
+            try:
+                asyncio.create_task(
+                    self.send_presence_update(
+                        presence_to,
+                        status,
+                        presence_type,
+                        show,
+                        priority,
+                    )
+                )
+            except RuntimeError:
+                logger.debug(
+                    "Agent[{}]: could not schedule presence update message.".format(
+                        self.name
+                    )
+                )
+
+    async def send_presence_update(
+        self,
+        agent_id,
+        status,
+        presence_type=PresenceType.AVAILABLE,
+        show=PresenceShow.CHAT,
+        priority=0,
+    ):
+        msg = Message()
+        msg.to = str(agent_id)
+        msg.set_metadata("protocol", REGISTER_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        msg.body = json.dumps(
+            {
+                "jid": str(self.jid),
+                "type": presence_type.value,
+                "show": show.value,
+                "status": status,
+                "priority": priority,
+            }
+        )
+
+        await self.send(msg)
 
     # --------------------------
 

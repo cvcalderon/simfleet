@@ -5,7 +5,7 @@ from loguru import logger
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
-from spade.presence import PresenceNotFound, PresenceType, PresenceShow
+from spade.presence import ContactNotFound, PresenceNotFound, PresenceType, PresenceShow
 
 from simfleet.common.simfleetagent import SimfleetAgent
 
@@ -13,6 +13,7 @@ from simfleet.communications.protocol import (
     REQUEST_PROTOCOL,
     REGISTER_PROTOCOL,
     ACCEPT_PERFORMATIVE,
+    INFORM_PERFORMATIVE,
     REQUEST_PERFORMATIVE,
     REFUSE_PERFORMATIVE,
 )
@@ -83,7 +84,7 @@ class FleetManagerAgent(SimfleetAgent):
 
     def is_registered_vehicle(self, vehicle_jid):
         for vehicle in self.get_vehicle_agents().values():
-            if str(vehicle.get("jid")) == str(vehicle_jid):
+            if self.is_same_jid(vehicle.get("jid"), vehicle_jid):
                 return True
 
         return False
@@ -95,7 +96,7 @@ class FleetManagerAgent(SimfleetAgent):
         try:
             return self.presence.get_contact_presence(vehicle_jid)
 
-        except PresenceNotFound:
+        except (ContactNotFound, PresenceNotFound):
             logger.debug(
                 "Agent[{}]: No presence information for vehicle [{}].".format(
                     self.name, vehicle_jid
@@ -114,6 +115,35 @@ class FleetManagerAgent(SimfleetAgent):
             logger.debug(
                 "Agent[{}]: Invalid vehicle presence status: {!r}.".format(
                     self.name, presence.status
+                )
+            )
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        return data
+
+    def is_vehicle_presence_mirror_available(self, presence):
+        if not presence:
+            return False
+
+        return (
+            presence.get("type") == PresenceType.AVAILABLE.value
+            and presence.get("show") == PresenceShow.CHAT.value
+        )
+
+    def get_vehicle_presence_mirror_data(self, presence):
+        if not presence or not presence.get("status"):
+            return None
+
+        try:
+            data = json.loads(presence["status"])
+
+        except (json.JSONDecodeError, TypeError):
+            logger.debug(
+                "Agent[{}]: Invalid mirrored vehicle presence status: {!r}.".format(
+                    self.name, presence.get("status")
                 )
             )
             return None
@@ -143,10 +173,16 @@ class FleetManagerAgent(SimfleetAgent):
 
             presence = self.get_vehicle_presence(vehicle_jid)
 
-            if not self.is_vehicle_available(presence):
-                continue
+            if self.is_vehicle_available(presence):
+                data = self.get_vehicle_presence_data(presence)
 
-            data = self.get_vehicle_presence_data(presence)
+            else:
+                presence = vehicle.get("presence")
+
+                if not self.is_vehicle_presence_mirror_available(presence):
+                    continue
+
+                data = self.get_vehicle_presence_mirror_data(presence)
 
             if data is None:
                 continue
@@ -241,6 +277,16 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
                 "Cancelation of the registration in the Fleet"
             )
 
+    def update_vehicle_presence(self, content):
+        vehicle_jid = content.get("jid")
+
+        for vehicle in self.get("vehicle_agents").values():
+            if self.agent.is_same_jid(vehicle.get("jid"), vehicle_jid):
+                vehicle["presence"] = content
+                return True
+
+        return False
+
     async def accept_registration(self, agent_id):
         """
         Sends an acceptance message to a vehicle agent, confirming its registration in the fleet.
@@ -283,6 +329,7 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
                     content = json.loads(msg.body)
                     if content["fleet_type"] == self.agent.fleet_type:
                         self.add_vehicle(content)
+                        self.agent.subscribe_to_presence(content["jid"])
                         await self.accept_registration(msg.sender)
                         logger.debug(
                             "Registration in the {} fleet to {}".format(self.agent.name,content.get("name"))
@@ -293,6 +340,17 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
                 if performative == ACCEPT_PERFORMATIVE:
                     self.agent.set_registration(True)
                     logger.info("Registration in the dictionary of services")
+
+                if performative == INFORM_PERFORMATIVE:
+                    content = json.loads(msg.body)
+
+                    if self.update_vehicle_presence(content):
+                        logger.debug(
+                            "Agent[{}]: updated mirrored presence for [{}].".format(
+                                self.agent.name,
+                                content.get("jid")
+                            )
+                        )
         except CancelledError:
             logger.debug("Cancelling async tasks...")
         except Exception as e:
