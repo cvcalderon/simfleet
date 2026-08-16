@@ -176,4 +176,4 @@ class Log:
             data.append(row)
 
         # Create and return the DataFrame
-        return pd.DataFrame(data)
+        return pd.DataFrame(data, columns=event_fields + details_fields)
