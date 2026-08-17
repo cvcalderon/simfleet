@@ -49,7 +49,8 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
 
         self.stations = None
         self.nearby_station = None
-        self.set("current_station", None)
+        #self.set("current_station", None)
+        self.current_station = None
 
         self.arguments = {}
 
@@ -81,6 +82,10 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
                 Returns:
                     int: The number of charging stations in the list.
         """
+        #return len(self.stations)
+        if self.stations is None:
+            return 0
+
         return len(self.stations)
 
     def set_nearby_station(self, station):
@@ -119,220 +124,17 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
         """
         return self.nearby_station[1]
 
+    def clear_nearby_station(self):
+        self.nearby_station = None
+
+    def set_current_station(self, station_id):
+        self.current_station = station_id
+
+    def get_current_station(self):
+        return self.current_station
+
+    def clear_current_station(self):
+        self.current_station = None
 
 
 
-class ElectricTaxiStrategyBehaviour(State):
-    """
-    Base class to define the transport strategy for an electric taxi.
-    This class should be inherited and extended to create custom strategies.
-    Subclasses must override the `run` coroutine to define specific behaviors.
-
-    Methods:
-        async on_start():
-            Logs the beginning of the strategy execution.
-        async on_end():
-            Logs the end of the strategy execution.
-        async go_to_the_station(station_id, dest):
-            Directs the taxi to a specific station and updates autonomy based on distance.
-        check_and_decrease_autonomy(customer_orig, customer_dest):
-            Checks if there is enough autonomy for a trip and decreases it if possible.
-        async drop_station():
-            Resets the current station assignment for the taxi.
-        async request_access_station(station_id, content):
-            Sends a request to a station for access.
-        async send_proposal(customer_id, content=None):
-            Sends a transport proposal to a customer.
-        async cancel_proposal(agent_id, content=None):
-            Cancels a previously sent proposal to a customer.
-        async run():
-            Abstract method that must be implemented by subclasses.
-    """
-
-    async def on_start(self):
-        """
-                Logs the beginning of the strategy execution.
-                """
-        # await super().on_start()
-        logger.debug(
-            "Agent[{}]: Strategy {} started.".format(
-                self.agent.name, type(self).__name__
-            )
-        )
-
-    async def on_end(self):
-        """
-                Logs the end of the strategy execution.
-                """
-        # await super().on_start()
-        logger.debug(
-            "Agent[{}]: Strategy {} finished.".format(
-                self.agent.name, type(self).__name__
-            )
-        )
-
-    async def go_to_the_station(self, station_id, dest):
-        """
-                Directs the taxi to a specific station and updates autonomy based on the distance.
-
-                Args:
-                    station_id (str): The ID of the destination station.
-                    dest (list): The coordinates of the station (x, y).
-                """
-        logger.info(
-            "Agent[{}]: On route to station [{}]".format(self.agent.name, station_id)
-        )
-        self.set("current_station", station_id)
-        travel_km = self.agent.calculate_km_expense(self.get("current_pos"), dest)
-        self.agent.decrease_autonomy_km(travel_km)
-
-    def check_and_decrease_autonomy(self, customer_orig, customer_dest):
-        """
-        Verifies if the ttransport has enough autonomy for a trip and decreases autonomy if possible.
-
-        Args:
-            customer_orig (list): The customer's origin coordinates (x, y).
-            customer_dest (list): The customer's destination coordinates (x, y).
-
-        Returns:
-            bool: True if autonomy is sufficient and decreased, False otherwise.
-        """
-
-        if self.agent.has_enough_autonomy(customer_orig, customer_dest):
-            autonomy = self.agent.get_autonomy()
-            travel_km = self.agent.calculate_km_expense(
-                self.agent.get_position(), customer_orig, customer_dest
-            )
-            self.agent.decrease_autonomy_km(travel_km)
-            return True
-        else:
-            return False
-
-    async def drop_station(self):
-        """
-        Resets the current station assignment for the transport.
-        """
-
-        logger.debug(
-            "Agent[{}]: The agent has dropped the station [{}].".format(
-                self.agent.agent_id, self.agent.get("current_station")
-            )
-        )
-        self.agent.set("current_station", None)
-
-    async def request_access_station(self, station_id, content):
-
-        """
-                Sends a request to a station for access.
-
-                Args:
-                    station_id (str): The ID of the station to request access from.
-                    content (dict): Additional information to include in the request.
-                """
-
-        if content is None:
-            content = {}
-        reply = Message()
-        reply.to = station_id
-        reply.set_metadata("protocol", REQUEST_PROTOCOL)
-        reply.set_metadata("performative", REQUEST_PERFORMATIVE)
-        reply.body = json.dumps(content)
-        logger.debug(
-            "Agent[{}]: The agent requesting access to [{}]".format(
-                self.agent.name,
-                station_id,
-                reply.body
-            )
-        )
-        await self.send(reply)
-
-    async def send_proposal(self, customer_id, content=None):
-        """
-        Sends a proposal to a customer offering transport.
-
-        Args:
-            customer_id (str): The ID of the customer.
-            content (dict, optional): Additional content for the proposal. Defaults to None.
-        """
-        if content is None:
-            content = {}
-        logger.info(
-            "Agent[{}]: The agent sent proposal to agent [{}]".format(self.agent.name, customer_id)
-        )
-        reply = Message()
-        reply.to = customer_id
-        reply.set_metadata("protocol", REQUEST_PROTOCOL)
-        reply.set_metadata("performative", PROPOSE_PERFORMATIVE)
-        reply.body = json.dumps(content)
-        await self.send(reply)
-
-    async def cancel_proposal(self, agent_id, content=None):
-        """
-        Cancels a previously sent proposal.
-
-        Args:
-            agent_id (str): The ID of the customer.
-            content (dict, optional): Additional content for the cancellation. Defaults to None.
-        """
-        if content is None:
-            content = {}
-        logger.info(
-            "Agent[{}]: The agent sent cancel proposal to agent [{}]".format(
-                self.agent.name, agent_id
-            )
-        )
-        reply = Message()
-        reply.to = agent_id
-        reply.set_metadata("protocol", REQUEST_PROTOCOL)
-        reply.set_metadata("performative", CANCEL_PERFORMATIVE)
-        reply.body = json.dumps(content)
-        await self.send(reply)
-
-    async def inform_customer(self, customer_id, status, data=None):
-        """
-        Sends a message to inform the customer of the transport's new status.
-
-        Args:
-            customer_id (str): The ID of the customer.
-            status (int): The new status code.
-            data (dict, optional): Additional information about the status.
-        """
-        if data is None:
-            data = {}
-        msg = Message()
-        msg.to = customer_id
-        msg.set_metadata("protocol", REQUEST_PROTOCOL)
-        msg.set_metadata("performative", INFORM_PERFORMATIVE)
-        data["status"] = status
-        msg.body = json.dumps(data)
-        await self.send(msg)
-
-    async def cancel_customer(self, customer_id, data=None):
-        """
-        Cancels the assignment of a customer and informs them via a message.
-
-        Args:
-            customer_id (str): The ID of the customer.
-            data (dict, optional): Additional cancellation-related information.
-        """
-        logger.error(
-            "Agent[{}]: The agent could not get a path to customer [{}].".format(
-                self.agent.agent_id, self.agent.get("current_customer")
-            )
-        )
-        if data is None:
-            data = {}
-        reply = Message()
-        reply.to = customer_id
-        reply.set_metadata("protocol", REQUEST_PROTOCOL)
-        reply.set_metadata("performative", CANCEL_PERFORMATIVE)
-        reply.body = json.dumps(data)
-        logger.debug(
-            "Agent[{}]: The agent sent cancel proposal to customer [{}]".format(
-                self.agent.agent_id, customer_id
-            )
-        )
-        await self.send(reply)
-
-    async def run(self):
-        raise NotImplementedError

@@ -1,5 +1,3 @@
-import time
-
 from loguru import logger
 
 from simfleet.utils.helpers import (
@@ -80,7 +78,6 @@ class ChargeableMixin:
                     int: The current autonomy in kilometers.
                 """
         return self.current_autonomy_km
-
 
 
     def decrease_autonomy_km(self, expense=0):
@@ -187,5 +184,82 @@ class ChargeableMixin:
             return False
         return True
 
+    def calculate_distance_km(self, origin, destination):
+        distance = distance_in_meters(
+            origin,
+            destination
+        )
 
+        return distance / 1000
 
+    def calculate_service_km(self, origin, destination):
+        distance_to_origin = self.calculate_distance_km(
+            self.get_position(),
+            origin
+        )
+
+        service_distance = self.calculate_distance_km(
+            origin,
+            destination
+        )
+
+        return distance_to_origin + service_distance
+
+    def has_enough_autonomy_km(self, expense):
+        autonomy = self.get_autonomy()
+
+        if autonomy <= MIN_AUTONOMY:
+            logger.warning(
+                "Agent[{}]: Has not enough autonomy ({}).".format(
+                    self.name,
+                    autonomy
+                )
+            )
+            return False
+
+        logger.debug(
+            "Agent[{}]: Has autonomy ({}) when max autonomy is ({}) "
+            "and needs ({}) for the trip.".format(
+                self.name,
+                autonomy,
+                self.max_autonomy_km,
+                expense
+            )
+        )
+
+        if autonomy - expense < MIN_AUTONOMY:
+            logger.warning(
+                "Agent[{}]: Has not enough autonomy to do travel "
+                "({} for {} km).".format(
+                    self.name,
+                    autonomy,
+                    expense
+                )
+            )
+            return False
+
+        return True
+
+    def has_enough_autonomy_for_service(
+        self,
+        origin,
+        destination
+    ):
+        travel_km = self.calculate_service_km(
+            origin,
+            destination
+        )
+
+        return self.has_enough_autonomy_km(
+            travel_km
+        )
+
+    def has_enough_autonomy_to(self, destination):
+        travel_km = self.calculate_distance_km(
+            self.get_position(),
+            destination
+        )
+
+        return self.has_enough_autonomy_km(
+            travel_km
+        )
