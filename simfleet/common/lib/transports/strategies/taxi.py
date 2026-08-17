@@ -587,7 +587,7 @@ class TaxiWaitingForReturnState(TaxiStrategyBehaviour):
     async def run(self):
 
         if self.agent.get_return_position():
-            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+            self.set_next_state(TRANSPORT_MOVING_TO_RETURN)
             return
 
         if not self.return_requested:
@@ -784,6 +784,7 @@ class FSMTaxiBehaviour(FSMSimfleetBehaviour):
         self.add_state(TRANSPORT_MOVING_TO_DESTINATION, TaxiMovingToCustomerDestState())
         self.add_state(TRANSPORT_ARRIVED_AT_DESTINATION, TaxiArrivedAtCustomerDestState())
         self.add_state(TRANSPORT_WAITING_FOR_RETURN, TaxiWaitingForReturnState())
+        self.add_state(TRANSPORT_MOVING_TO_RETURN, TaxiMovingToReturnState())
 
         # Define transitions between states
 
@@ -818,6 +819,10 @@ class FSMTaxiBehaviour(FSMSimfleetBehaviour):
         self.add_transition(TRANSPORT_ARRIVED_AT_DESTINATION, TRANSPORT_WAITING)  # Drop customer and return to waiting
         self.add_transition(TRANSPORT_ARRIVED_AT_DESTINATION, TRANSPORT_WAITING_FOR_RETURN)
         self.add_transition(TRANSPORT_WAITING_FOR_RETURN, TRANSPORT_WAITING_FOR_RETURN)
+        self.add_transition(TRANSPORT_WAITING_FOR_RETURN, TRANSPORT_MOVING_TO_RETURN)
+        self.add_transition(TRANSPORT_MOVING_TO_RETURN, TRANSPORT_MOVING_TO_RETURN)
+        self.add_transition(TRANSPORT_MOVING_TO_RETURN, TRANSPORT_WAITING_FOR_RETURN)
+        self.add_transition(TRANSPORT_MOVING_TO_RETURN, TRANSPORT_WAITING)
 
 
         # Additional transitions for customer movement and destination states

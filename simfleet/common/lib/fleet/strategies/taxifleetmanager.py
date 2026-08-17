@@ -19,21 +19,20 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
         self.return_point_tolerance = 100
 
     def update_initial_taxi_positions(self):
-        vehicles = self.agent.get_vehicle_agents()
+        vehicles = self.agent.get_available_vehicles()
 
-        for vehicle in vehicles.values():
+        for item in vehicles:
+            vehicle = item["vehicle"]
+            data = item["data"]
             vehicle_jid = vehicle.get("jid")
 
             if not vehicle_jid:
                 continue
 
-            vehicle_jid = str(vehicle_jid)
+            vehicle_jid = self.agent.bare_jid(vehicle_jid)
 
             if vehicle_jid in self.initial_taxi_positions:
                 continue
-
-            presence = self.agent.get_vehicle_presence(vehicle_jid)
-            data = self.agent.get_vehicle_presence_data(presence)
 
             if data is None:
                 continue
