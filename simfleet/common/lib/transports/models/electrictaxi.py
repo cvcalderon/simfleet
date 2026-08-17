@@ -1,19 +1,6 @@
-import json
-from loguru import logger
-
-from spade.message import Message
-from spade.behaviour import State
-
-from simfleet.communications.protocol import (
-    REQUEST_PROTOCOL,
-    PROPOSE_PERFORMATIVE,
-    CANCEL_PERFORMATIVE,
-    REQUEST_PERFORMATIVE,
-    INFORM_PERFORMATIVE,
-)
-
 from simfleet.common.mixins.chargeable import ChargeableMixin
 from simfleet.common.lib.transports.models.taxi import TaxiAgent
+
 
 class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
     """
@@ -53,9 +40,6 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
         self.current_station = None
 
         self.arguments = {}
-
-    async def setup(self):
-        await super().setup()
 
     def set_stations(self, stations):
         """
@@ -135,6 +119,4 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
 
     def clear_current_station(self):
         self.current_station = None
-
-
 

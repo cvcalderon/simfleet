@@ -303,7 +303,7 @@ class ElectricTaxiStrategyBehaviour(State):
 
 ################################################################
 #                                                              #
-#                    Electric Taxi Strategy                    #
+#              Point Of Return Electric Taxi Strategy          #
 #                                                              #
 ################################################################
 
@@ -386,28 +386,74 @@ class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
             self.agent.get_stations() is None
             or self.agent.get_number_stations() < 1
         ):
-            logger.info("Agent[{}]: The agent looking for a station.".format(self.agent.name))
+            logger.info(
+                "Agent[{}]: The agent looking for a station.".format(
+                    self.agent.name
+                )
+            )
 
             # New
-            stations = await self.agent.get_list_agent_position(self.agent.service_type, self.agent.get_stations())
+            stations = await self.agent.get_list_agent_position(
+                self.agent.service_type,
+                self.agent.get_stations()
+            )
             self.agent.set_stations(stations)
             self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
         else:
-            nearby_station_dest = self.agent.nearst_agent(self.agent.get_stations(), self.agent.get_position())
+            nearby_station_dest = self.agent.nearst_agent(
+                self.agent.get_stations(),
+                self.agent.get_position()
+            )
+
+            if nearby_station_dest is None:
+                logger.warning(
+                    "Agent[{}]: No charging station available.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+                return
+
             self.agent.set_nearby_station(nearby_station_dest)
+            station_id = self.agent.get_nearby_station_id()
+            station_position = self.agent.get_nearby_station_position()
+
             logger.info(
-                 "Agent[{}]: The agent selected station [{}].".format(self.agent.name, self.agent.get_nearby_station_id())
-             )
+                "Agent[{}]: The agent selected station [{}].".format(
+                    self.agent.name,
+                    station_id
+                )
+            )
 
             try:
-                station_position = self.agent.get_nearby_station_position()
+                await self.go_to_the_station(
+                    station_id,
+                    station_position
+                )
+
+                _path, distance, duration = await self.agent.request_path(
+                    self.agent.get_position(),
+                    station_position
+                )
+
                 travel_km = self.agent.calculate_distance_km(
                     self.agent.get_position(),
-                    station_position)
+                    station_position
+                )
+
                 try:
                     await self.agent.move_to(station_position)
                     self.agent.decrease_autonomy_km(travel_km)
+
+                    self.agent.events_store.emit(
+                        event_type="travel_to_station",
+                        details={
+                            "distance": distance,
+                            "duration": duration
+                        }
+                    )
+
                     self.agent.status = TRANSPORT_MOVING_TO_STATION
                     self.set_next_state(TRANSPORT_MOVING_TO_STATION)
                     return
@@ -431,8 +477,13 @@ class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
                         "args": arguments
                     }
                     await self.request_access_station(
-                        self.agent.get_current_station(),
+                        station_id,
                         content
+                    )
+
+                    self.agent.events_store.emit(
+                        event_type="arrival_at_station",
+                        details={}
                     )
 
                     self.agent.status = TRANSPORT_IN_STATION_PLACE
@@ -1431,3 +1482,1563 @@ class FSMElectricTaxiBehaviour(FSMSimfleetBehaviour):
         self.add_transition(TRANSPORT_MOVING_TO_RETURN, TRANSPORT_WAITING)
 
         self.add_transition(TRANSPORT_CHARGING, TRANSPORT_WAITING_FOR_RETURN)
+
+
+################################################################
+#                                                              #
+#           NO Point Of Return Electric Taxi Strategy          #
+#                                                              #
+################################################################
+
+class NRPElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
+    """
+        Represents the 'Waiting' state for the electric taxi. The taxi is waiting to receive a transport request.
+
+        Methods:
+            on_start(): Sets the initial state to 'TRANSPORT_WAITING' and logs the state.
+            run(): Handles incoming messages, processes transport requests, and transitions to the next state.
+        """
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_WAITING
+
+    async def run(self):
+        msg = await self.receive(timeout=60)
+        if not msg:
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+        logger.debug("Agent[{}]: The agent received: {}".format(self.agent.jid, msg.body))
+        content = json.loads(msg.body)
+        performative = msg.get_metadata("performative")
+        if performative == REQUEST_PERFORMATIVE:
+
+            # New statistics
+            # Event 1: Customer Request Reception
+            self.agent.events_store.emit(
+                event_type="customer_request_reception",
+                details={}
+            )
+
+            if not self.agent.has_enough_autonomy_for_service(
+                content["origin"],
+                content["dest"]
+            ):
+
+                # New statistics
+                # Event 1e: Need for Service
+                self.agent.events_store.emit(
+                    event_type="transport_need_for_service",
+                    details={}
+                )
+
+                await self.cancel_proposal(content["customer_id"])
+                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+                return
+            else:
+
+                # New statistics
+                # Event 2: Transport Offer
+                self.agent.events_store.emit(
+                    event_type="transport_offer",
+                    details={}
+                )
+
+                await self.send_proposal(content["customer_id"], {})
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+                return
+        else:
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+
+
+class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
+
+    async def run(self):
+
+        msg = await self.receive(timeout=60)
+
+        if not msg:
+            self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+            return
+
+        performative = msg.get_metadata("performative")
+
+        if performative == ACCEPT_PERFORMATIVE:
+
+            customer_id = content["customer_id"]
+            origin = content["origin"]
+            dest = content["dest"]
+
+            travel_km = self.agent.calculate_service_km(
+                origin,
+                dest
+            )
+
+            if not self.agent.has_enough_autonomy_km(
+                travel_km
+            ):
+                await self.cancel_proposal(customer_id)
+
+                self.agent.set_busy()
+                self.agent.status = TRANSPORT_NEEDS_CHARGING
+                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+                return
+
+            try:
+
+                self.agent.add_assigned_customer(
+                    customer_id=customer_id,
+                    origin=origin,
+                    dest=dest
+                )
+
+                path, distance, duration = await self.agent.request_path(
+                    self.agent.get_position(),
+                    origin
+                )
+
+                await self.agent.move_to(origin)
+
+                self.agent.decrease_autonomy_km(
+                    travel_km
+                )
+
+                self.agent.set_busy()
+
+                self.agent.events_store.emit(
+                    event_type="transport_offer_acceptance",
+                    details={}
+                )
+
+                self.agent.events_store.emit(
+                    event_type="travel_to_pickup",
+                    details={
+                        "distance": distance,
+                        "duration": duration
+                    }
+                )
+
+                await self.inform_customer(
+                    customer_id=customer_id,
+                    status=TRANSPORT_MOVING_TO_CUSTOMER
+                )
+
+                self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
+                self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
+                return
+
+            except AlreadyInDestination:
+
+                self.agent.set_busy()
+
+                self.agent.events_store.emit(
+                    event_type="transport_offer_acceptance",
+                    details={}
+                )
+
+                await self.inform_customer(
+                    customer_id=customer_id,
+                    status=TRANSPORT_IN_CUSTOMER_PLACE
+                )
+
+                self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
+                self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
+                return
+
+            except PathRequestException:
+
+                logger.error(
+                    "Agent[{}]: Could not get a path to customer [{}].".format(
+                        self.agent.name,
+                        customer_id
+                    )
+                )
+
+                await self.cancel_proposal(customer_id)
+
+                self.agent.remove_assigned_customer()
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+
+                self.set_next_state(TRANSPORT_WAITING)
+                return
+
+            except Exception as e:
+
+                logger.error(
+                    "Unexpected error in transport [{}]: {}".format(
+                        self.agent.name,
+                        e
+                    )
+                )
+
+                await self.cancel_proposal(customer_id)
+
+                self.agent.remove_assigned_customer()
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+
+                self.set_next_state(TRANSPORT_WAITING)
+                return
+
+        elif performative == REFUSE_PERFORMATIVE:
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+
+        self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+
+
+
+class NPRElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
+
+    async def run(self):
+
+        customers = self.get("assigned_customer")
+
+        if not customers:
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+
+        customer_id = next(iter(customers.items()))[0]
+
+        try:
+
+            if not self.agent.is_in_destination():
+
+                msg = await self.receive(timeout=2)
+
+                if msg:
+                    performative = msg.get_metadata("performative")
+
+                    if performative == REQUEST_PERFORMATIVE:
+                        self.set_next_state(
+                            TRANSPORT_MOVING_TO_CUSTOMER
+                        )
+                        return
+
+                    elif performative == REFUSE_PERFORMATIVE:
+
+                        await self.cancel_proposal(customer_id)
+
+                        self.agent.remove_assigned_customer()
+
+                        self.agent.status = TRANSPORT_WAITING
+                        self.agent.set_available()
+
+                        self.set_next_state(
+                            TRANSPORT_WAITING
+                        )
+                        return
+
+                self.set_next_state(
+                    TRANSPORT_MOVING_TO_CUSTOMER
+                )
+                return
+
+            logger.info(
+                "Agent[{}]: The agent has arrived to customer [{}].".format(
+                    self.agent.name,
+                    customer_id
+                )
+            )
+
+            await self.inform_customer(
+                customer_id=customer_id,
+                status=TRANSPORT_IN_CUSTOMER_PLACE
+            )
+
+            self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
+
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_CUSTOMER
+            )
+            return
+
+        except AlreadyInDestination:
+
+            await self.inform_customer(
+                customer_id=customer_id,
+                status=TRANSPORT_IN_CUSTOMER_PLACE
+            )
+
+            self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
+
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_CUSTOMER
+            )
+            return
+
+        except PathRequestException:
+
+            logger.error(
+                "Agent[{}]: Could not get a path to customer [{}].".format(
+                    self.agent.name,
+                    customer_id
+                )
+            )
+
+            await self.cancel_proposal(customer_id)
+
+            self.agent.remove_assigned_customer()
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+        except Exception as e:
+
+            logger.error(
+                "Unexpected error in transport [{}]: {}".format(
+                    self.agent.name,
+                    e
+                )
+            )
+
+            await self.cancel_proposal(customer_id)
+
+            self.agent.remove_assigned_customer()
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+
+class NPRElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
+
+    async def run(self):
+
+        msg = await self.receive(timeout=60)
+
+        if not msg:
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_CUSTOMER
+            )
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_CUSTOMER
+            )
+            return
+
+        performative = msg.get_metadata("performative")
+
+        if performative == INFORM_PERFORMATIVE:
+
+            if content.get("status") != CUSTOMER_IN_TRANSPORT:
+                self.set_next_state(
+                    TRANSPORT_ARRIVED_AT_CUSTOMER
+                )
+                return
+
+            customers = self.get("assigned_customer")
+
+            if not customers:
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING)
+                return
+
+            customer_id = next(iter(customers.items()))[0]
+            dest = next(iter(customers.items()))[1]["destination"]
+
+            try:
+
+                logger.debug(
+                    "Agent[{}]: Customer [{}] in transport.".format(
+                        self.agent.name,
+                        customer_id
+                    )
+                )
+
+                self.agent.add_customer_in_transport(
+                    customer_id=customer_id,
+                    dest=dest
+                )
+
+                self.agent.remove_assigned_customer()
+
+                self.agent.events_store.emit(
+                    event_type="customer_pickup",
+                    details={}
+                )
+
+                path, distance, duration = await self.agent.request_path(
+                    self.agent.get_position(),
+                    dest
+                )
+
+                await self.agent.move_to(dest)
+
+                self.agent.events_store.emit(
+                    event_type="travel_to_destination",
+                    details={
+                        "distance": distance,
+                        "duration": duration
+                    }
+                )
+
+                self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+
+                self.set_next_state(
+                    TRANSPORT_MOVING_TO_DESTINATION
+                )
+                return
+
+            except AlreadyInDestination:
+
+                self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+
+                self.set_next_state(
+                    TRANSPORT_ARRIVED_AT_DESTINATION
+                )
+                return
+
+            except PathRequestException:
+
+                logger.error(
+                    "Agent[{}]: Could not get a path to destination "
+                    "for customer [{}].".format(
+                        self.agent.name,
+                        customer_id
+                    )
+                )
+
+                await self.cancel_customer(
+                    customer_id=customer_id
+                )
+
+                self.agent.remove_customer_in_transport(
+                    customer_id
+                )
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+
+                self.set_next_state(
+                    TRANSPORT_WAITING
+                )
+                return
+
+            except Exception as e:
+
+                logger.error(
+                    "Unexpected error in transport [{}]: {}".format(
+                        self.agent.name,
+                        e
+                    )
+                )
+
+                await self.cancel_customer(
+                    customer_id=customer_id
+                )
+
+                self.agent.remove_customer_in_transport(
+                    customer_id
+                )
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+
+                self.set_next_state(
+                    TRANSPORT_WAITING
+                )
+                return
+
+        elif performative == CANCEL_PERFORMATIVE:
+
+            customers = self.get("assigned_customer")
+
+            if customers:
+                self.agent.remove_assigned_customer()
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+        self.set_next_state(
+            TRANSPORT_ARRIVED_AT_CUSTOMER
+        )
+
+
+class NPRElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+
+    async def run(self):
+
+        customers = self.get("current_customer")
+
+        if not customers:
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+
+        customer_id = next(iter(customers.items()))[0]
+
+        try:
+
+            if not self.agent.is_in_destination():
+
+                await self.agent.sleep(1)
+
+                self.set_next_state(
+                    TRANSPORT_MOVING_TO_DESTINATION
+                )
+                return
+
+            logger.info(
+                "Agent[{}]: The agent has arrived to destination "
+                "with customer [{}].".format(
+                    self.agent.name,
+                    customer_id
+                )
+            )
+
+            self.agent.events_store.emit(
+                event_type="trip_completion",
+                details={}
+            )
+
+            await self.inform_customer(
+                customer_id=customer_id,
+                status=CUSTOMER_IN_DEST
+            )
+
+            self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_DESTINATION
+            )
+            return
+
+        except AlreadyInDestination:
+
+            self.agent.events_store.emit(
+                event_type="trip_completion",
+                details={}
+            )
+
+            await self.inform_customer(
+                customer_id=customer_id,
+                status=CUSTOMER_IN_DEST
+            )
+
+            self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_DESTINATION
+            )
+            return
+
+        except PathRequestException:
+
+            logger.error(
+                "Agent[{}]: Could not complete the route "
+                "for customer [{}].".format(
+                    self.agent.name,
+                    customer_id
+                )
+            )
+
+            await self.cancel_customer(
+                customer_id=customer_id
+            )
+
+            self.agent.remove_customer_in_transport(
+                customer_id
+            )
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+        except Exception as e:
+
+            logger.error(
+                "Unexpected error in transport [{}]: {}".format(
+                    self.agent.name,
+                    e
+                )
+            )
+
+            await self.cancel_customer(
+                customer_id=customer_id
+            )
+
+            self.agent.remove_customer_in_transport(
+                customer_id
+            )
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+
+class NPRElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+
+    async def run(self):
+
+        customers = self.get("current_customer")
+
+        if not customers:
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+
+        customer_id = next(iter(customers.items()))[0]
+
+        msg = await self.receive(timeout=60)
+
+        if not msg:
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_DESTINATION
+            )
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(
+                TRANSPORT_ARRIVED_AT_DESTINATION
+            )
+            return
+
+        performative = msg.get_metadata("performative")
+
+        if performative == INFORM_PERFORMATIVE:
+
+            if content.get("status") != CUSTOMER_IN_DEST:
+                self.set_next_state(
+                    TRANSPORT_ARRIVED_AT_DESTINATION
+                )
+                return
+
+            self.agent.remove_customer_in_transport(
+                customer_id
+            )
+
+            self.agent.increment_completed_assignments()
+
+            logger.info(
+                "Agent[{}]: Service for customer [{}] completed.".format(
+                    self.agent.name,
+                    customer_id
+                )
+            )
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+        elif performative == CANCEL_PERFORMATIVE:
+
+            self.agent.remove_customer_in_transport(
+                customer_id
+            )
+
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+
+            self.set_next_state(
+                TRANSPORT_WAITING
+            )
+            return
+
+        self.set_next_state(
+            TRANSPORT_ARRIVED_AT_DESTINATION
+        )
+
+
+class NPRElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_NEEDS_CHARGING
+        self.agent.set_busy()
+
+    async def run(self):
+
+        if (
+            self.agent.get_stations() is None
+            or self.agent.get_number_stations() < 1
+        ):
+
+            logger.info(
+                "Agent[{}]: Looking for a charging station.".format(
+                    self.agent.name
+                )
+            )
+
+            stations = await self.agent.get_list_agent_position(
+                self.agent.service_type,
+                self.agent.get_stations()
+            )
+
+            self.agent.set_stations(stations)
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+        nearby_station = self.agent.nearst_agent(
+            self.agent.get_stations(),
+            self.agent.get_position()
+        )
+
+        if nearby_station is None:
+            logger.warning(
+                "Agent[{}]: No charging station available.".format(
+                    self.agent.name
+                )
+            )
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+        self.agent.set_nearby_station(
+            nearby_station
+        )
+
+        station_id = self.agent.get_nearby_station_id()
+        station_position = self.agent.get_nearby_station_position()
+
+        logger.info(
+            "Agent[{}]: Selected charging station [{}].".format(
+                self.agent.name,
+                station_id
+            )
+        )
+
+        try:
+
+            await self.go_to_the_station(
+                station_id,
+                station_position
+            )
+
+            path, distance, duration = await self.agent.request_path(
+                self.agent.get_position(),
+                station_position
+            )
+
+            travel_km = self.agent.calculate_distance_km(
+                self.agent.get_position(),
+                station_position
+            )
+
+            await self.agent.move_to(
+                station_position
+            )
+
+            self.agent.decrease_autonomy_km(
+                travel_km
+            )
+
+            self.agent.events_store.emit(
+                event_type="travel_to_station",
+                details={
+                    "distance": distance,
+                    "duration": duration
+                }
+            )
+
+            self.agent.status = TRANSPORT_MOVING_TO_STATION
+
+            self.set_next_state(
+                TRANSPORT_MOVING_TO_STATION
+            )
+            return
+
+        except AlreadyInDestination:
+
+            logger.info(
+                "Agent[{}]: Already at charging station [{}].".format(
+                    self.agent.name,
+                    station_id
+                )
+            )
+
+            arguments = {
+                "transport_need":
+                    self.agent.max_autonomy_km
+                    - self.agent.current_autonomy_km
+            }
+
+            content = {
+                "service_name": self.agent.service_type,
+                "object_type": "transport",
+                "args": arguments
+            }
+
+            await self.request_access_station(
+                self.agent.get_current_station(),
+                content
+            )
+
+            self.agent.events_store.emit(
+                event_type="arrival_at_station",
+                details={}
+            )
+
+            self.agent.status = TRANSPORT_IN_STATION_PLACE
+
+            self.set_next_state(
+                TRANSPORT_IN_STATION_PLACE
+            )
+            return
+
+        except PathRequestException:
+
+            logger.error(
+                "Agent[{}]: Could not get a path to charging "
+                "station [{}].".format(
+                    self.agent.name,
+                    station_id
+                )
+            )
+
+            await self.drop_station()
+
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+        except Exception as e:
+
+            logger.error(
+                "Unexpected error in electric taxi [{}]: {}".format(
+                    self.agent.name,
+                    e
+                )
+            )
+
+            await self.drop_station()
+
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+
+class NPRElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_MOVING_TO_STATION
+
+    async def run(self):
+
+        station_id = self.agent.get_current_station()
+
+        try:
+
+            if not self.agent.is_in_destination():
+
+                await self.agent.sleep(1)
+
+                self.set_next_state(
+                    TRANSPORT_MOVING_TO_STATION
+                )
+                return
+
+            logger.info(
+                "Agent[{}]: Arrived at charging station [{}].".format(
+                    self.agent.name,
+                    station_id
+                )
+            )
+
+            arguments = {
+                "transport_need":
+                    self.agent.max_autonomy_km
+                    - self.agent.current_autonomy_km
+            }
+
+            content = {
+                "service_name": self.agent.service_type,
+                "object_type": "transport",
+                "args": arguments
+            }
+
+            await self.request_access_station(
+                station_id,
+                content
+            )
+
+            self.agent.events_store.emit(
+                event_type="arrival_at_station",
+                details={}
+            )
+
+            self.agent.status = TRANSPORT_IN_STATION_PLACE
+
+            self.set_next_state(
+                TRANSPORT_IN_STATION_PLACE
+            )
+            return
+
+        except AlreadyInDestination:
+
+            logger.info(
+                "Agent[{}]: Already at charging station [{}].".format(
+                    self.agent.name,
+                    station_id
+                )
+            )
+
+            arguments = {
+                "transport_need":
+                    self.agent.max_autonomy_km
+                    - self.agent.current_autonomy_km
+            }
+
+            content = {
+                "service_name": self.agent.service_type,
+                "object_type": "transport",
+                "args": arguments
+            }
+
+            await self.request_access_station(
+                station_id,
+                content
+            )
+
+            self.agent.events_store.emit(
+                event_type="arrival_at_station",
+                details={}
+            )
+
+            self.agent.status = TRANSPORT_IN_STATION_PLACE
+
+            self.set_next_state(
+                TRANSPORT_IN_STATION_PLACE
+            )
+            return
+
+        except PathRequestException:
+
+            logger.error(
+                "Agent[{}]: Could not complete route "
+                "to charging station [{}].".format(
+                    self.agent.name,
+                    station_id
+                )
+            )
+
+            await self.drop_station()
+
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+        except Exception as e:
+
+            logger.error(
+                "Unexpected error in electric taxi [{}]: {}".format(
+                    self.agent.name,
+                    e
+                )
+            )
+
+            await self.drop_station()
+
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+
+class NPRElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_IN_STATION_PLACE
+
+    async def run(self):
+
+        msg = await self.receive(timeout=60)
+
+        if not msg:
+            self.set_next_state(
+                TRANSPORT_IN_STATION_PLACE
+            )
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(
+                TRANSPORT_IN_STATION_PLACE
+            )
+            return
+
+        performative = msg.get_metadata(
+            "performative"
+        )
+
+        if performative == ACCEPT_PERFORMATIVE:
+
+            if content.get("station_id") is None:
+                self.set_next_state(
+                    TRANSPORT_IN_STATION_PLACE
+                )
+                return
+
+            logger.debug(
+                "Agent[{}]: ACCEPT received from station [{}].".format(
+                    self.agent.name,
+                    content["station_id"]
+                )
+            )
+
+            self.agent.events_store.emit(
+                event_type="wait_for_service",
+                details={}
+            )
+
+            self.agent.status = TRANSPORT_IN_WAITING_LIST
+
+            self.set_next_state(
+                TRANSPORT_IN_WAITING_LIST
+            )
+            return
+
+        elif performative == REFUSE_PERFORMATIVE:
+
+            logger.info(
+                "Agent[{}]: Charging station [{}] refused the request.".format(
+                    self.agent.name,
+                    self.agent.get_current_station()
+                )
+            )
+
+            await self.drop_station()
+
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+        self.set_next_state(
+            TRANSPORT_IN_STATION_PLACE
+        )
+
+
+class NPRElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_IN_WAITING_LIST
+
+    async def run(self):
+
+        msg = await self.receive(timeout=5)
+
+        if not msg:
+            self.set_next_state(
+                TRANSPORT_IN_WAITING_LIST
+            )
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(
+                TRANSPORT_IN_WAITING_LIST
+            )
+            return
+
+        performative = msg.get_metadata(
+            "performative"
+        )
+
+        if performative == INFORM_PERFORMATIVE:
+
+            if content.get("station_id") is None:
+                self.set_next_state(
+                    TRANSPORT_IN_WAITING_LIST
+                )
+                return
+
+            if content.get("serving"):
+
+                logger.debug(
+                    "Agent[{}]: Charging service started at station [{}].".format(
+                        self.agent.name,
+                        content["station_id"]
+                    )
+                )
+
+                self.agent.events_store.emit(
+                    event_type="service_start",
+                    details={}
+                )
+
+                self.agent.status = TRANSPORT_CHARGING
+
+                self.set_next_state(
+                    TRANSPORT_CHARGING
+                )
+                return
+
+            self.set_next_state(
+                TRANSPORT_IN_WAITING_LIST
+            )
+            return
+
+        elif performative == REFUSE_PERFORMATIVE:
+
+            logger.info(
+                "Agent[{}]: Charging service refused by station [{}].".format(
+                    self.agent.name,
+                    self.agent.get_current_station()
+                )
+            )
+
+            await self.drop_station()
+
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+
+            self.set_next_state(
+                TRANSPORT_NEEDS_CHARGING
+            )
+            return
+
+        self.set_next_state(
+            TRANSPORT_IN_WAITING_LIST
+        )
+
+
+class NPRElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = TRANSPORT_CHARGING
+
+    async def run(self):
+
+        msg = await self.receive(timeout=60)
+
+        if not msg:
+            self.set_next_state(
+                TRANSPORT_CHARGING
+            )
+            return
+
+        try:
+            content = json.loads(msg.body)
+
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(
+                TRANSPORT_CHARGING
+            )
+            return
+
+        protocol = msg.get_metadata(
+            "protocol"
+        )
+
+        performative = msg.get_metadata(
+            "performative"
+        )
+
+        if (
+            protocol == REQUEST_PROTOCOL
+            and performative == INFORM_PERFORMATIVE
+        ):
+
+            if content.get("charged"):
+
+                self.agent.increase_full_autonomy_km()
+
+                await self.drop_station()
+
+                self.agent.events_store.emit(
+                    event_type="service_completion",
+                    details={}
+                )
+
+                logger.info(
+                    "Agent[{}]: Charging completed. "
+                    "Current autonomy: {} km.".format(
+                        self.agent.name,
+                        self.agent.get_autonomy()
+                    )
+                )
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+
+                self.set_next_state(
+                    TRANSPORT_WAITING
+                )
+                return
+
+        self.set_next_state(
+            TRANSPORT_CHARGING
+        )
+
+
+class FSMNPRElectricTaxiBehaviour(FSMSimfleetBehaviour):
+
+    def setup(self):
+
+        # ============================================================
+        # States
+        # ============================================================
+
+        self.add_state(
+            TRANSPORT_WAITING,
+            NRPElectricTaxiWaitingState(),
+            initial=True
+        )
+
+        self.add_state(
+            TRANSPORT_WAITING_FOR_APPROVAL,
+            NPRElectricTaxiWaitingForApprovalState()
+        )
+
+        self.add_state(
+            TRANSPORT_MOVING_TO_CUSTOMER,
+            NPRElectricTaxiMovingToCustomerState()
+        )
+
+        self.add_state(
+            TRANSPORT_ARRIVED_AT_CUSTOMER,
+            NPRElectricTaxiArrivedAtCustomerState()
+        )
+
+        self.add_state(
+            TRANSPORT_MOVING_TO_DESTINATION,
+            NPRElectricTaxiMovingToCustomerDestState()
+        )
+
+        self.add_state(
+            TRANSPORT_ARRIVED_AT_DESTINATION,
+            NPRElectricTaxiArrivedAtCustomerDestState()
+        )
+
+        self.add_state(
+            TRANSPORT_NEEDS_CHARGING,
+            NPRElectricTaxiNeedsChargingState()
+        )
+
+        self.add_state(
+            TRANSPORT_MOVING_TO_STATION,
+            NPRElectricTaxiMovingToStationState()
+        )
+
+        self.add_state(
+            TRANSPORT_IN_STATION_PLACE,
+            NPRElectricTaxiInStationState()
+        )
+
+        self.add_state(
+            TRANSPORT_IN_WAITING_LIST,
+            NPRElectricTaxiInWaitingListState()
+        )
+
+        self.add_state(
+            TRANSPORT_CHARGING,
+            NPRElectricTaxiChargingState()
+        )
+
+        # ============================================================
+        # WAITING
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_WAITING,
+            TRANSPORT_WAITING
+        )
+
+        self.add_transition(
+            TRANSPORT_WAITING,
+            TRANSPORT_WAITING_FOR_APPROVAL
+        )
+
+        self.add_transition(
+            TRANSPORT_WAITING,
+            TRANSPORT_NEEDS_CHARGING
+        )
+
+        # ============================================================
+        # WAITING FOR APPROVAL
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_WAITING_FOR_APPROVAL,
+            TRANSPORT_WAITING_FOR_APPROVAL
+        )
+
+        self.add_transition(
+            TRANSPORT_WAITING_FOR_APPROVAL,
+            TRANSPORT_WAITING
+        )
+
+        self.add_transition(
+            TRANSPORT_WAITING_FOR_APPROVAL,
+            TRANSPORT_NEEDS_CHARGING
+        )
+
+        self.add_transition(
+            TRANSPORT_WAITING_FOR_APPROVAL,
+            TRANSPORT_MOVING_TO_CUSTOMER
+        )
+
+        self.add_transition(
+            TRANSPORT_WAITING_FOR_APPROVAL,
+            TRANSPORT_ARRIVED_AT_CUSTOMER
+        )
+
+        # ============================================================
+        # MOVING TO CUSTOMER
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_CUSTOMER,
+            TRANSPORT_MOVING_TO_CUSTOMER
+        )
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_CUSTOMER,
+            TRANSPORT_ARRIVED_AT_CUSTOMER
+        )
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_CUSTOMER,
+            TRANSPORT_WAITING
+        )
+
+        # ============================================================
+        # ARRIVED AT CUSTOMER
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_ARRIVED_AT_CUSTOMER,
+            TRANSPORT_ARRIVED_AT_CUSTOMER
+        )
+
+        self.add_transition(
+            TRANSPORT_ARRIVED_AT_CUSTOMER,
+            TRANSPORT_MOVING_TO_DESTINATION
+        )
+
+        self.add_transition(
+            TRANSPORT_ARRIVED_AT_CUSTOMER,
+            TRANSPORT_ARRIVED_AT_DESTINATION
+        )
+
+        self.add_transition(
+            TRANSPORT_ARRIVED_AT_CUSTOMER,
+            TRANSPORT_WAITING
+        )
+
+        # ============================================================
+        # MOVING TO DESTINATION
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_DESTINATION,
+            TRANSPORT_MOVING_TO_DESTINATION
+        )
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_DESTINATION,
+            TRANSPORT_ARRIVED_AT_DESTINATION
+        )
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_DESTINATION,
+            TRANSPORT_WAITING
+        )
+
+        # ============================================================
+        # ARRIVED AT DESTINATION
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_ARRIVED_AT_DESTINATION,
+            TRANSPORT_ARRIVED_AT_DESTINATION
+        )
+
+        self.add_transition(
+            TRANSPORT_ARRIVED_AT_DESTINATION,
+            TRANSPORT_WAITING
+        )
+
+        # ============================================================
+        # NEEDS CHARGING
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_NEEDS_CHARGING,
+            TRANSPORT_NEEDS_CHARGING
+        )
+
+        self.add_transition(
+            TRANSPORT_NEEDS_CHARGING,
+            TRANSPORT_MOVING_TO_STATION
+        )
+
+        self.add_transition(
+            TRANSPORT_NEEDS_CHARGING,
+            TRANSPORT_IN_STATION_PLACE
+        )
+
+        # ============================================================
+        # MOVING TO STATION
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_STATION,
+            TRANSPORT_MOVING_TO_STATION
+        )
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_STATION,
+            TRANSPORT_IN_STATION_PLACE
+        )
+
+        self.add_transition(
+            TRANSPORT_MOVING_TO_STATION,
+            TRANSPORT_NEEDS_CHARGING
+        )
+
+        # ============================================================
+        # IN STATION PLACE
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_IN_STATION_PLACE,
+            TRANSPORT_IN_STATION_PLACE
+        )
+
+        self.add_transition(
+            TRANSPORT_IN_STATION_PLACE,
+            TRANSPORT_IN_WAITING_LIST
+        )
+
+        self.add_transition(
+            TRANSPORT_IN_STATION_PLACE,
+            TRANSPORT_NEEDS_CHARGING
+        )
+
+        # ============================================================
+        # IN WAITING LIST
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_IN_WAITING_LIST,
+            TRANSPORT_IN_WAITING_LIST
+        )
+
+        self.add_transition(
+            TRANSPORT_IN_WAITING_LIST,
+            TRANSPORT_CHARGING
+        )
+
+        self.add_transition(
+            TRANSPORT_IN_WAITING_LIST,
+            TRANSPORT_NEEDS_CHARGING
+        )
+
+        # ============================================================
+        # CHARGING
+        # ============================================================
+
+        self.add_transition(
+            TRANSPORT_CHARGING,
+            TRANSPORT_CHARGING
+        )
+
+        self.add_transition(
+            TRANSPORT_CHARGING,
+            TRANSPORT_WAITING
+        )
