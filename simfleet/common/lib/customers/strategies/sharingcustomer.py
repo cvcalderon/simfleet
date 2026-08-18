@@ -3,11 +3,12 @@ import json
 
 from loguru import logger
 from spade.message import Message
+from spade.behaviour import State
 
 from simfleet.utils.abstractstrategies import FSMSimfleetBehaviour
-from simfleet.common.lib.customers.models.sharingcustomer import SharingCustomerStrategyBehaviour
 
-from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE, REFUSE_PERFORMATIVE, CANCEL_PERFORMATIVE, REQUEST_PROTOCOL
+from simfleet.communications.protocol import QUERY_PROTOCOL, INFORM_PERFORMATIVE, ACCEPT_PERFORMATIVE, \
+    REFUSE_PERFORMATIVE, CANCEL_PERFORMATIVE, REQUEST_PROTOCOL, REQUEST_PERFORMATIVE, PROPOSE_PERFORMATIVE
 from simfleet.utils.status import CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT, \
     CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST, CUSTOMER_IN_STATION, CUSTOMER_MOVING_TO_DEST
 from simfleet.utils.helpers import (
@@ -17,248 +18,1130 @@ from simfleet.utils.helpers import (
 )
 
 
+# ==================================================================
+# ---------------------- Strategy Behaviour ------------------------
+# ==================================================================
+
+class SharingCustomerStrategyBehaviour(State):
+
+    async def on_start(self):
+        """
+        Initializes the logger and timers. Call to parent method if overloaded.
+        """
+        logger.debug("Strategy {} started in customer {}".format(type(self).__name__, self.agent.name))
+
+    async def go_to_transport(self):
+        transport_id = (
+            self.agent.get_current_transport_id()
+        )
+
+        transport_position = (
+            self.agent.get_current_transport_position()
+        )
+
+        if (
+            transport_id is None
+            or transport_position is None
+        ):
+            logger.warning(
+                "Customer [{}]: No current transport "
+                "available to walk to.".format(
+                    self.agent.name
+                )
+            )
+            return
+
+        logger.info(
+            "Customer [{}]: Walking to sharing transport [{}].".format(
+                self.agent.name,
+                transport_id
+            )
+        )
+
+        await self.agent.move_to(
+            transport_position
+        )
+
+    async def request_transport_candidates(
+        self,
+        fleetmanager_id
+    ):
+        content = {
+            "request_type": "sharing_candidates",
+            "customer_id": str(self.agent.jid),
+            "origin": self.agent.get_position()
+        }
+
+        if self.agent.max_walking_dist is not None:
+            content["max_walking_distance"] = (
+                self.agent.max_walking_dist
+            )
+
+        msg = Message()
+
+        msg.to = str(fleetmanager_id)
+
+        msg.set_metadata(
+            "protocol",
+            REQUEST_PROTOCOL
+        )
+
+        msg.set_metadata(
+            "performative",
+            REQUEST_PERFORMATIVE
+        )
+
+        msg.body = json.dumps(content)
+
+        logger.debug(
+            "Customer [{}]: Requesting sharing candidates "
+            "from fleet manager [{}].".format(
+                self.agent.name,
+                fleetmanager_id
+            )
+        )
+
+        await self.send(msg)
+
+    def select_transport(self):
+        candidates = (
+            self.agent.get_transport_candidates()
+        )
+
+        if not candidates:
+            return None
+
+        return min(
+            candidates,
+            key=lambda candidate: candidate["distance"]
+        )
+
+    async def request_transport_booking(
+        self,
+        transport
+    ):
+        transport_id = transport.get("jid")
+
+        if transport_id is None:
+            logger.warning(
+                "Customer [{}]: Cannot book transport "
+                "without a jid.".format(
+                    self.agent.name
+                )
+            )
+            return
+
+        content = {
+            "customer_id": str(self.agent.jid),
+            "dest": self.agent.customer_dest
+        }
+
+        msg = Message()
+
+        msg.to = str(transport_id)
+
+        msg.set_metadata(
+            "protocol",
+            REQUEST_PROTOCOL
+        )
+
+        msg.set_metadata(
+            "performative",
+            PROPOSE_PERFORMATIVE
+        )
+
+        msg.body = json.dumps(content)
+
+        logger.info(
+            "Customer [{}]: Requesting booking "
+            "of sharing transport [{}].".format(
+                self.agent.name,
+                transport_id
+            )
+        )
+
+        await self.send(msg)
+
+
+    async def request_a_transport(self, content):
+        """
+            Request a transport to sharing-station
+
+            Args:
+                content (dict, optional): Information needed for registration.
+        """
+        if content is None:
+            content = {}
+        msg = Message()
+        msg.to = self.agent.current_station[0]
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", REQUEST_PERFORMATIVE)
+        msg.body = json.dumps(content)
+        logger.debug("Customer {} asked to register to stop {} with destination {}".format(self.agent.name,
+                                                                                           self.agent.current_station[0],
+                                                                                           self.agent.destination_station[
+                                                                                               1]))
+        await self.send(msg)
+
+
+    async def request_a_place_for_transport(self, content):
+        """
+            Request a transport to sharing-station
+
+            Args:
+                content (dict, optional): Information needed for registration.
+        """
+        if content is None:
+            content = {}
+        msg = Message()
+        msg.to = self.agent.destination_station[0]
+        msg.set_metadata("protocol", REQUEST_PROTOCOL)
+        msg.set_metadata("performative", INFORM_PERFORMATIVE)
+        msg.body = json.dumps(content)
+        logger.debug("Customer {} asked to register transport {}".format(self.agent.name,
+                                                                         self.agent.destination_station[0]))
+        await self.send(msg)
+
+
+    async def cancel_transport_booking(
+        self,
+        transport_id
+    ):
+        if transport_id is None:
+            return
+
+        msg = Message()
+
+        msg.to = str(transport_id)
+
+        msg.set_metadata(
+            "protocol",
+            REQUEST_PROTOCOL
+        )
+
+        msg.set_metadata(
+            "performative",
+            CANCEL_PERFORMATIVE
+        )
+
+        msg.body = json.dumps(
+            {
+                "customer_id": str(self.agent.jid)
+            }
+        )
+
+        logger.info(
+            "Customer [{}]: Cancelling booking "
+            "with sharing transport [{}].".format(
+                self.agent.name,
+                transport_id
+            )
+        )
+
+        await self.send(msg)
+
+    async def inform_transport_arrival(self):
+        transport_id = (
+            self.agent.get_current_transport_id()
+        )
+
+        if transport_id is None:
+            logger.warning(
+                "Customer [{}]: Cannot inform arrival "
+                "without a current transport.".format(
+                    self.agent.name
+                )
+            )
+            return
+
+        msg = Message()
+
+        msg.to = str(transport_id)
+
+        msg.set_metadata(
+            "protocol",
+            REQUEST_PROTOCOL
+        )
+
+        msg.set_metadata(
+            "performative",
+            INFORM_PERFORMATIVE
+        )
+
+        msg.body = json.dumps(
+            {
+                "customer_id": str(self.agent.jid)
+            }
+        )
+
+        logger.info(
+            "Customer [{}]: Arrived at sharing transport [{}].".format(
+                self.agent.name,
+                transport_id
+            )
+        )
+
+        await self.send(msg)
+
+    async def run(self):
+        raise NotImplementedError
+
+# ==================================================================
+# -------------------------End Behaviour----------------------------
+# ==================================================================
+
+
+
 ################################################################
 #                                                              #
 #                       Customer Strategy                      #
 #                                                              #
 ################################################################
 class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
+    """
+    Represents the state where the sharing customer searches for
+    available free-floating transports and selects a candidate.
+    """
 
     async def on_start(self):
         await super().on_start()
+
         self.agent.status = CUSTOMER_WAITING
-        logger.debug("{} in Customer Waiting State".format(self.agent.jid))
-        await asyncio.sleep(1)
+
+        logger.debug(
+            "Agent[{}]: The sharing customer is waiting.".format(
+                self.agent.name
+            )
+        )
 
     async def run(self):
-        # Get fleet managers
-        #if self.agent.fleetmanagers is None:
-        #    await self.send_get_managers(self.agent.fleet_type)
 
-        # If the customer does not have a fleet manager assigned, get the list of fleet managers.
-        if self.agent.get_fleetmanagers() is None:
-            fleetmanager_list = await self.agent.get_list_agent_position(self.agent.fleet_type,
-                                                                             self.agent.get_fleetmanagers())
+        # Discover the FleetManager if it is not known yet.
+        if not self.agent.get_fleetmanagers():
 
-            self.agent.set_fleetmanagers(fleetmanager_list)
+            logger.info(
+                "Agent[{}]: Looking for sharing fleet managers.".format(
+                    self.agent.name
+                )
+            )
 
-            #Código antiguo
-            #msg = await self.receive(timeout=30)
-            #if msg:
-            #    protocol = msg.get_metadata("protocol")
-            #    if protocol == QUERY_PROTOCOL:
-            #        performative = msg.get_metadata("performative")
-            #        if performative == INFORM_PERFORMATIVE:
-            #            self.agent.fleetmanagers = json.loads(msg.body)
-            #            logger.debug("{} Get fleet managers {}".format(self.agent.name, self.agent.fleetmanagers))
-            #            self.set_next_state(CUSTOMER_WAITING)
-            #            return
-            #        elif performative == CANCEL_PERFORMATIVE:
-            #            logger.debug("Cancellation of request for {} information".format(self.agent.type_service))
-            #            self.set_next_state(CUSTOMER_WAITING)
-            #            return
-        else:
-            # Get list of available transports
-            if self.agent.available_transports is None or len(self.agent.available_transports) < 1:
-                await self.send_get_transports()
+            fleetmanagers = await self.agent.get_list_agent_position(
+                self.agent.fleet_type,
+                self.agent.get_fleetmanagers()
+            )
+
+            self.agent.set_fleetmanagers(
+                fleetmanagers
+            )
+
+            if not fleetmanagers:
+                logger.warning(
+                    "Agent[{}]: No sharing fleet managers available.".format(
+                        self.agent.name
+                    )
+                )
+
+                await self.agent.sleep(5)
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
+            return
+
+        # Request a new list only when there are no local candidates.
+        if not self.agent.get_transport_candidates():
+
+            fleetmanagers = (
+                self.agent.get_fleetmanagers()
+                or {}
+            )
+
+            for fleetmanager_id in fleetmanagers.keys():
+
+                await self.request_transport_candidates(
+                    fleetmanager_id
+                )
+
+            candidates = {}
+
+            # A response is expected from each FleetManager.
+            for _ in range(len(fleetmanagers)):
 
                 msg = await self.receive(timeout=5)
+
                 if not msg:
-                    self.agent.available_transports = None
-                    self.set_next_state(CUSTOMER_WAITING)
-                    return
-                logger.debug("Customer received message: {}".format(msg))
+                    break
+
+                protocol = msg.get_metadata(
+                    "protocol"
+                )
+
+                performative = msg.get_metadata(
+                    "performative"
+                )
+
+                if (
+                    protocol != REQUEST_PROTOCOL
+                    or performative != INFORM_PERFORMATIVE
+                ):
+                    continue
+
                 try:
-                    content = json.loads(msg.body)
-                    # if the list of available transports is empty, the customer waits 5 seconds before asking for it again
-                    if content == {}:
-                        logger.debug(f"Customer {self.agent.name} received empty available transports list. It will "
-                                       f" wait 5 seconds before asking again.")
-                        await asyncio.sleep(5)
-                        return self.set_next_state(CUSTOMER_WAITING)
-                except TypeError:
-                    content = {}
-                performative = msg.get_metadata("performative")
-                protocol = msg.get_metadata("protocol")
-                if protocol == QUERY_PROTOCOL:
-                    #Analizar porque después de utilizar un instance.join() el agente recibe el mensaje del director en este lugar
-                    #Añadido un filtro para descartar dirección del director
-                    if performative == INFORM_PERFORMATIVE and (msg.sender != self.agent.directory_id and msg.sender != None):
-                        self.agent.available_transports = content
-                        logger.debug("Customer {} got dict of available transports {}".format(self.agent.name,
-                                                                                              self.agent.available_transports))
-                        self.set_next_state(CUSTOMER_WAITING)
-                        return
-                    elif performative == CANCEL_PERFORMATIVE:
-                        logger.info("Cancellation of request for stations information.")
-                        self.set_next_state(CUSTOMER_WAITING)
-                        return
-                    else:
-                        logger.warning("Customer {} received an unexpected message from {} with content {}"
-                                       .format(self.agent.name, msg.sender, content))
-                        self.set_next_state(CUSTOMER_WAITING)
-                        return
+                    content = json.loads(
+                        msg.body
+                    )
 
-            else:  # Send proposal
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Agent[{}]: Invalid sharing candidates response.".format(
+                            self.agent.name
+                        )
+                    )
+                    continue
 
-                closest_transport = self.agent.nearst_agent(self.agent.available_transports, self.agent.get_position())
+                if (
+                    content.get("request_type")
+                    != "sharing_candidates"
+                ):
+                    continue
 
-                #transport_positions = []
-                #for key in self.agent.available_transports.keys():
-                #    dic = self.agent.available_transports.get(key)
-                #    transport_positions.append((dic['jid'], dic['position']))
-                #######################
-                # for debugging purposes
-                #for jid, pos in transport_positions:
-                #    logger.debug("Transport {} is {} meters away from customer {}".format(jid,
-                #        distance_in_meters(self.agent.get_position(), pos), self.agent.name))
-                #######################
-                #closest_transport = min(transport_positions,
-                #                        key=lambda x: distance_in_meters(x[1], self.agent.get_position()))
+                vehicles = content.get(
+                    "vehicles",
+                    []
+                )
 
+                if not isinstance(vehicles, list):
+                    continue
 
-                # If the customer is receiving the same closes transport over and over and it can't walk to it,
-                # make it wait 5 seconds in between requests
-                if self.agent.previous_closest_transport is not None and self.agent.previous_closest_transport == closest_transport:
-                    await asyncio.sleep(5)
-                self.agent.previous_closest_transport = closest_transport
-                logger.debug("Closest transport: {}".format(closest_transport))
-                transport_id = closest_transport[0]
-                transport_position = closest_transport[1]
-                # Check if the transport is close enough for the customer to walk to it
-                if not self.agent.can_walk(transport_position):
-                    closest_transport = None
-                    logger.info(f"Customer {self.agent.name} cannot walk to their closest transport")
-                # delete that transport from the available_transports list
-                del self.agent.available_transports[transport_id]
-                if closest_transport is not None:
-                    await self.send_proposal(transport_id)  # maybe str(transport_id)
-                    self.set_next_state(CUSTOMER_WAITING_FOR_APPROVAL)
-                    return
-                else:
-                    logger.debug("Closest transport to customer {} was None".format(self.agent.name))
-                    # self.agent.available_transports = []
-                    self.set_next_state(CUSTOMER_WAITING)
-                    return
+                for vehicle in vehicles:
 
-        self.set_next_state(CUSTOMER_WAITING)
+                    if not isinstance(vehicle, dict):
+                        continue
+
+                    vehicle_id = vehicle.get(
+                        "jid"
+                    )
+
+                    position = vehicle.get(
+                        "position"
+                    )
+
+                    if (
+                        vehicle_id is None
+                        or position is None
+                    ):
+                        continue
+
+                    candidates[
+                        str(vehicle_id)
+                    ] = vehicle
+
+            self.agent.set_transport_candidates(
+                list(candidates.values())
+            )
+
+            if not self.agent.get_transport_candidates():
+
+                logger.info(
+                    "Agent[{}]: No sharing transports available.".format(
+                        self.agent.name
+                    )
+                )
+
+                await self.agent.sleep(5)
+
+                self.set_next_state(
+                    CUSTOMER_WAITING
+                )
+                return
+
+        # The FleetManager performs discovery, but the customer
+        # keeps control over its own walking constraint.
+        valid_candidates = []
+
+        for candidate in self.agent.get_transport_candidates():
+
+            position = candidate.get(
+                "position"
+            )
+
+            if position is None:
+                continue
+
+            if self.agent.can_walk(
+                position
+            ):
+                valid_candidates.append(
+                    candidate
+                )
+
+        self.agent.set_transport_candidates(
+            valid_candidates
+        )
+
+        if not valid_candidates:
+
+            logger.info(
+                "Agent[{}]: No sharing transport is within "
+                "walking distance.".format(
+                    self.agent.name
+                )
+            )
+
+            await self.agent.sleep(5)
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
+            return
+
+        # The decision belongs to the customer strategy.
+        selected_transport = (
+            self.select_transport()
+        )
+
+        if selected_transport is None:
+
+            self.agent.clear_transport_candidates()
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
+            return
+
+        transport_id = selected_transport.get(
+            "jid"
+        )
+
+        if transport_id is None:
+
+            self.agent.clear_transport_candidates()
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
+            return
+
+        logger.info(
+            "Agent[{}]: Selected sharing transport [{}].".format(
+                self.agent.name,
+                transport_id
+            )
+        )
+
+        self.agent.set_pending_transport(
+            selected_transport
+        )
+
+        await self.request_transport_booking(
+            selected_transport
+        )
+
+        self.agent.status = (
+            CUSTOMER_WAITING_FOR_APPROVAL
+        )
+
+        self.set_next_state(
+            CUSTOMER_WAITING_FOR_APPROVAL
+        )
         return
 
-class SharingCustomerWaitingForApprovalState(SharingCustomerStrategyBehaviour):
+class SharingCustomerWaitingForApprovalState(
+    SharingCustomerStrategyBehaviour
+):
+    """
+    Represents the state where the customer waits for the
+    selected sharing transport to accept or refuse the booking.
+    """
 
     async def on_start(self):
         await super().on_start()
-        self.agent.status = CUSTOMER_WAITING_FOR_APPROVAL
-        logger.debug("{} in Customer Waiting for Approval State".format(self.agent.jid))
+
+        self.agent.status = (
+            CUSTOMER_WAITING_FOR_APPROVAL
+        )
+
+        logger.debug(
+            "Agent[{}]: Waiting for sharing transport "
+            "booking approval.".format(
+                self.agent.name
+            )
+        )
 
     async def run(self):
-        msg = await self.receive(timeout=60)
-        if not msg:
-            self.set_next_state(CUSTOMER_WAITING_FOR_APPROVAL)
+
+        pending_transport = (
+            self.agent.get_pending_transport()
+        )
+
+        if pending_transport is None:
+
+            logger.warning(
+                "Agent[{}]: Waiting for approval without "
+                "a pending transport.".format(
+                    self.agent.name
+                )
+            )
+
+            self.agent.status = CUSTOMER_WAITING
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
             return
-        content = json.loads(msg.body)
-        performative = msg.get_metadata("performative")
+
+        pending_transport_id = (
+            self.agent.get_pending_transport_id()
+        )
+
+        msg = await self.receive(timeout=60)
+
+        # The booking request is still pending.
+        if not msg:
+            self.set_next_state(
+                CUSTOMER_WAITING_FOR_APPROVAL
+            )
+            return
+
+        protocol = msg.get_metadata(
+            "protocol"
+        )
+
+        if protocol != REQUEST_PROTOCOL:
+            self.set_next_state(
+                CUSTOMER_WAITING_FOR_APPROVAL
+            )
+            return
+
+        # Ignore responses from transports other than the one
+        # whose booking is currently pending.
+        if str(msg.sender) != str(pending_transport_id):
+
+            logger.debug(
+                "Agent[{}]: Ignoring booking response "
+                "from transport [{}].".format(
+                    self.agent.name,
+                    msg.sender
+                )
+            )
+
+            self.set_next_state(
+                CUSTOMER_WAITING_FOR_APPROVAL
+            )
+            return
+
+        try:
+            content = json.loads(
+                msg.body
+            )
+
+        except (json.JSONDecodeError, TypeError):
+
+            logger.warning(
+                "Agent[{}]: Invalid booking response "
+                "from transport [{}].".format(
+                    self.agent.name,
+                    pending_transport_id
+                )
+            )
+
+            self.set_next_state(
+                CUSTOMER_WAITING_FOR_APPROVAL
+            )
+            return
+
+        performative = msg.get_metadata(
+            "performative"
+        )
+
         if performative == ACCEPT_PERFORMATIVE:
+
+            logger.info(
+                "Agent[{}]: Sharing transport [{}] "
+                "accepted the booking.".format(
+                    self.agent.name,
+                    pending_transport_id
+                )
+            )
+
+            transport = dict(
+                pending_transport
+            )
+
+            # The position returned by the transport is the
+            # most recent known position.
+            position = content.get(
+                "position"
+            )
+
+            if position is not None:
+                transport["position"] = position
+
+            self.agent.set_current_transport(
+                transport
+            )
+
+            self.agent.clear_pending_transport()
+
             try:
-                logger.info("Customer {} booked transport {}".format(self.agent.name,
-                                                                      content["transport_id"]))
-                await self.go_to_transport(content["transport_id"], content["position"])
-                self.agent.status = CUSTOMER_MOVING_TO_TRANSPORT
-                self.set_next_state(CUSTOMER_MOVING_TO_TRANSPORT)
+
+                await self.go_to_transport()
+
+            except AlreadyInDestination:
+
+                logger.info(
+                    "Agent[{}]: Customer is already at "
+                    "sharing transport [{}].".format(
+                        self.agent.name,
+                        pending_transport_id
+                    )
+                )
+
+                self.agent.clear_transport_candidates()
+
+                await self.inform_transport_arrival()
+
+                self.agent.status = (
+                    CUSTOMER_IN_TRANSPORT
+                )
+
+                self.set_next_state(
+                    CUSTOMER_IN_TRANSPORT
+                )
                 return
+
             except PathRequestException:
-                logger.warning("Customer {} could not get a path to customer {}. Cancelling..."
-                             .format(self.agent.name, content["transport_id"]))
-                await self.cancel_proposal(content["transport_id"])
-                self.set_next_state(CUSTOMER_WAITING)
+
+                logger.warning(
+                    "Agent[{}]: Could not get a walking path "
+                    "to sharing transport [{}].".format(
+                        self.agent.name,
+                        pending_transport_id
+                    )
+                )
+
+                await self.cancel_transport_booking(
+                    pending_transport_id
+                )
+
+                self.agent.remove_transport_candidate(
+                    pending_transport_id
+                )
+
+                self.agent.clear_current_transport()
+
+                self.agent.status = CUSTOMER_WAITING
+
+                self.set_next_state(
+                    CUSTOMER_WAITING
+                )
                 return
+
             except Exception as e:
-                logger.error("Unexpected error in customer {}: {}".format(self.agent.name, e))
-                await self.cancel_proposal(content["transport_id"])
-                self.set_next_state(CUSTOMER_WAITING)
+
+                logger.error(
+                    "Unexpected error in sharing customer [{}]: {}".format(
+                        self.agent.name,
+                        e
+                    )
+                )
+
+                await self.cancel_transport_booking(
+                    pending_transport_id
+                )
+
+                self.agent.remove_transport_candidate(
+                    pending_transport_id
+                )
+
+                self.agent.clear_current_transport()
+
+                self.agent.status = CUSTOMER_WAITING
+
+                self.set_next_state(
+                    CUSTOMER_WAITING
+                )
                 return
+
+            # The booking is confirmed and a valid walking route
+            # to the sharing transport has been started.
+            self.agent.clear_transport_candidates()
+
+            self.agent.status = (
+                CUSTOMER_MOVING_TO_TRANSPORT
+            )
+
+            self.set_next_state(
+                CUSTOMER_MOVING_TO_TRANSPORT
+            )
+            return
 
         elif performative == REFUSE_PERFORMATIVE:
-            logger.info("Customer {} got refusal from transport".format(self.agent.name))
-            self.set_next_state(CUSTOMER_WAITING)
+
+            logger.info(
+                "Agent[{}]: Sharing transport [{}] "
+                "refused the booking.".format(
+                    self.agent.name,
+                    pending_transport_id
+                )
+            )
+
+            self.agent.remove_transport_candidate(
+                pending_transport_id
+            )
+
+            self.agent.clear_pending_transport()
+
+            self.agent.status = CUSTOMER_WAITING
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
             return
 
-        else:
-            self.set_next_state(CUSTOMER_WAITING_FOR_APPROVAL)
-            return
+        self.set_next_state(
+            CUSTOMER_WAITING_FOR_APPROVAL
+        )
+        return
 
 
-class SharingCustomerMovingToTransportState(SharingCustomerStrategyBehaviour):
+class SharingCustomerMovingToTransportState(
+    SharingCustomerStrategyBehaviour
+):
+    """
+    Represents the state where the customer is walking
+    towards the reserved sharing transport.
+    """
 
     async def on_start(self):
         await super().on_start()
-        self.agent.status = CUSTOMER_MOVING_TO_TRANSPORT
-        logger.debug("{} in Customer Moving To Transport State".format(self.agent.jid))
+
+        self.agent.status = (
+            CUSTOMER_MOVING_TO_TRANSPORT
+        )
+
+        logger.debug(
+            "Agent[{}]: The sharing customer is moving "
+            "to the reserved transport.".format(
+                self.agent.name
+            )
+        )
 
     async def run(self):
-        if self.agent.get("arrived_to_transport"):
-            logger.warning("Customer {} is already in their transport place".format(self.agent.jid))
-            return self.set_next_state(CUSTOMER_IN_TRANSPORT)
-        self.agent.arrived_to_transport_event.clear()
-        self.agent.watch_value("arrived_to_transport", self.agent.arrived_to_transport_callback)
-        await self.agent.arrived_to_transport_event.wait()
-        return self.set_next_state(CUSTOMER_IN_TRANSPORT)
 
+        transport_id = (
+            self.agent.get_current_transport_id()
+        )
 
-class SharingCustomerInTransportState(SharingCustomerStrategyBehaviour):
+        if transport_id is None:
 
-    async def on_start(self):
-        await super().on_start()
+            logger.warning(
+                "Agent[{}]: Moving to transport without "
+                "a current transport.".format(
+                    self.agent.name
+                )
+            )
+
+            self.agent.status = CUSTOMER_WAITING
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
+            return
+
+        if not self.agent.is_in_destination():
+
+            self.set_next_state(
+                CUSTOMER_MOVING_TO_TRANSPORT
+            )
+
+            await self.agent.sleep(1)
+            return
+
+        logger.info(
+            "Agent[{}]: Customer reached sharing "
+            "transport [{}].".format(
+                self.agent.name,
+                transport_id
+            )
+        )
+
+        await self.inform_transport_arrival()
+
         self.agent.status = CUSTOMER_IN_TRANSPORT
-        logger.debug("{} in Customer In Transport State".format(self.agent.jid))
 
-    async def run(self):
-        await self.inform_transport()
-        # block strategy execution
-        self.agent.arrived_to_destination_event.clear()
-        self.agent.watch_value("arrived_to_destination", self.agent.arrived_to_destination_callback)
-        await self.agent.arrived_to_destination_event.wait()
-        return self.set_next_state(CUSTOMER_IN_DEST)
+        self.set_next_state(
+            CUSTOMER_IN_TRANSPORT
+        )
+        return
 
 
-class SharingCustomerInDestState(SharingCustomerStrategyBehaviour):
+class SharingCustomerInTransportState(
+    SharingCustomerStrategyBehaviour
+):
+    """
+    Represents the state where the customer is using
+    the reserved sharing transport.
+    """
 
     async def on_start(self):
         await super().on_start()
-        self.agent.status = CUSTOMER_IN_DEST
-        logger.debug("{} in Customer In Dest State".format(self.agent.jid))
+
+        self.agent.status = CUSTOMER_IN_TRANSPORT
+
+        logger.debug(
+            "Agent[{}]: The sharing customer is in "
+            "the transport.".format(
+                self.agent.name
+            )
+        )
 
     async def run(self):
-        logger.info(f"Customer {self.agent.name} has reached their destination")
-        return #self.set_next_state(CUSTOMER_IN_DEST)
+
+        transport_id = (
+            self.agent.get_current_transport_id()
+        )
+
+        if transport_id is None:
+
+            logger.warning(
+                "Agent[{}]: Customer is in transport "
+                "without a current transport.".format(
+                    self.agent.name
+                )
+            )
+
+            self.agent.status = CUSTOMER_WAITING
+
+            self.set_next_state(
+                CUSTOMER_WAITING
+            )
+            return
+
+        msg = await self.receive(timeout=60)
+
+        if not msg:
+            self.set_next_state(
+                CUSTOMER_IN_TRANSPORT
+            )
+            return
+
+        protocol = msg.get_metadata(
+            "protocol"
+        )
+
+        performative = msg.get_metadata(
+            "performative"
+        )
+
+        if (
+            protocol != REQUEST_PROTOCOL
+            or performative != INFORM_PERFORMATIVE
+        ):
+            self.set_next_state(
+                CUSTOMER_IN_TRANSPORT
+            )
+            return
+
+        if str(msg.sender) != str(transport_id):
+
+            logger.debug(
+                "Agent[{}]: Ignoring transport message "
+                "from [{}].".format(
+                    self.agent.name,
+                    msg.sender
+                )
+            )
+
+            self.set_next_state(
+                CUSTOMER_IN_TRANSPORT
+            )
+            return
+
+        try:
+            content = json.loads(
+                msg.body
+            )
+
+        except (json.JSONDecodeError, TypeError):
+
+            logger.warning(
+                "Agent[{}]: Invalid message received "
+                "from sharing transport [{}].".format(
+                    self.agent.name,
+                    transport_id
+                )
+            )
+
+            self.set_next_state(
+                CUSTOMER_IN_TRANSPORT
+            )
+            return
+
+        status = content.get(
+            "status"
+        )
+
+        if status == CUSTOMER_IN_DEST:
+
+            logger.info(
+                "Agent[{}]: Customer reached the destination "
+                "using sharing transport [{}].".format(
+                    self.agent.name,
+                    transport_id
+                )
+            )
+
+            self.agent.clear_current_transport()
+
+            self.agent.status = CUSTOMER_IN_DEST
+
+            self.set_next_state(
+                CUSTOMER_IN_DEST
+            )
+            return
+
+        self.set_next_state(
+            CUSTOMER_IN_TRANSPORT
+        )
+        return
 
 
-class FSMSharingCustomerStrategyBehaviour(FSMSimfleetBehaviour):
+class SharingCustomerInDestState(
+    SharingCustomerStrategyBehaviour
+):
+    """
+    Represents the state where the sharing customer
+    has reached the final destination.
+    """
+
+    async def on_start(self):
+        await super().on_start()
+
+        self.agent.status = CUSTOMER_IN_DEST
+
+        self.agent.clear_pending_transport()
+        self.agent.clear_current_transport()
+        self.agent.clear_transport_candidates()
+
+        logger.debug(
+            "Agent[{}]: The sharing customer is "
+            "at the destination.".format(
+                self.agent.name
+            )
+        )
+
+    async def run(self):
+
+        logger.info(
+            "Customer {} has reached their destination.".format(
+                self.agent.name
+            )
+        )
+
+        return
+
+
+class FSMSharingCustomerStrategyBehaviour(
+    FSMSimfleetBehaviour
+):
+    """
+    Finite State Machine behaviour for a free-floating
+    sharing customer.
+    """
+
     def setup(self):
-        # Create states
-        self.add_state(CUSTOMER_WAITING, SharingCustomerWaitingState(), initial=True)
-        self.add_state(CUSTOMER_WAITING_FOR_APPROVAL, SharingCustomerWaitingForApprovalState())
-        self.add_state(CUSTOMER_MOVING_TO_TRANSPORT, SharingCustomerMovingToTransportState())
-        self.add_state(CUSTOMER_IN_TRANSPORT, SharingCustomerInTransportState())
-        self.add_state(CUSTOMER_IN_DEST, SharingCustomerInDestState())
 
-        # Create transitions
-        self.add_transition(CUSTOMER_WAITING, CUSTOMER_WAITING)  # get list of transports
-        self.add_transition(CUSTOMER_WAITING, CUSTOMER_WAITING_FOR_APPROVAL)  # send booking proposal
+        # States
+        self.add_state(
+            CUSTOMER_WAITING,
+            SharingCustomerWaitingState(),
+            initial=True
+        )
 
-        self.add_transition(CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_WAITING)  # booking is rejected
-        self.add_transition(CUSTOMER_WAITING_FOR_APPROVAL,
-                            CUSTOMER_WAITING_FOR_APPROVAL)  # waiting for approval message
-        self.add_transition(CUSTOMER_WAITING_FOR_APPROVAL, CUSTOMER_MOVING_TO_TRANSPORT)  # booking accepted
+        self.add_state(
+            CUSTOMER_WAITING_FOR_APPROVAL,
+            SharingCustomerWaitingForApprovalState()
+        )
 
-        self.add_transition(CUSTOMER_MOVING_TO_TRANSPORT,
-                            CUSTOMER_IN_TRANSPORT)  # arrived to transport, picked up by it
+        self.add_state(
+            CUSTOMER_MOVING_TO_TRANSPORT,
+            SharingCustomerMovingToTransportState()
+        )
 
-        self.add_transition(CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_TRANSPORT)
+        self.add_state(
+            CUSTOMER_IN_TRANSPORT,
+            SharingCustomerInTransportState()
+        )
 
-        self.add_transition(CUSTOMER_IN_TRANSPORT, CUSTOMER_IN_DEST)  # arrived to destination
+        self.add_state(
+            CUSTOMER_IN_DEST,
+            SharingCustomerInDestState()
+        )
 
-        self.add_transition(CUSTOMER_IN_DEST, CUSTOMER_IN_DEST)
+        # Waiting
+        self.add_transition(
+            CUSTOMER_WAITING,
+            CUSTOMER_WAITING
+        )
+
+        self.add_transition(
+            CUSTOMER_WAITING,
+            CUSTOMER_WAITING_FOR_APPROVAL
+        )
+
+        # Waiting for booking approval
+        self.add_transition(
+            CUSTOMER_WAITING_FOR_APPROVAL,
+            CUSTOMER_WAITING_FOR_APPROVAL
+        )
+
+        self.add_transition(
+            CUSTOMER_WAITING_FOR_APPROVAL,
+            CUSTOMER_WAITING
+        )
+
+        self.add_transition(
+            CUSTOMER_WAITING_FOR_APPROVAL,
+            CUSTOMER_MOVING_TO_TRANSPORT
+        )
+
+        self.add_transition(
+            CUSTOMER_WAITING_FOR_APPROVAL,
+            CUSTOMER_IN_TRANSPORT
+        )
+
+        # Moving to reserved transport
+        self.add_transition(
+            CUSTOMER_MOVING_TO_TRANSPORT,
+            CUSTOMER_MOVING_TO_TRANSPORT
+        )
+
+        self.add_transition(
+            CUSTOMER_MOVING_TO_TRANSPORT,
+            CUSTOMER_WAITING
+        )
+
+        self.add_transition(
+            CUSTOMER_MOVING_TO_TRANSPORT,
+            CUSTOMER_IN_TRANSPORT
+        )
+
+        # In transport
+        self.add_transition(
+            CUSTOMER_IN_TRANSPORT,
+            CUSTOMER_IN_TRANSPORT
+        )
+
+        self.add_transition(
+            CUSTOMER_IN_TRANSPORT,
+            CUSTOMER_WAITING
+        )
+
+        self.add_transition(
+            CUSTOMER_IN_TRANSPORT,
+            CUSTOMER_IN_DEST
+        )
 
 
 
