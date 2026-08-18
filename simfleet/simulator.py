@@ -479,7 +479,7 @@ class SimulatorAgent(Agent):
 
     def assigning_fleet_icon(self, fleet_type, default=None):
         if fleet_type not in self._icons:
-            fleet_type = "default" if default is None else default
+            fleet_type = default if default in self._icons else "default"
         icon = self._icons[fleet_type].pop(0)
         self._icons[fleet_type].append(icon)
         logger.debug("Got icon for fleet type {}".format(fleet_type))
