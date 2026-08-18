@@ -22,37 +22,37 @@ from simfleet.utils.abstractstrategies import StrategyBehaviour
 
 class FleetManagerAgent(SimfleetAgent):
     """
-    The FleetManagerAgent is responsible for managing the fleet of vehicle agents. It registers vehicle agents
-    into its fleet and coordinates the requests between vehicles and customers.
+    The FleetManagerAgent is responsible for managing fleet resources. Resources may be transports,
+    vehicles, stations, or other infrastructure agents depending on the fleet strategy.
 
     Attributes:
-        vehicles_in_fleet (int): The number of vehicles currently registered in the fleet.
+        resources_in_fleet (int): The number of resources currently registered in the fleet.
         fleet_icon (str): The icon representing the fleet in visual representations.
     """
 
     def __init__(self, agentjid, password):
         """
             Initializes the FleetManager agent with the given JID (Jabber ID) and password. It also initializes
-            its internal structures to track the vehicle agents within the fleet.
+            its internal structures to track the resources within the fleet.
         """
 
         super().__init__(agentjid, password)
 
-        self.vehicles_in_fleet = 0
+        self.resources_in_fleet = 0
         self.fleet_icon = None
         self.clear_agents()
 
 
     def clear_agents(self):
         """
-        Clears the stored set of vehicle agents and resets the simulation clock. This method is useful for
+        Clears the stored set of resources and resets the simulation clock. This method is useful for
         resetting the fleet manager state between simulations or sessions.
         """
-        self.set("vehicle_agents", {})
+        self.set("fleet_resources", {})
 
     async def setup(self):
         """
-            Sets up the FleetManager agent by registering a behavior that handles the registration of vehicle agents.
+            Sets up the FleetManager agent by registering a behavior that handles the registration of resources.
             This method is called automatically when the agent is started.
         """
         await super().setup()
@@ -60,7 +60,7 @@ class FleetManagerAgent(SimfleetAgent):
         try:
             template = Template()
             template.set_metadata("protocol", REGISTER_PROTOCOL)
-            register_behaviour = VehicleRegistrationForFleetBehaviour()
+            register_behaviour = ResourceRegistrationForFleetBehaviour()
             self.add_behaviour(register_behaviour, template)
             while not self.has_behaviour(register_behaviour):
                 logger.warning(
@@ -77,34 +77,32 @@ class FleetManagerAgent(SimfleetAgent):
                 )
             )
 
-    # New implementation v1
-
     def can_accept_presence_subscription(self, peer_jid):
-        return self.is_registered_vehicle(peer_jid)
+        return self.is_registered_resource(peer_jid)
 
-    def is_registered_vehicle(self, vehicle_jid):
-        for vehicle in self.get_vehicle_agents().values():
-            if self.is_same_jid(vehicle.get("jid"), vehicle_jid):
+    def is_registered_resource(self, resource_jid):
+        for resource in self.get_fleet_resources().values():
+            if self.is_same_jid(resource.get("jid"), resource_jid):
                 return True
 
         return False
 
     def should_subscribe_back(self, peer_jid):
-        return self.is_registered_vehicle(peer_jid)
+        return self.is_registered_resource(peer_jid)
 
-    def get_vehicle_presence(self, vehicle_jid):
+    def get_resource_presence(self, resource_jid):
         try:
-            return self.presence.get_contact_presence(vehicle_jid)
+            return self.presence.get_contact_presence(resource_jid)
 
         except (ContactNotFound, PresenceNotFound):
             logger.debug(
-                "Agent[{}]: No presence information for vehicle [{}].".format(
-                    self.name, vehicle_jid
+                "Agent[{}]: No presence information for resource [{}].".format(
+                    self.name, resource_jid
                 )
             )
             return None
 
-    def get_vehicle_presence_data(self, presence):
+    def get_resource_presence_data(self, presence):
         if presence is None or not presence.status:
             return None
 
@@ -113,7 +111,7 @@ class FleetManagerAgent(SimfleetAgent):
 
         except (json.JSONDecodeError, TypeError):
             logger.debug(
-                "Agent[{}]: Invalid vehicle presence status: {!r}.".format(
+                "Agent[{}]: Invalid resource presence status: {!r}.".format(
                     self.name, presence.status
                 )
             )
@@ -124,7 +122,7 @@ class FleetManagerAgent(SimfleetAgent):
 
         return data
 
-    def is_vehicle_presence_mirror_available(self, presence):
+    def is_resource_presence_mirror_available(self, presence):
         if not presence:
             return False
 
@@ -133,7 +131,7 @@ class FleetManagerAgent(SimfleetAgent):
             and presence.get("show") == PresenceShow.CHAT.value
         )
 
-    def get_vehicle_presence_mirror_data(self, presence):
+    def get_resource_presence_mirror_data(self, presence):
         if not presence or not presence.get("status"):
             return None
 
@@ -142,7 +140,7 @@ class FleetManagerAgent(SimfleetAgent):
 
         except (json.JSONDecodeError, TypeError):
             logger.debug(
-                "Agent[{}]: Invalid mirrored vehicle presence status: {!r}.".format(
+                "Agent[{}]: Invalid mirrored resource presence status: {!r}.".format(
                     self.name, presence.get("status")
                 )
             )
@@ -153,7 +151,7 @@ class FleetManagerAgent(SimfleetAgent):
 
         return data
 
-    def is_vehicle_available(self, presence):
+    def is_resource_available(self, presence):
         if presence is None:
             return False
 
@@ -162,51 +160,49 @@ class FleetManagerAgent(SimfleetAgent):
             and presence.show == PresenceShow.CHAT
         )
 
-    def get_available_vehicles(self):
-        available_vehicles = []
+    def get_available_resources(self):
+        available_resources = []
 
-        for vehicle in self.get_vehicle_agents().values():
-            vehicle_jid = vehicle.get("jid")
+        for resource in self.get_fleet_resources().values():
+            resource_jid = resource.get("jid")
 
-            if not vehicle_jid:
+            if not resource_jid:
                 continue
 
-            presence = self.get_vehicle_presence(vehicle_jid)
+            presence = self.get_resource_presence(resource_jid)
 
-            if self.is_vehicle_available(presence):
-                data = self.get_vehicle_presence_data(presence)
+            if self.is_resource_available(presence):
+                data = self.get_resource_presence_data(presence)
 
             else:
-                presence = vehicle.get("presence")
+                presence = resource.get("presence")
 
-                if not self.is_vehicle_presence_mirror_available(presence):
+                if not self.is_resource_presence_mirror_available(presence):
                     continue
 
-                data = self.get_vehicle_presence_mirror_data(presence)
+                data = self.get_resource_presence_mirror_data(presence)
 
             if data is None:
                 continue
 
-            available_vehicles.append(
+            available_resources.append(
                 {
-                    "vehicle": vehicle,
+                    "resource": resource,
                     "presence": presence,
                     "data": data,
                 }
             )
 
-        return available_vehicles
+        return available_resources
 
-    # ---------------------
-
-    def get_vehicle_agents(self):
+    def get_fleet_resources(self):
         """
-        Returns the list of vehicle agents currently registered with the FleetManager.
+        Returns the resources currently registered with the FleetManager.
 
         Returns:
-            list: A list of vehicle agents.
+            dict: Registered fleet resources indexed by name.
         """
-        return self.get("vehicle_agents")
+        return self.get("fleet_resources")
 
     def set_id(self, agent_id):
         """
@@ -228,7 +224,7 @@ class FleetManagerAgent(SimfleetAgent):
 
     def run_strategy(self):
         """
-        Runs the fleet management strategy, registering a behavior for handling vehicle and customer requests.
+        Runs the fleet management strategy, registering a behavior for handling resource and customer requests.
         """
         if not self.running_strategy:
             template = Template()
@@ -237,62 +233,62 @@ class FleetManagerAgent(SimfleetAgent):
             self.running_strategy = True
 
 
-class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
+class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
     """
-        This behavior manages the registration of new vehicle agents in the fleet. It receives requests from
-        vehicle agents and registers them if their fleet type matches the FleetManager's type.
+        This behavior manages the registration of new resources in the fleet. It receives requests from
+        agents and registers them if their fleet type matches the FleetManager's type.
     """
     async def on_start(self):
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
-    def add_vehicle(self, agent):
+    def add_resource(self, agent):
         """
-        Adds a new vehicle agent to the fleet's internal store.
+        Adds a new resource agent to the fleet's internal store.
 
         Args:
-            agent (dict): The details of the vehicle agent to be added.
+            agent (dict): The details of the resource agent to be added.
         """
-        vehicles = self.get("vehicle_agents")
+        resources = self.get("fleet_resources")
 
-        if agent["name"] not in vehicles:
-            self.agent.vehicles_in_fleet += 1
+        if agent["name"] not in resources:
+            self.agent.resources_in_fleet += 1
 
-        vehicles[agent["name"]] = agent
+        resources[agent["name"]] = agent
 
-    def remove_vehicle(self, key):
+    def remove_resource(self, key):
         """
-        Removes a vehicle agent from the fleet's internal store by its key.
+        Removes a resource agent from the fleet's internal store by its key.
 
         Args:
-            key (str): The unique key representing the vehicle agent.
+            key (str): The unique key representing the resource agent.
         """
-        if key in self.get("vehicle_agents"):
-            del self.get("vehicle_agents")[key]
+        if key in self.get("fleet_resources"):
+            del self.get("fleet_resources")[key]
             logger.debug(
-                "Deregistration of the VehicleAgent {}".format(key)
+                "Deregistration of the fleet resource {}".format(key)
             )
-            self.agent.vehicles_in_fleet -= 1
+            self.agent.resources_in_fleet -= 1
         else:
             logger.debug(
                 "Cancelation of the registration in the Fleet"
             )
 
-    def update_vehicle_presence(self, content):
-        vehicle_jid = content.get("jid")
+    def update_resource_presence(self, content):
+        resource_jid = content.get("jid")
 
-        for vehicle in self.get("vehicle_agents").values():
-            if self.agent.is_same_jid(vehicle.get("jid"), vehicle_jid):
-                vehicle["presence"] = content
+        for resource in self.get("fleet_resources").values():
+            if self.agent.is_same_jid(resource.get("jid"), resource_jid):
+                resource["presence"] = content
                 return True
 
         return False
 
     async def accept_registration(self, agent_id):
         """
-        Sends an acceptance message to a vehicle agent, confirming its registration in the fleet.
+        Sends an acceptance message to a resource agent, confirming its registration in the fleet.
 
         Args:
-            agent_id (str): The ID of the vehicle agent to be accepted.
+            agent_id (str): The ID of the resource agent to be accepted.
         """
         reply = Message()
         content = {"icon": self.agent.fleet_icon, "fleet_type": self.agent.fleet_type}
@@ -304,10 +300,10 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def reject_registration(self, agent_id):
         """
-        Sends a rejection message to a vehicle agent, declining its registration request.
+        Sends a rejection message to a resource agent, declining its registration request.
 
         Args:
-            agent_id (str): The ID of the vehicle agent to be rejected.
+            agent_id (str): The ID of the resource agent to be rejected.
         """
         reply = Message()
         reply.to = str(agent_id)
@@ -318,7 +314,7 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def run(self):
         """
-            Listens for registration requests from vehicle agents and processes them by accepting or rejecting
+            Listens for registration requests from resources and processes them by accepting or rejecting
             them based on the fleet type.
         """
         try:
@@ -328,7 +324,7 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
                 if performative == REQUEST_PERFORMATIVE:
                     content = json.loads(msg.body)
                     if content["fleet_type"] == self.agent.fleet_type:
-                        self.add_vehicle(content)
+                        self.add_resource(content)
                         self.agent.subscribe_to_presence(content["jid"])
                         await self.accept_registration(msg.sender)
                         logger.debug(
@@ -344,7 +340,7 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
                 if performative == INFORM_PERFORMATIVE:
                     content = json.loads(msg.body)
 
-                    if self.update_vehicle_presence(content):
+                    if self.update_resource_presence(content):
                         logger.debug(
                             "Agent[{}]: updated mirrored presence for [{}].".format(
                                 self.agent.name,
@@ -363,7 +359,7 @@ class VehicleRegistrationForFleetBehaviour(CyclicBehaviour):
 
 class FleetManagerStrategyBehaviour(StrategyBehaviour):
     """
-    The FleetManagerStrategyBehaviour class defines the main strategy for coordinating customer and vehicle
+    The FleetManagerStrategyBehaviour class defines the main strategy for coordinating customer and resource
     agents in the fleet. This behavior needs to implement a `_process` method for custom strategies.
     """
 

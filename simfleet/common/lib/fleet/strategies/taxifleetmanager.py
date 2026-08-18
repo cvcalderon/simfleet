@@ -19,19 +19,19 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
         self.return_point_tolerance = 100
 
     def update_initial_taxi_positions(self):
-        vehicles = self.agent.get_available_vehicles()
+        resources = self.agent.get_available_resources()
 
-        for item in vehicles:
-            vehicle = item["vehicle"]
+        for item in resources:
+            resource = item["resource"]
             data = item["data"]
-            vehicle_jid = vehicle.get("jid")
+            resource_jid = resource.get("jid")
 
-            if not vehicle_jid:
+            if not resource_jid:
                 continue
 
-            vehicle_jid = self.agent.bare_jid(vehicle_jid)
+            resource_jid = self.agent.bare_jid(resource_jid)
 
-            if vehicle_jid in self.initial_taxi_positions:
+            if resource_jid in self.initial_taxi_positions:
                 continue
 
             if data is None:
@@ -42,17 +42,17 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
             if position is None:
                 continue
 
-            self.initial_taxi_positions[vehicle_jid] = list(position)
+            self.initial_taxi_positions[resource_jid] = list(position)
 
             self.register_taxi_return_point(
-                vehicle_jid,
+                resource_jid,
                 position
             )
 
             logger.debug(
                 "Agent[{}]: Initial position stored for taxi [{}]: {}".format(
                     self.agent.name,
-                    vehicle_jid,
+                    resource_jid,
                     position
                 )
             )
@@ -60,10 +60,10 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
     def get_taxi_candidates(self, origin):
         candidates = []
 
-        vehicles = self.agent.get_available_vehicles()
+        resources = self.agent.get_available_resources()
 
-        for item in vehicles:
-            vehicle = item["vehicle"]
+        for item in resources:
+            resource = item["resource"]
             data = item["data"]
 
             position = data.get("p")
@@ -82,8 +82,8 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
 
             candidates.append(
                 {
-                    "name": vehicle.get("name"),
-                    "jid": str(vehicle["jid"]),
+                    "name": resource.get("name"),
+                    "jid": str(resource["jid"]),
                     "position": position,
                     "assignments": assignments,
                     "distance": distance,
@@ -167,7 +167,7 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
     async def handle_return_request(self, msg, content):
         taxi_jid = str(msg.sender)
 
-        if not self.agent.is_registered_vehicle(taxi_jid):
+        if not self.agent.is_registered_resource(taxi_jid):
             logger.warning(
                 "Agent[{}]: Return request received from unregistered taxi [{}].".format(
                     self.agent.name,

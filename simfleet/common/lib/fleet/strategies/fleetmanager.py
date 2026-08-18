@@ -37,12 +37,12 @@ class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
 
         logger.debug("Manager received message: {}".format(msg))
         if msg:
-            for vehicle in self.agent.get_vehicle_agents().values():
-                msg.to = str(vehicle["jid"])
+            for resource in self.agent.get_fleet_resources().values():
+                msg.to = str(resource["jid"])
 
                 logger.debug(
-                    "Manager sent request to vehicle {}".format(
-                        vehicle["name"]
+                    "Manager sent request to resource {}".format(
+                        resource["name"]
                     )
                 )
 
@@ -108,7 +108,7 @@ class SendAvailableTransportsBehaviour(FleetManagerStrategyBehaviour):
 
 class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
     """
-    Selects an available vehicle using its presence information.
+    Selects an available resource using its presence information.
     """
 
     requires_origin = True
@@ -119,19 +119,19 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
     def get_presence_candidates(self, origin=None):
         candidates = []
 
-        vehicles = self.agent.get_available_vehicles()
+        resources = self.agent.get_available_resources()
 
-        for item in vehicles:
-            vehicle = item["vehicle"]
+        for item in resources:
+            resource = item["resource"]
             data = item["data"]
 
             position = data.get("p")
 
             if position is None:
                 logger.debug(
-                    "Agent[{}]: skipping vehicle [{}], presence has no position.".format(
+                    "Agent[{}]: skipping resource [{}], presence has no position.".format(
                         self.agent.name,
-                        vehicle.get("name")
+                        resource.get("name")
                     )
                 )
                 continue
@@ -140,9 +140,9 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
 
             if self.requires_assignments and assignments is None:
                 logger.debug(
-                    "Agent[{}]: skipping vehicle [{}], presence has no assignments.".format(
+                    "Agent[{}]: skipping resource [{}], presence has no assignments.".format(
                         self.agent.name,
-                        vehicle.get("name")
+                        resource.get("name")
                     )
                 )
                 continue
@@ -159,7 +159,7 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
                 {
                     "distance": distance,
                     "assignments": assignments,
-                    "jid": str(vehicle["jid"]),
+                    "jid": str(resource["jid"]),
                     "position": position,
                 }
             )
@@ -204,7 +204,7 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
 
         if not candidates:
             logger.warning(
-                "Agent[{}]: no available vehicles found from presence data.".format(
+                "Agent[{}]: no available resources found from presence data.".format(
                     self.agent.name
                 )
             )
@@ -215,7 +215,7 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
         selected = candidates[0]
 
         logger.info(
-            "Agent[{}]: selected vehicle [{}].".format(
+            "Agent[{}]: selected resource [{}].".format(
                 self.agent.name,
                 selected["jid"]
             )
