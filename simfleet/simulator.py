@@ -541,6 +541,20 @@ class SimulatorAgent(Agent):
                             + list(self.agent.customer_agents.values())
                         )
 
+                        # Versión 1
+                        #while not all([agent.is_ready() for agent in all_agents]):
+                        #    logger.debug("Waiting for all agents to be ready")
+                        #    await asyncio.sleep(0.5)
+
+                        while not all(agent.is_ready() for agent in all_agents):
+                            not_ready_agents = [agent.name for agent in all_agents if not agent.is_ready()]
+                            logger.debug(
+                                "Waiting for agents to be ready: {}".format(
+                                    not_ready_agents
+                                )
+                            )
+                            await asyncio.sleep(0.5)
+
                         for manager in self.agent.manager_agents.values():
                             manager.run_strategy()
                             logger.debug(

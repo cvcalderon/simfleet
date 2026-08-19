@@ -56,11 +56,11 @@ class SimfleetAgent(Agent):
         self.end_time = None    #Change
 
         # New - Implementation v1
-        self.registration = None
+        self.registration = False
 
         self.registration_fleet = None
         self.registration_presence = False
-
+        self.registration_presence_ready = False
         # --------------------------
 
         self.events_store = StatisticsStore(agent_name=str(agentjid), class_type=type(self))
@@ -108,6 +108,16 @@ class SimfleetAgent(Agent):
                 )
             )
 
+            if (
+                self.registration_presence
+                and self.registration_fleet
+                and self.is_same_jid(
+                peer_jid,
+                self.registration_fleet)
+            ):
+                self.set_registration_presence_ready(True)
+
+
             if self.should_subscribe_back(peer_jid):
                 self.subscribe_to_presence(peer_jid)
 
@@ -139,9 +149,11 @@ class SimfleetAgent(Agent):
             self.registration_presence
             and self.registration_fleet
             and self.is_same_jid(peer_jid, self.registration_fleet)
-            and hasattr(self, "set_available")
         ):
-            self.set_available()
+            self.set_registration_presence_ready(True)
+
+            if hasattr(self, "set_available"):
+                self.set_available()
 
     def on_available(self, peer_jid, presence_info, last_presence):
         logger.debug(
@@ -226,6 +238,7 @@ class SimfleetAgent(Agent):
                         priority,
                     )
                 )
+                self.set_registration_presence_ready(True)
             except RuntimeError:
                 logger.debug(
                     "Agent[{}]: could not schedule presence update message.".format(
@@ -257,6 +270,12 @@ class SimfleetAgent(Agent):
 
         await self.send(msg)
 
+    def set_registration_presence_ready(self, status):
+        self.registration_presence_ready = status
+
+    def get_registration_presence_ready(self):
+        return self.registration_presence_ready
+
     # --------------------------
 
     async def stop(self):
@@ -277,14 +296,48 @@ class SimfleetAgent(Agent):
         return self.stopped
 
 
+    # def is_ready(self):
+    #     """
+    #         Checks if the agent is ready for operation.
+    #
+    #         Returns:
+    #             bool: True if the agent is ready, False otherwise.
+    #     """
+    #     return not self.is_launched or (self.is_launched and self.ready)
+
     def is_ready(self):
         """
-            Checks if the agent is ready for operation.
-
-            Returns:
-                bool: True if the agent is ready, False otherwise.
+        Checks whether the agent is ready to start its
+        operational strategy.
         """
-        return not self.is_launched or (self.is_launched and self.ready)
+        if not self.is_launched:
+            return True
+
+        if not self.ready:
+            return False
+
+        return self.dependencies_ready()
+
+    def dependencies_ready(self):
+        """
+        Checks external dependencies required during bootstrap.
+
+        Agents without a registration fleet have no generic
+        registration dependency.
+        """
+        if self.registration_fleet is None:
+            return True
+
+        if not self.registration:
+            return False
+
+        if (
+            self.registration_presence
+            and not self.registration_presence_ready
+        ):
+            return False
+
+        return True
 
 
     async def sleep(self, seconds):
@@ -333,17 +386,24 @@ class SimfleetAgent(Agent):
 
     # New - Implementation v1
     #Registration
-    def configure_registration(self, fleet, presence=False):
-        """
-        Configures the agent registration information.
+    # def configure_registration(self, fleet, presence=False):
+    #     """
+    #     Configures the agent registration information.
+    #
+    #     Args:
+    #         fleet (str): JID of the agent responsible for the registration.
+    #         presence (bool): Indicates whether presence should be enabled
+    #             after registration.
+    #     """
+    #     self.registration_fleet = fleet
+    #     self.registration_presence = presence
 
-        Args:
-            fleet (str): JID of the agent responsible for the registration.
-            presence (bool): Indicates whether presence should be enabled
-                after registration.
-        """
+    def configure_registration(self, fleet, presence=False):
         self.registration_fleet = fleet
         self.registration_presence = presence
+
+        self.registration = False
+        self.registration_presence_ready = False
 
     def get_registration_fleet(self):
         return self.registration_fleet

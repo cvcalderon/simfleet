@@ -232,6 +232,15 @@ class FleetManagerAgent(SimfleetAgent):
             self.add_behaviour(self.strategy(), template)
             self.running_strategy = True
 
+    def dependencies_ready(self):
+
+        if not super().dependencies_ready():
+            return False
+
+        return bool(
+            self.registration
+        )
+
 
 class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
     """
@@ -312,11 +321,42 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
         reply.body = ""
         await self.send(reply)
 
+    async def send_registration(self):
+
+        if self.agent.directory_id is None:
+            return
+
+        logger.info(
+            "Manager {} sent proposal to register "
+            "to directory {}".format(
+                self.agent.name,
+                self.agent.directory_id
+            )
+        )
+
+        content = {
+            "jid": str(self.agent.jid),
+            "type": self.agent.fleet_type,
+        }
+
+        msg = Message()
+        msg.to = str(self.agent.directory_id)
+        msg.set_metadata("protocol", REGISTER_PROTOCOL)
+        msg.set_metadata("performative", REQUEST_PERFORMATIVE)
+        msg.body = json.dumps(content)
+
+        await self.send(msg)
+
     async def run(self):
         """
             Listens for registration requests from resources and processes them by accepting or rejecting
             them based on the fleet type.
         """
+
+        if (not self.agent.registration
+            and self.agent.directory_id is not None):
+            await self.send_registration()
+
         try:
             msg = await self.receive(timeout=5)
             if msg:
@@ -334,8 +374,19 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
                         await self.reject_registration(msg.sender)
 
                 if performative == ACCEPT_PERFORMATIVE:
-                    self.agent.set_registration(True)
-                    logger.info("Registration in the dictionary of services")
+
+                    if (self.agent.directory_id is not None
+                        and self.agent.is_same_jid(msg.sender, self.agent.directory_id)
+                    ):
+                        self.agent.set_registration(True)
+
+                        logger.info(
+                            "Agent[{}]: Registration in Directory "
+                            "[{}] accepted.".format(
+                                self.agent.name,
+                                self.agent.directory_id
+                            )
+                        )
 
                 if performative == INFORM_PERFORMATIVE:
                     content = json.loads(msg.body)
@@ -369,22 +420,22 @@ class FleetManagerStrategyBehaviour(StrategyBehaviour):
         """
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
-    async def send_registration(self):
-        """
-        Sends a registration request to the directory service to register the FleetManager.
-        """
-        logger.info(
-            "Manager {} sent proposal to register to directory {}".format(
-                self.agent.name, self.agent.directory_id
-            )
-        )
-        content = {"jid": str(self.agent.jid), "type": self.agent.fleet_type}
-        msg = Message()
-        msg.to = str(self.agent.directory_id)
-        msg.set_metadata("protocol", REGISTER_PROTOCOL)
-        msg.set_metadata("performative", REQUEST_PERFORMATIVE)
-        msg.body = json.dumps(content)
-        await self.send(msg)
+    # async def send_registration(self):
+    #     """
+    #     Sends a registration request to the directory service to register the FleetManager.
+    #     """
+    #     logger.info(
+    #         "Manager {} sent proposal to register to directory {}".format(
+    #             self.agent.name, self.agent.directory_id
+    #         )
+    #     )
+    #     content = {"jid": str(self.agent.jid), "type": self.agent.fleet_type}
+    #     msg = Message()
+    #     msg.to = str(self.agent.directory_id)
+    #     msg.set_metadata("protocol", REGISTER_PROTOCOL)
+    #     msg.set_metadata("performative", REQUEST_PERFORMATIVE)
+    #     msg.body = json.dumps(content)
+    #     await self.send(msg)
 
     async def run(self):
         """

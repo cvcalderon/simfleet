@@ -24,8 +24,8 @@ class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
     """
 
     async def run(self):
-        if not self.agent.registration:
-            await self.send_registration()
+        #if not self.agent.registration:
+        #    await self.send_registration()
 
         msg = await self.receive(timeout=5)
 
@@ -63,8 +63,8 @@ class SendAvailableTransportsBehaviour(FleetManagerStrategyBehaviour):
         self.agent.available_transports = {}
 
     async def run(self):
-        if not self.agent.registration:
-            await self.send_registration()
+        #if not self.agent.registration:
+        #    await self.send_registration()
 
         msg = await self.receive(timeout=5)
         if msg:
@@ -167,8 +167,8 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
         return candidates
 
     async def run(self):
-        if not self.agent.registration:
-            await self.send_registration()
+        #if not self.agent.registration:
+        #    await self.send_registration()
 
         msg = await self.receive(timeout=5)
 

@@ -24,7 +24,11 @@ class Factory(ABC):
             presence = registration.get("presence", False)
 
             if fleet:
-                fleet_jid = "{}@{}".format(fleet, domain)
+                fleet_jid = str(fleet)
+
+                if "@" not in fleet_jid:
+                    fleet_jid = "{}@{}".format(fleet_jid, domain)
+
                 agent.configure_registration(fleet_jid, presence)
 
     # ---------------------
