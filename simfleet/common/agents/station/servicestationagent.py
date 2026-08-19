@@ -53,11 +53,11 @@ class ServiceStationAgent(QueueStationAgent):
         self.add_behaviour(self.servicebehaviour)
 
         # Activar registro de transporte
-        template = Template()
-        template.set_metadata("protocol", REGISTER_PROTOCOL)
+        #template = Template()
+        #template.set_metadata("protocol", REGISTER_PROTOCOL)
 
-        register_behaviour = TransportRegistrationForStationBehaviour()
-        self.add_behaviour(register_behaviour, template)
+        #register_behaviour = TransportRegistrationForStationBehaviour()
+        #self.add_behaviour(register_behaviour, template)
 
 
     def add_service(self, service_name, mode, slots, one_shot_behaviour, **arguments):
@@ -216,6 +216,13 @@ class ServiceStationAgent(QueueStationAgent):
         if self.has_available_agent(service_name):
             return self.services_list[service_name]["agents"].pop(0)
         return None
+
+    def on_agent_assigned(self, service_name, agent_jid):
+        """
+        Called after an agent-based service assigns and removes
+        an agent from its inventory.
+        """
+        pass
 
     #def release_transport(self, service_name, agent_jid):
     #    if service_name in self.services_list and self.services_list[service_name]["mode"] == "agent":
@@ -453,104 +460,162 @@ class ServiceStationAgent(QueueStationAgent):
                                 # Add the behavior to the agent
                                 self.agent.add_behaviour(one_shot_behaviour, template1)
 
+                    # elif mode == "agent":
+                    #     if self.agent.has_available_agent(service_name):
+                    #         # 1. Saca customer de la cola
+                    #         agent_info = self.agent.queuebehaviour.dequeue_first_agent_to_waiting_list(service_name)
+                    #         if agent_info is not None:
+                    #             customer_jid, kwargs = agent_info
+                    #
+                    #             # 2. Saca un agente transporte del pool y lo asigna
+                    #             transport_jid = self.agent.assign_agent(service_name)
+                    #
+                    #             # 3. Informa al customer cuál es el JID del transporte asignado
+                    #             await self.inform_transport_assignment(str(customer_jid), service_name, transport_jid)
+                    #             # (puedes definir inform_transport_assignment como función auxiliar)
+                    #
+                    #             logger.info(
+                    #                 f"Agent[{self.agent.name}]: Assigned transport [{transport_jid}] to customer [{customer_jid}]"
+                    #             )
+                    #     else:
+                    #         # No hay transportes disponibles; customer recibe refuse de la estación
+                    #
+                    #         self.refuse_service(str(customer_jid))
+                    #
+                    #         #pass
+
                     elif mode == "agent":
-                        if self.agent.has_available_agent(service_name):
-                            # 1. Saca customer de la cola
-                            agent_info = self.agent.queuebehaviour.dequeue_first_agent_to_waiting_list(service_name)
+
+                        if self.agent.has_available_agent(
+                            service_name
+                        ):
+
+                            agent_info = (
+                                self.agent.queuebehaviour
+                                .dequeue_first_agent_to_waiting_list(
+                                    service_name
+                                )
+                            )
+
                             if agent_info is not None:
                                 customer_jid, kwargs = agent_info
 
-                                # 2. Saca un agente transporte del pool y lo asigna
-                                transport_jid = self.agent.assign_agent(service_name)
+                                transport_jid = (
+                                    self.agent.assign_agent(
+                                        service_name
+                                    )
+                                )
 
-                                # 3. Informa al customer cuál es el JID del transporte asignado
-                                await self.inform_transport_assignment(str(customer_jid), service_name, transport_jid)
-                                # (puedes definir inform_transport_assignment como función auxiliar)
+                                self.agent.on_agent_assigned(
+                                    service_name,
+                                    transport_jid
+                                )
+
+                                await self.inform_transport_assignment(
+                                    str(customer_jid),
+                                    service_name,
+                                    str(transport_jid)
+                                )
 
                                 logger.info(
-                                    f"Agent[{self.agent.name}]: Assigned transport [{transport_jid}] to customer [{customer_jid}]"
+                                    "Agent[{}]: Assigned transport [{}] "
+                                    "to customer [{}]".format(
+                                        self.agent.name,
+                                        transport_jid,
+                                        customer_jid
+                                    )
                                 )
+
                         else:
-                            # No hay transportes disponibles; customer recibe refuse de la estación
 
-                            self.refuse_service(str(customer_jid))
+                            agent_info = (
+                                self.agent.queuebehaviour
+                                .dequeue_first_agent_to_waiting_list(
+                                    service_name
+                                )
+                            )
 
-                            #pass
+                            if agent_info is not None:
+                                customer_jid, kwargs = agent_info
+
+                                await self.refuse_service(
+                                    str(customer_jid)
+                                )
 
 # NEW: Station Sharing
 
-class TransportRegistrationForStationBehaviour(CyclicBehaviour):
-    """
-    Comportamiento encargado de registrar agentes transporte en una estación
-    usando el protocolo REGISTER_PROTOCOL. Gestiona tanto el registro inicial
-    como el retorno tras una cancelación.
-    """
-
-    async def on_start(self):
-        logger.debug(f"Behaviour [{type(self).__name__}] started in station {self.agent.name}")
-
-    async def accept_registration_2(self, transport_jid):
-        msg = Message()
-        msg.to = str(transport_jid)
-        msg.set_metadata("protocol", REGISTER_PROTOCOL)
-        msg.set_metadata("performative", ACCEPT_PERFORMATIVE)
-        msg.body = json.dumps({"message": "Registered in station"})
-        await self.send(msg)
-        logger.info(f"Station [{self.agent.name}]: Accepted registration from {transport_jid}")
-
-
-    async def accept_registration(self, agent_id):
-        """
-        Sends an acceptance message to a transport agent, confirming its registration in the fleet.
-
-        Args:
-            agent_id (str): The ID of the transport agent to be accepted.
-        """
-        reply = Message()
-        content = {"fleet_type": self.agent.fleet_type}
-        reply.to = str(agent_id)
-        reply.set_metadata("protocol", REGISTER_PROTOCOL)
-        reply.set_metadata("performative", ACCEPT_PERFORMATIVE)
-        reply.body = json.dumps(content)
-        await self.send(reply)
-        logger.info(f"Station [{self.agent.name}]: Accepted registration from {agent_id}")
-
-    async def refuse_registration(self, transport_jid):
-        msg = Message()
-        msg.to = str(transport_jid)
-        msg.set_metadata("protocol", REGISTER_PROTOCOL)
-        msg.set_metadata("performative", REFUSE_PERFORMATIVE)
-        msg.body = json.dumps({"message": "Registration refused"})
-        await self.send(msg)
-        logger.info(f"Station [{self.agent.name}]: Refused registration from {transport_jid}")
-
-    async def run(self):
-        msg = await self.receive(timeout=5)
-
-        if msg:
-            performative = msg.get_metadata("performative")
-            sender_jid = str(msg.sender)
-
-            if performative == REQUEST_PERFORMATIVE:
-                try:
-                    content = json.loads(msg.body)
-                    service_name = content.get("fleet_type")  # default
-
-                    if service_name in self.agent.services_list and self.agent.services_list[service_name]["mode"] == "agent":
-
-                        if not self.agent.is_station_full(service_name):
-                            self.agent.register_agent(service_name, sender_jid)
-                            await self.accept_registration(sender_jid)
-
-                        else:
-                            logger.warning(
-                                f"Station [{self.agent.name}]: Service '{service_name}' full. Refusing registration.")
-                            await self.refuse_registration(sender_jid)
-
-                    else:
-                        logger.warning(f"Station [{self.agent.name}]: Invalid service or mode for registration.")
-                        await self.refuse_registration(sender_jid)
-
-                except Exception as e:
-                    logger.error(f"Station [{self.agent.name}]: Error processing registration from {sender_jid}: {e}")
-                    await self.refuse_registration(sender_jid)
+# class TransportRegistrationForStationBehaviour(CyclicBehaviour):
+#     """
+#     Comportamiento encargado de registrar agentes transporte en una estación
+#     usando el protocolo REGISTER_PROTOCOL. Gestiona tanto el registro inicial
+#     como el retorno tras una cancelación.
+#     """
+#
+#     async def on_start(self):
+#         logger.debug(f"Behaviour [{type(self).__name__}] started in station {self.agent.name}")
+#
+#     async def accept_registration_2(self, transport_jid):
+#         msg = Message()
+#         msg.to = str(transport_jid)
+#         msg.set_metadata("protocol", REGISTER_PROTOCOL)
+#         msg.set_metadata("performative", ACCEPT_PERFORMATIVE)
+#         msg.body = json.dumps({"message": "Registered in station"})
+#         await self.send(msg)
+#         logger.info(f"Station [{self.agent.name}]: Accepted registration from {transport_jid}")
+#
+#
+#     async def accept_registration(self, agent_id):
+#         """
+#         Sends an acceptance message to a transport agent, confirming its registration in the fleet.
+#
+#         Args:
+#             agent_id (str): The ID of the transport agent to be accepted.
+#         """
+#         reply = Message()
+#         content = {"fleet_type": self.agent.fleet_type}
+#         reply.to = str(agent_id)
+#         reply.set_metadata("protocol", REGISTER_PROTOCOL)
+#         reply.set_metadata("performative", ACCEPT_PERFORMATIVE)
+#         reply.body = json.dumps(content)
+#         await self.send(reply)
+#         logger.info(f"Station [{self.agent.name}]: Accepted registration from {agent_id}")
+#
+#     async def refuse_registration(self, transport_jid):
+#         msg = Message()
+#         msg.to = str(transport_jid)
+#         msg.set_metadata("protocol", REGISTER_PROTOCOL)
+#         msg.set_metadata("performative", REFUSE_PERFORMATIVE)
+#         msg.body = json.dumps({"message": "Registration refused"})
+#         await self.send(msg)
+#         logger.info(f"Station [{self.agent.name}]: Refused registration from {transport_jid}")
+#
+#     async def run(self):
+#         msg = await self.receive(timeout=5)
+#
+#         if msg:
+#             performative = msg.get_metadata("performative")
+#             sender_jid = str(msg.sender)
+#
+#             if performative == REQUEST_PERFORMATIVE:
+#                 try:
+#                     content = json.loads(msg.body)
+#                     service_name = content.get("fleet_type")  # default
+#
+#                     if service_name in self.agent.services_list and self.agent.services_list[service_name]["mode"] == "agent":
+#
+#                         if not self.agent.is_station_full(service_name):
+#                             self.agent.register_agent(service_name, sender_jid)
+#                             await self.accept_registration(sender_jid)
+#
+#                         else:
+#                             logger.warning(
+#                                 f"Station [{self.agent.name}]: Service '{service_name}' full. Refusing registration.")
+#                             await self.refuse_registration(sender_jid)
+#
+#                     else:
+#                         logger.warning(f"Station [{self.agent.name}]: Invalid service or mode for registration.")
+#                         await self.refuse_registration(sender_jid)
+#
+#                 except Exception as e:
+#                     logger.error(f"Station [{self.agent.name}]: Error processing registration from {sender_jid}: {e}")
+#                     await self.refuse_registration(sender_jid)

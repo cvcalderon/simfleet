@@ -1,273 +1,598 @@
 import json
 
-from loguru import logger
 from asyncio import CancelledError
-from spade.message import Message
-from spade.template import Template
-from spade.behaviour import CyclicBehaviour
 
+from loguru import logger
+from spade.behaviour import CyclicBehaviour
+from spade.message import Message
+from spade.presence import PresenceType, PresenceShow
+from spade.template import Template
 
 from simfleet.communications.protocol import (
-        ACCEPT_PERFORMATIVE,
-        INFORM_PERFORMATIVE,
-        REGISTER_PROTOCOL,
-        REQUEST_PERFORMATIVE,
-        REQUEST_PROTOCOL
+    ACCEPT_PERFORMATIVE,
+    REFUSE_PERFORMATIVE,
+    REGISTER_PROTOCOL,
+    REQUEST_PERFORMATIVE,
 )
 
-from simfleet.common.agents.station.servicestationagent import ServiceStationAgent
-from simfleet.utils.status import TRANSPORT_IN_CUSTOMER_PLACE
+from simfleet.common.agents.station.servicestationagent import (
+    ServiceStationAgent
+)
 
+from spade.presence import (
+    PresenceType,
+    PresenceShow,
+)
 
 class SharingStationAgent(ServiceStationAgent):
     """
-        Represents a bus stop agent that manages customer registrations,
-        informs customers about bus arrivals, and handles the bus stop status.
+    Represents a station-based sharing station.
 
-        Methods:
-            setup(): Initializes the bus stop agent and sets up its behavior templates.
-            set_name(name): Sets the name of the bus stop.
-            set_status(state): Sets the status of the bus stop.
-            set_type(station_type): Sets the type of the bus stop.
-            set_lines(lines): Sets the bus lines that serve the stop.
-            to_json(): Returns the bus stop information in JSON format.
-            run_strategy(): Sets the strategy behavior for the stop.
+    The station manages a dynamic inventory of shared transports
+    and publishes its operational state to its FleetManager.
+
+    Shared transports register directly with the station, while
+    the station registers with its FleetManager.
     """
+
     def __init__(self, agentjid, password):
-        ServiceStationAgent.__init__(self, agentjid, password)
-
-        # Bus stop attributes
-        self.station_name = None
-        self.service_name = None
-
-        # Atribut afegit perque funcione
-        self.type = None
-
-        #Sharing-Station variables
-        self.max_register_agents = 0
-
+        super().__init__(agentjid, password)
 
     async def setup(self):
-        """
-            Sets up the bus stop agent by defining its type and behaviors.
-        """
         await super().setup()
-        logger.info("Stop agent {} running".format(self.name))
-        self.set_type("bike-sharing")
-        #self.set_type("stop")
-        #self.set_service_name("bike-sharing")
 
-        service = self.services_list.get(self.fleet_type, {})
-        self.set_max_register_agents(service["args"]["max_register_agents"])
+        logger.info(
+            "Agent[{}]: Sharing station running".format(
+                self.name
+            )
+        )
 
         try:
-            template1 = Template()
-            template1.set_metadata("protocol", REGISTER_PROTOCOL)
-            register_behaviour = RegistrationBehaviour()
+            template = Template()
+            template.set_metadata(
+                "protocol",
+                REGISTER_PROTOCOL
+            )
 
-            template2 = Template()
-            template2.set_metadata("protocol", REQUEST_PROTOCOL)
-            template2.set_metadata("performative", INFORM_PERFORMATIVE)
-            sharing_station_strategy_behaviour = SharingStationStrategyBehaviour()
+            register_behaviour = (
+                SharingStationRegistrationBehaviour()
+            )
 
-            self.add_behaviour(register_behaviour, template1)
-            self.add_behaviour(sharing_station_strategy_behaviour, template2)
-            while not self.has_behaviour(register_behaviour):
+            self.add_behaviour(
+                register_behaviour,
+                template
+            )
+
+            while not self.has_behaviour(
+                register_behaviour
+            ):
                 logger.warning(
-                    "Station {} could not create RegisterBehaviour. Retrying...".format(
-                        self.agent_id
+                    "Agent[{}]: Could not create "
+                    "SharingStationRegistrationBehaviour. "
+                    "Retrying...".format(
+                        self.name
                     )
                 )
-                self.add_behaviour(register_behaviour, template1)
 
+                self.add_behaviour(
+                    register_behaviour,
+                    template
+                )
 
         except Exception as e:
             logger.error(
-                "EXCEPTION creating RegisterBehaviour in Station {}: {}".format(
-                    self.agent_id, e
+                "EXCEPTION creating registration behaviour "
+                "in Sharing Station [{}]: {}".format(
+                    self.name,
+                    e
                 )
             )
-        #self.ready = True
 
-    #Cambiar en mas lugares
-    def set_name(self, name):
+    def get_capacity(self):
         """
-            Sets the name of the bus stop.
+        Returns the physical capacity of the station.
         """
-        self.station_name = name
+        service = self.services_list.get(
+            self.fleet_type,
+            {}
+        )
 
-    def set_service_name(self, name=None):
+        if service.get("mode") != "agent":
+            return 0
+
+        return service.get(
+            "max_agents",
+            0
+        )
+
+    def get_available_bikes(self):
         """
-        Sets the service_name of the sharing station.
+        Returns the number of bikes currently available
+        at the station.
         """
-        self.service_name = name
+        service = self.services_list.get(
+            self.fleet_type,
+            {}
+        )
 
-    def set_max_register_agents(self, agents):
-        self.max_register_agents = agents
+        if service.get("mode") != "agent":
+            return 0
 
-    def all_agents_registered(self):
-        return self.max_register_agents == self.available_agents(self.fleet_type)
+        return len(
+            service.get(
+                "agents",
+                []
+            )
+        )
 
-    def set_type(self, station_type):
+    def get_available_docks(self):
         """
-        Sets the type of the bus stop.
+        Returns the number of currently available docks.
         """
-        self.type = station_type
+        capacity = self.get_capacity()
+        available_bikes = self.get_available_bikes()
 
+        return max(
+            capacity - available_bikes,
+            0
+        )
 
-    def to_json(self):
+    def has_available_bikes(self):
+        return self.get_available_bikes() > 0
+
+    def has_available_docks(self):
+        return self.get_available_docks() > 0
+
+    def is_bike_registered(self, bike_jid):
+        """
+        Checks whether a bike currently belongs to this station.
+        """
+        service = self.services_list.get(
+            self.fleet_type,
+            {}
+        )
+
+        if service.get("mode") != "agent":
+            return False
+
+        bike_jid = str(
+            bike_jid
+        )
+
+        for registered_bike in service.get(
+            "agents",
+            []
+        ):
+            if str(registered_bike) == bike_jid:
+                return True
+
+        return False
+
+    def register_bike(self, bike_jid):
+        """
+        Registers a bike in the station inventory.
+
+        Returns True when the bike belongs to the station after
+        the operation and False when the station cannot accept it.
+        """
+        if self.is_bike_registered(
+            bike_jid
+        ):
+            return True
+
+        if not self.has_available_docks():
+            return False
+
+        self.register_agent(
+            self.fleet_type,
+            str(bike_jid)
+        )
+
+        return self.is_bike_registered(
+            bike_jid
+        )
+
+    def assign_bike(self):
+        """
+        Removes and returns one available bike from the station.
+        """
+        return self.assign_agent(
+            self.fleet_type
+        )
+
+    def get_presence_status(self):
+        """
+        Returns the dynamic station information published
+        through Presence.
+        """
         return {
-            "id": self.agent_id,
-            "name": self.station_name,
-            "position": self.get("current_pos"),
-            "icon": self.icon,
+            "p": self.get_position(),
+            "b": self.get_available_bikes(),
+            "d": self.get_available_docks(),
+            "c": self.get_capacity(),
         }
 
+    def publish_station_presence(self):
+
+        if not self.registration:
+            return
+
+        if not self.get_registration_presence():
+            return
+
+        self.set_agent_presence(
+            status=json.dumps(
+                self.get_presence_status()
+            ),
+            presence_type=PresenceType.AVAILABLE,
+            show=PresenceShow.CHAT,
+        )
+
+    def on_agent_assigned(
+        self,
+        service_name,
+        agent_jid
+    ):
+
+        if service_name != self.fleet_type:
+            return
+
+        self.publish_station_presence()
+
+    def to_json(self):
+        data = super().to_json()
+
+        data.update(
+            {
+                "available_bikes": self.get_available_bikes(),
+                "available_docks": self.get_available_docks(),
+                "capacity": self.get_capacity(),
+            }
+        )
+
+        return data
+
     def run_strategy(self):
-        """
-        Sets the strategy for the stop agent.
-        """
         if not self.running_strategy:
             self.running_strategy = True
 
 
-class RegistrationBehaviour(CyclicBehaviour):
-    """
-        Handles the registration behavior of the bus stop, allowing it to register with the directory agent.
 
-        Methods:
-            on_start(): Initializes the behavior and sets up the logger.
-            send_registration(): Sends a registration message to the directory.
-            run(): Manages the registration logic and response handling.
-    """
-    async def on_start(self):
-        logger.debug("Strategy {} started in directory".format(type(self).__name__))
 
-    def set_registration(self, decision):
-        """
-            Sets the registration status of the agent.
-
-            Args:
-                decision (bool): Registration decision.
-        """
-        self.agent.registration = decision
-
-    async def send_registration(self):
-        """
-        Sends a registration message to the directory agent with the bus stop's information.
-        """
-        logger.info(
-            "Sharing Station {} sent proposal to register to directory {}".format(
-                self.agent.name, self.agent.directory_id
-            )
-        )
-
-        service = self.agent.services_list.get(self.agent.fleet_type, {})
-
-        content = {
-            "jid": str(self.agent.jid),
-            "type": self.agent.fleet_type,
-            "station_name": self.agent.station_name,
-            "position": self.get("current_pos"),
-            "max_transports": service.get("max_agents"),
-            "available_transports": self.agent.available_agents(self.agent.fleet_type)
-        }
-        msg = Message()
-        msg.to = str(self.agent.directory_id)
-        msg.set_metadata("protocol", REGISTER_PROTOCOL)
-        msg.set_metadata("performative", REQUEST_PERFORMATIVE)
-        msg.body = json.dumps(content)
-        await self.send(msg)
-
-    async def run(self):
-        try:
-            if not self.agent.registration and self.agent.all_agents_registered():
-                await self.send_registration()
-            msg = await self.receive(timeout=10)
-            if msg:
-                performative = msg.get_metadata("performative")
-                if performative == ACCEPT_PERFORMATIVE:
-                    self.set_registration(True)
-                    self.agent.ready = True
-                    logger.debug("Registration in the directory")
-        except CancelledError:
-            logger.debug("Cancelling async tasks...")
-        except Exception as e:
-            logger.error(
-                "EXCEPTION in RegisterBehaviour of Station {}: {}".format(
-                    self.agent.name, e
-                )
-            )
-
-class SharingStationStrategyBehaviour(CyclicBehaviour):
-    """
-    Strategy behavior for managing the bus stop operations, including handling customer notifications.
-
-    Methods:
-        on_start(): Initializes the behavior and sets up the logger.
-        dequeue_customers(): Manages the dequeueing of customers based on their destinations.
-        inform_customers(): Informs customers that their transport has arrived.
-        run(): Main loop handling incoming messages and customer notifications.
-    """
+class SharingStationRegistrationBehaviour(CyclicBehaviour):
 
     async def on_start(self):
         logger.debug(
-            "Strategy {} started in transport {}".format(
-                type(self).__name__, self.agent.name
+            "Strategy {} started in sharing station [{}]".format(
+                type(self).__name__,
+                self.agent.name
             )
         )
 
-    async def check_available_place(self, service_name, agent):
+    async def send_station_registration(self):
+        fleetmanager_id = (
+            self.agent.get_registration_fleet()
+        )
 
-        if not self.agent.is_station_full(service_name):
-            await self.inform_customer(agent, True)
-            logger.debug(f"Agent[{self.agent.name}]: Inform to the agent [{agent}] that the station is not full.")
-            return True
-        else:
-            await self.inform_customer(agent, False)
-            logger.warning(f"Agent[{self.agent.name}]: Inform to the agent [{agent}] that the station is full.")
-            return False
+        if fleetmanager_id is None:
+            return
 
+        logger.debug(
+            "Agent[{}]: Sending registration to "
+            "FleetManager [{}].".format(
+                self.agent.name,
+                fleetmanager_id
+            )
+        )
 
-    async def inform_customer(self, inform_to, available):
-        """
-            Informs the specified customers that there is a place available.
+        content = {
+            "name": self.agent.name,
+            "jid": str(self.agent.jid),
+            "fleet_type": self.agent.fleet_type,
+        }
 
-            Args:
-                inform_to (str): Customer to be informed.
-                available (bool): Place available for the bike.
-        """
-        data = {"available_place": available}
         msg = Message()
-        msg.to = inform_to
-        msg.set_metadata("protocol", REQUEST_PROTOCOL)
-        msg.set_metadata("performative", INFORM_PERFORMATIVE)
-        msg.body = json.dumps(data)
-        await self.send(msg)
+        msg.to = str(
+            fleetmanager_id
+        )
 
+        msg.set_metadata(
+            "protocol",
+            REGISTER_PROTOCOL
+        )
+
+        msg.set_metadata(
+            "performative",
+            REQUEST_PERFORMATIVE
+        )
+
+        msg.body = json.dumps(
+            content
+        )
+
+        await self.send(
+            msg
+        )
+
+    async def accept_bike_registration(self, bike_jid):
+        content = {
+            "icon": self.agent.icon,
+            "fleet_type": self.agent.fleet_type,
+        }
+
+        reply = Message()
+        reply.to = str(
+            bike_jid
+        )
+
+        reply.set_metadata(
+            "protocol",
+            REGISTER_PROTOCOL
+        )
+
+        reply.set_metadata(
+            "performative",
+            ACCEPT_PERFORMATIVE
+        )
+
+        reply.body = json.dumps(
+            content
+        )
+
+        await self.send(
+            reply
+        )
+
+    async def reject_bike_registration(self, bike_jid):
+        reply = Message()
+        reply.to = str(
+            bike_jid
+        )
+
+        reply.set_metadata(
+            "protocol",
+            REGISTER_PROTOCOL
+        )
+
+        reply.set_metadata(
+            "performative",
+            REFUSE_PERFORMATIVE
+        )
+
+        reply.body = json.dumps(
+            {
+                "fleet_type": self.agent.fleet_type
+            }
+        )
+
+        await self.send(
+            reply
+        )
+
+    # def publish_station_presence(self):
+    #     if not self.agent.get_registration_presence():
+    #         return
+    #
+    #     self.agent.set_agent_presence(
+    #         status=json.dumps(
+    #             self.agent.get_presence_status()
+    #         ),
+    #         presence_type=PresenceType.AVAILABLE,
+    #         show=PresenceShow.CHAT,
+    #     )
+
+    async def process_bike_registration(self, msg):
+        try:
+            content = json.loads(
+                msg.body
+            )
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "Agent[{}]: Invalid bike registration "
+                "request from [{}].".format(
+                    self.agent.name,
+                    msg.sender
+                )
+            )
+
+            await self.reject_bike_registration(
+                msg.sender
+            )
+
+            return
+
+        bike_jid = content.get(
+            "jid"
+        )
+
+        fleet_type = content.get(
+            "fleet_type"
+        )
+
+        if bike_jid is None:
+            await self.reject_bike_registration(
+                msg.sender
+            )
+            return
+
+        if fleet_type != self.agent.fleet_type:
+            logger.warning(
+                "Agent[{}]: Bike [{}] requested registration "
+                "with invalid fleet type [{}].".format(
+                    self.agent.name,
+                    bike_jid,
+                    fleet_type
+                )
+            )
+
+            await self.reject_bike_registration(
+                msg.sender
+            )
+
+            return
+
+        if str(msg.sender) != str(bike_jid):
+            logger.warning(
+                "Agent[{}]: Bike registration sender [{}] "
+                "does not match jid [{}].".format(
+                    self.agent.name,
+                    msg.sender,
+                    bike_jid
+                )
+            )
+
+            await self.reject_bike_registration(
+                msg.sender
+            )
+
+            return
+
+        registered = self.agent.register_bike(
+            bike_jid
+        )
+
+        if not registered:
+            logger.warning(
+                "Agent[{}]: Bike [{}] registration refused. "
+                "Station is full.".format(
+                    self.agent.name,
+                    bike_jid
+                )
+            )
+
+            await self.reject_bike_registration(
+                msg.sender
+            )
+
+            return
+
+        await self.accept_bike_registration(
+            msg.sender
+        )
+
+        self.agent.publish_station_presence()
+
+        logger.info(
+            "Agent[{}]: Bike [{}] registered. "
+            "Available bikes: {}. "
+            "Available docks: {}.".format(
+                self.agent.name,
+                bike_jid,
+                self.agent.get_available_bikes(),
+                self.agent.get_available_docks()
+            )
+        )
+
+    async def process_fleetmanager_accept(self, msg):
+        fleetmanager_id = (
+            self.agent.get_registration_fleet()
+        )
+
+        if fleetmanager_id is None:
+            return
+
+        if not self.agent.is_same_jid(
+            msg.sender,
+            fleetmanager_id
+        ):
+            return
+
+        self.agent.set_registration(
+            True
+        )
+
+        self.agent.publish_station_presence()
+
+        self.agent.ready = True
+
+        logger.info(
+            "Agent[{}]: Registration in FleetManager "
+            "[{}] accepted.".format(
+                self.agent.name,
+                fleetmanager_id
+            )
+        )
+
+    async def process_fleetmanager_refuse(self, msg):
+        fleetmanager_id = (
+            self.agent.get_registration_fleet()
+        )
+
+        if fleetmanager_id is None:
+            return
+
+        if not self.agent.is_same_jid(
+            msg.sender,
+            fleetmanager_id
+        ):
+            return
+
+        logger.warning(
+            "Agent[{}]: Registration in FleetManager "
+            "[{}] refused.".format(
+                self.agent.name,
+                fleetmanager_id
+            )
+        )
 
     async def run(self):
-        """
-            Main loop that handles incoming messages and manages customer notifications.
-        """
-        msg = await self.receive(timeout=30)
-        logger.debug("Sharing Station {} received message: {}".format(self.agent.jid, msg))
-        if msg:
-            sender = msg.sender
-            performative = msg.get_metadata("performative")
-            content = json.loads(msg.body)
-            service_name = content["service_name"]
+        try:
+            if (
+                not self.agent.registration
+                and self.agent.get_registration_fleet()
+                is not None
+            ):
+                await self.send_station_registration()
 
-            if performative == INFORM_PERFORMATIVE:
+            msg = await self.receive(
+                timeout=10
+            )
 
-                if "register" in content:
-                    register = content["register"]
-                else:
-                    register = None
+            if not msg:
+                return
 
-                if register and register!=None:
+            performative = msg.get_metadata(
+                "performative"
+            )
 
-                    self.agent.register_agent(service_name, sender)
+            if (
+                performative
+                == REQUEST_PERFORMATIVE
+            ):
+                await self.process_bike_registration(
+                    msg
+                )
 
-                elif register==None:
-                    await self.check_available_place(service_name, sender)
+            elif (
+                performative
+                == ACCEPT_PERFORMATIVE
+            ):
+                await self.process_fleetmanager_accept(
+                    msg
+                )
+
+            elif (
+                performative
+                == REFUSE_PERFORMATIVE
+            ):
+                await self.process_fleetmanager_refuse(
+                    msg
+                )
+
+        except CancelledError:
+            logger.debug(
+                "Cancelling async tasks..."
+            )
+
+        except Exception as e:
+            logger.error(
+                "EXCEPTION in "
+                "SharingStationRegistrationBehaviour "
+                "of agent [{}]: {}".format(
+                    self.agent.name,
+                    e
+                )
+            )
+
+
+
