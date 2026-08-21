@@ -168,9 +168,20 @@ class FleetManagerFactory(Factory):
         logger.debug("Creating FleetManager agent: {}".format(jid))
 
         # Load and instantiate agent class
+        # if type(class_) is str:
+        #     agent_class = load_class(class_)
+        #     agent = agent_class(jid, password)
+        # else:
+        #     raise Exception("The agent needs a class in path format.")
+
         if type(class_) is str:
             agent_class = load_class(class_)
-            agent = agent_class(jid, password)
+
+            if optional:
+                agent = agent_class(jid, password, **optional)
+            else:
+                agent = agent_class(jid, password)
+
         else:
             raise Exception("The agent needs a class in path format.")
 
@@ -314,32 +325,34 @@ class CustomerFactory(Factory):
     """
         Factory class for creating CustomerAgent instances.
     """
+
     @classmethod
-    def create_agent(cls,
-                     domain,
-                     name,
-                     password,
-                     class_,
-                     default_strategy,
-                     simulatorjid=None,
-                     optional=None,
-                     strategy=None,
-                     jid_directory=None,
-                     bbox=None,
-                     fleetmanager=None,
-                     fleet_type=None,
-                     route_host=None,
-                     autonomy=None,
-                     current_autonomy=None,
-                     position=None,
-                     speed=None,
-                     target=None,
-                     services=None,
-                     capacity=None,
-                     line=None,
-                     lines=None,
-                     max_walking_dist=None
-                    ):
+    def create_agent(
+        cls,
+        domain,
+        name,
+        password,
+        class_,
+        default_strategy,
+        simulatorjid=None,
+        optional=None,
+        strategy=None,
+        jid_directory=None,
+        bbox=None,
+        fleetmanager=None,
+        fleet_type=None,
+        route_host=None,
+        autonomy=None,
+        current_autonomy=None,
+        position=None,
+        speed=None,
+        target=None,
+        services=None,
+        capacity=None,
+        line=None,
+        lines=None,
+        max_walking_dist=None
+    ):
         """
         Create a Customer agent.
 
@@ -349,12 +362,17 @@ class CustomerFactory(Factory):
             password (str): Password for the agent.
             class_ (str): Class name for the agent in path format.
             default_strategy (class): Default strategy class for the agent.
+            optional (dict, optional): Optional arguments forwarded to
+                the specialized customer agent constructor.
             strategy (class, optional): Optional specific strategy class.
             jid_directory (JID): Directory JID address.
             fleet_type (str): Type of fleet used by the agent.
             route_host (str): Route host address.
             position (list): Initial coordinates of the agent.
             target (list, optional): Destination coordinates of the agent.
+            speed (float, optional): Agent movement speed.
+            line (str, optional): Public transport line.
+            max_walking_dist (float, optional): Maximum walking distance.
 
         Returns:
             CustomerAgent: An instance of the specified customer agent class.
@@ -364,11 +382,38 @@ class CustomerFactory(Factory):
         logger.debug("Creating Customer agent: {}".format(jid))
 
         # Load and instantiate agent class
+        #if type(class_) is str:
+        #    agent_class = load_class(class_)
+        #    agent = agent_class(jid, password)
+        #else:
+        #    raise Exception ("The agent needs a class in path format.")
+
         if type(class_) is str:
-            agent_class = load_class(class_)
-            agent = agent_class(jid, password)
+
+            agent_class = load_class(
+                class_
+            )
+
+            if optional:
+
+                agent = agent_class(
+                    jid,
+                    password,
+                    **optional
+                )
+
+            else:
+
+                agent = agent_class(
+                    jid,
+                    password
+                )
+
         else:
-            raise Exception ("The agent needs a class in path format.")
+
+            raise Exception(
+                "The agent needs a class in path format."
+            )
 
         agent.set_id(name)
         agent.set_directory(jid_directory)
@@ -518,45 +563,50 @@ class TransportStopFactory(Factory):
         Factory class for creating TransportStopAgent instances.
 
         """
-    @classmethod
-    def create_agent(cls,
-                    domain,
-                    name,
-                    password,
-                    default_strategy=None,
-                    simulatorjid=None,
-                    class_=None,
-                    optional=None,
-                    strategy=None,
-                    jid_directory=None,
-                    bbox=None,
-                    fleetmanager=None,
-                    fleet_type=None,
-                    route_host=None,
-                    autonomy=None,
-                    current_autonomy=None,
-                    position=None,
-                    speed=None,
-                    target=None,
-                    services=None,
-                    capacity=None,
-                    line=None,
-                    lines=None,
-                    max_walking_dist=None
-                    ):
 
+    @classmethod
+    def create_agent(
+        cls,
+        domain,
+        name,
+        password,
+        default_strategy=None,
+        simulatorjid=None,
+        class_=None,
+        optional=None,
+        strategy=None,
+        jid_directory=None,
+        bbox=None,
+        fleetmanager=None,
+        fleet_type=None,
+        route_host=None,
+        autonomy=None,
+        current_autonomy=None,
+        position=None,
+        speed=None,
+        target=None,
+        services=None,
+        capacity=None,
+        line=None,
+        lines=None,
+        max_walking_dist=None,
+        registration=None,
+    ):
         """
         Create a Transport Stop agent.
 
         Args:
             domain (str): XMPP domain name.
-            name (str): List containing agent ID and stop name.
+            name (tuple): Tuple containing agent ID and stop name.
             password (str): Password for the agent.
             default_strategy (class): Default strategy class for the agent.
             strategy (class, optional): Optional specific strategy class.
             jid_directory (JID): Directory JID address.
             position (list): Initial coordinates of the transport stop.
             lines (list): List of lines served by the transport stop.
+            optional (dict): Optional arguments forwarded to the specialized agent.
+            fleet_type (str): Fleet type associated with the stop.
+            registration (dict): Registration configuration.
 
         Returns:
             TransportStopAgent: An instance of TransportStopAgent.
@@ -566,15 +616,41 @@ class TransportStopFactory(Factory):
         logger.debug("Creating Station agent: {}".format(jid))
 
         # Load and instantiate agent class
+        # if type(class_) is str:
+        #     agent_class = load_class(class_)
+        #     agent = agent_class(jid, password)
+        # else:
+        #     raise Exception ("The agent needs a class in path format.")
+
         if type(class_) is str:
             agent_class = load_class(class_)
-            agent = agent_class(jid, password)
+
+            if optional:
+                agent = agent_class(
+                    jid,
+                    password,
+                    **optional
+                )
+            else:
+                agent = agent_class(
+                    jid,
+                    password
+                )
+
         else:
-            raise Exception ("The agent needs a class in path format.")
+            raise Exception(
+                "The agent needs a class in path format."
+            )
 
         agent.set_id(name[0])
         agent.set_name(name[1])
         agent.set_directory(jid_directory)
+
+        cls.configure_registration(
+            agent,
+            registration,
+            domain
+        )
 
         # Load strategy if provided
         if type(strategy) is str:
@@ -592,6 +668,9 @@ class TransportStopFactory(Factory):
 
         for line in lines:
             agent.add_queue(line)
+
+        if fleet_type is not None:
+            agent.set_fleet_type(fleet_type)
 
         return agent
 

@@ -182,8 +182,11 @@ class SimulatorAgent(Agent):
             fleet_type = manager["fleet_type"]
             strategy = manager.get("strategy")
             icon = manager.get("icon")
+            optional = manager.get(
+                "optional"
+            )
             agent = self.create_fleetmanager_agent(
-                name, password, class_, fleet_type=fleet_type, strategy=strategy
+                name, password, class_, fleet_type=fleet_type, strategy=strategy, optional=optional
             )
 
             self.set_icon(agent, icon, default=fleet_type)
@@ -335,6 +338,7 @@ class SimulatorAgent(Agent):
             # New parameter to determine the maximum walking distance a customer finds reasonable
             # to walk to get their car
             max_walking_dist = customer.get("max_walking_dist") if "max_walking_dist" in customer else None
+            optional = customer.get("optional")
             icon = customer.get("icon")
             delay = customer["delay"] if "delay" in customer else None
 
@@ -353,7 +357,8 @@ class SimulatorAgent(Agent):
                 delayed=delayed,
                 speed=speed,
                 line=line,
-                max_walking_dist=max_walking_dist
+                max_walking_dist=max_walking_dist,
+                optional=optional
             )
 
             self.set_icon(agent, icon, default="customer")
@@ -408,7 +413,20 @@ class SimulatorAgent(Agent):
             icon = stop.get("icon")
             position = stop.get("position")
             class_ = stop["class"]
-            lines = stop["lines"]
+            #lines = stop["lines"]
+            lines = stop.get(
+                "lines",
+                []
+            )
+            optional = stop.get(
+                "optional"
+            )
+            fleet_type = stop.get(
+                "fleet_type"
+            )
+            registration = stop.get(
+                "registration"
+            )
 
             agent = self.create_bus_stop_agent(
                 id=stop["id"],
@@ -418,6 +436,9 @@ class SimulatorAgent(Agent):
                 class_=class_,
                 lines=lines,
                 strategy=strategy,
+                optional=optional,
+                fleet_type=fleet_type,
+                registration=registration,
             )
 
             self.set_icon(agent, icon, default="solar_station")
@@ -555,36 +576,65 @@ class SimulatorAgent(Agent):
                             )
                             await asyncio.sleep(0.5)
 
-                        for manager in self.agent.manager_agents.values():
-                            manager.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['fleetmanager']} to manager {manager.name}"
-                            )
-                        for station in self.agent.station_agents.values():
-                            station.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['station']} to station {station.name}"
-                            )
-                        for transport in self.agent.transport_agents.values():
-                            transport.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['transport']} to transport {transport.name}"
-                            )
-                        for vehicle in self.agent.vehicle_agents.values():
-                            vehicle.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['vehicle']} to vehicle {vehicle.name}"
-                            )
-                        for customer in self.agent.customer_agents.values():
-                            customer.run_strategy()
-                            logger.debug(
-                                f"Running strategy {self.agent.default_strategies['customer']} to customer {customer.name}"
-                            )
-                        # for stop in self.agent.bus_stop_agents.values():
-                        #    stop.run_strategy()
-                        #    logger.debug(
-                        #        f"Running strategy {self.agent.default_strategies['stop']} to stop {stop.name}"
-                        #    )
+                            # Fleet Managers.
+                            for manager in (self.agent.manager_agents.values()):
+                                manager.run_strategy()
+                                logger.debug(
+                                    "Running strategy {} to manager {}".format(
+                                        manager.strategy,
+                                        manager.name
+                                    )
+                                )
+
+                            # Stations.
+                            for station in (self.agent.station_agents.values()):
+                                station.run_strategy()
+                                logger.debug(
+                                    "Running strategy {} to station {}".format(
+                                        station.strategy,
+                                        station.name
+                                    )
+                                )
+
+                            # Transport Stops.
+                            for stop in (self.agent.bus_stop_agents.values()):
+                                stop.run_strategy()
+                                logger.debug(
+                                    "Running strategy {} to stop {}".format(
+                                        stop.strategy,
+                                        stop.name
+                                    )
+                                )
+
+                            # Transports.
+                            for transport in (self.agent.transport_agents.values()):
+                                transport.run_strategy()
+                                logger.debug(
+                                    "Running strategy {} to transport {}".format(
+                                        transport.strategy,
+                                        transport.name
+                                    )
+                                )
+
+                            # Vehicles.
+                            for vehicle in (self.agent.vehicle_agents.values()):
+                                vehicle.run_strategy()
+                                logger.debug(
+                                    "Running strategy {} to vehicle {}".format(
+                                        vehicle.strategy,
+                                        vehicle.name
+                                    )
+                                )
+
+                            # Customers.
+                            for customer in (self.agent.customer_agents.values()):
+                                customer.run_strategy()
+                                logger.debug(
+                                    "Running strategy {} to customer {}".format(
+                                        customer.strategy,
+                                        customer.name
+                                    )
+                                )
 
                     self.agent.simulation_running = True
                     self.agent.simulation_init_time = time.time()
@@ -1091,7 +1141,7 @@ class SimulatorAgent(Agent):
         await agent.start()
 
     def create_fleetmanager_agent(
-        self, name, password, class_, fleet_type, strategy=None, icon=None
+        self, name, password, class_, fleet_type, strategy=None, icon=None, optional=None
     ):
         agent = FleetManagerFactory.create_agent(
             domain=self.jid.domain,
@@ -1102,6 +1152,7 @@ class SimulatorAgent(Agent):
             strategy=strategy,
             jid_directory=self.get_directory().jid,
             fleet_type=fleet_type,
+            optional=optional
         )
         if self.simulation_running:
             agent.run_strategy()
@@ -1176,7 +1227,8 @@ class SimulatorAgent(Agent):
         delayed=False,
         speed=None,
         line=None,
-        max_walking_dist=None
+        max_walking_dist=None,
+        optional=None
     ):
         agent = CustomerFactory.create_agent(
             domain=self.jid.domain,
@@ -1193,7 +1245,8 @@ class SimulatorAgent(Agent):
             speed=speed,
             target=target,
             line=line,
-            max_walking_dist=max_walking_dist
+            max_walking_dist=max_walking_dist,
+            optional=optional
         )
 
         if self.simulation_running:
@@ -1284,6 +1337,9 @@ class SimulatorAgent(Agent):
         lines,
         strategy=None,
         services=None,
+        optional=None,
+        fleet_type=None,
+        registration=None,
     ):
         """
         Create a customer agent.
@@ -1311,6 +1367,9 @@ class SimulatorAgent(Agent):
             position=position,
             services=services,
             lines=lines,
+            optional=optional,
+            fleet_type=fleet_type,
+            registration=registration,
         )
 
         if self.simulation_running:

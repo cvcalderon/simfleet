@@ -76,6 +76,19 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
                 )
             )
 
+    def get_registration_content(self):
+
+        return {
+            "name":
+                self.name,
+
+            "jid":
+                str(self.jid),
+
+            "fleet_type":
+                self.fleet_type,
+        }
+
     #OLD
     # def set_fleetmanager(self, fleetmanager_id):
     #     """
@@ -203,11 +216,16 @@ class RegistrationBehaviour(CyclicBehaviour):
                 registration_fleet
             )
         )
-        content = {
-            "name": self.agent.name,
-            "jid": str(self.agent.jid),
-            "fleet_type": self.agent.fleet_type,
-        }
+        # content = {
+        #     "name": self.agent.name,
+        #     "jid": str(self.agent.jid),
+        #     "fleet_type": self.agent.fleet_type,
+        # }
+
+        content = (
+            self.agent.get_registration_content()
+        )
+
         msg = Message()
         #msg.to = str(self.agent.fleetmanager_id)
         msg.to = str(registration_fleet)
