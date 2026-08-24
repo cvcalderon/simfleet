@@ -671,18 +671,8 @@ class PublicTransportCustomerWaitingToMoveState(
 class PublicTransportCustomerWaitingForJourneyState(
     PublicTransportCustomerStrategyBehaviour
 ):
-    """
-    Waits for journey responses from Public Transport
-    FleetManagers, combines their candidates and selects
-    the preferred journey.
 
-    If no feasible journey exists, the Customer enters
-    the terminal CUSTOMER_JOURNEY_FAILED state.
-    """
-
-    async def on_start(
-        self
-    ):
+    async def on_start(self):
 
         await super().on_start()
 
@@ -690,20 +680,22 @@ class PublicTransportCustomerWaitingForJourneyState(
             CUSTOMER_WAITING_FOR_JOURNEY
         )
 
-    async def run(
-        self
-    ):
+    async def run(self):
 
         fleetmanagers = (
             self.agent.get_fleetmanagers()
-            or {}
         )
 
-        expected_responses = len(
-            fleetmanagers
-        )
+        if not fleetmanagers:
 
-        if expected_responses == 0:
+            #
+            # Bootstrap case.
+            #
+            # No polling is performed here.
+            # The Customer returns to WAITING_TO_MOVE
+            # so the normal FleetManager discovery
+            # mechanism can be executed.
+            #
 
             self.set_next_state(
                 CUSTOMER_WAITING_TO_MOVE
@@ -711,17 +703,17 @@ class PublicTransportCustomerWaitingForJourneyState(
 
             return
 
-        journeys = []
+        journey_candidates = []
 
-        responses = 0
+        expected_responses = len(
+            fleetmanagers
+        )
 
-        #
-        # One response is expected from every
-        # FleetManager queried by the previous state.
-        #
+        received_responses = 0
 
-        while responses < (
-            expected_responses
+        while (
+            received_responses
+            < expected_responses
         ):
 
             msg = await self.receive(
@@ -729,135 +721,97 @@ class PublicTransportCustomerWaitingForJourneyState(
             )
 
             if not msg:
+
+                #
+                # One or more FleetManagers did not
+                # answer inside the response window.
+                #
+
                 break
 
-            protocol = (
-                msg.get_metadata(
-                    "protocol"
-                )
+            protocol = msg.get_metadata(
+                "protocol"
             )
 
-            performative = (
-                msg.get_metadata(
-                    "performative"
-                )
+            performative = msg.get_metadata(
+                "performative"
             )
 
-            if protocol != (
-                REQUEST_PROTOCOL
+            if (
+                protocol != REQUEST_PROTOCOL
+                or performative
+                != INFORM_PERFORMATIVE
             ):
-                continue
 
-            if performative not in (
-                INFORM_PERFORMATIVE,
-                REFUSE_PERFORMATIVE,
-            ):
                 continue
-
-            responses += 1
 
             try:
 
                 content = (
-                    json.loads(
-                        msg.body
-                    )
+                    json.loads(msg.body)
                     if msg.body
                     else {}
                 )
 
             except (
                 json.JSONDecodeError,
-                TypeError,
+                TypeError
             ):
 
                 logger.warning(
                     "Public transport customer {} "
-                    "received an invalid journey response.".format(
+                    "received an invalid journey "
+                    "response.".format(
                         self.agent.name
                     )
                 )
 
                 continue
 
-            if content.get(
-                "request_type"
-            ) != (
-                "public_transport_journeys"
+            if (
+                content.get("request_type")
+                != "public_transport_journeys"
             ):
 
                 continue
 
-            if performative == (
-                REFUSE_PERFORMATIVE
-            ):
+            received_responses += 1
 
-                logger.warning(
-                    "Public transport customer {} "
-                    "journey request refused by {}: {}".format(
-                        self.agent.name,
-                        msg.sender,
-                        content.get(
-                            "reason"
-                        )
-                    )
-                )
-
-                continue
-
-            manager_journeys = (
-                content.get(
-                    "journeys",
-                    []
-                )
+            journeys = content.get(
+                "journeys",
+                []
             )
 
             if not isinstance(
-                manager_journeys,
+                journeys,
                 list
             ):
-
                 continue
 
-            journeys.extend(
-                journey
-
-                for journey
-                in manager_journeys
-
-                if isinstance(
-                    journey,
-                    dict
-                )
+            journey_candidates.extend(
+                journeys
             )
 
         self.agent.set_journey_candidates(
-            journeys
+            journey_candidates
         )
 
         selected_journey = (
             self.select_journey(
-                journeys
+                journey_candidates
             )
         )
-
-        #
-        # No feasible journey.
-        #
-        # This is terminal in the baseline.
-        #
-        # We deliberately do NOT poll the FleetManager
-        # periodically looking for a new route.
-        #
 
         if selected_journey is None:
 
             logger.warning(
                 "Public transport customer {} "
-                "found no feasible journey.".format(
+                "could not find a feasible journey.".format(
                     self.agent.name
                 )
             )
+
+            self.agent.clear_journey()
 
             self.set_next_state(
                 CUSTOMER_JOURNEY_FAILED
@@ -865,27 +819,85 @@ class PublicTransportCustomerWaitingForJourneyState(
 
             return
 
+        #
+        # From this point the Journey becomes the
+        # Customer's runtime source of truth.
+        #
+
         self.agent.set_journey(
             selected_journey
         )
 
+        #
+        # Public Transport Statistics
+        #
+        # This is the beginning of EXECUTION of the
+        # selected Journey, not the beginning of
+        # journey planning.
+        #
+        # StatisticsStore supplies the event timestamp.
+        #
+        # Therefore:
+        #
+        # pt_journey_completed.timestamp
+        # -
+        # pt_journey_started.timestamp
+        #
+        # gives total_journey_time.
+        #
+
+        self.agent.events_store.emit(
+            event_type="pt_journey_started",
+            details={
+                "transfers":
+                    selected_journey.get(
+                        "transfers",
+                        0
+                    ),
+
+                "walking_distance":
+                    selected_journey.get(
+                        "walking_distance",
+                        0
+                    ),
+
+                "public_transport_stops":
+                    selected_journey.get(
+                        "public_transport_stops",
+                        0
+                    ),
+
+                "legs":
+                    len(
+                        selected_journey.get(
+                            "legs",
+                            []
+                        )
+                    ),
+            }
+        )
+
         logger.info(
-            "Public transport customer {} selected journey "
-            "with {} transfers, {} walking distance and "
-            "{} public transport stops.".format(
+            "Public transport customer {} "
+            "selected journey with {} transfers, "
+            "{} walking distance and {} "
+            "public transport stops.".format(
                 self.agent.name,
 
                 selected_journey.get(
-                    "transfers"
+                    "transfers",
+                    0
                 ),
 
                 selected_journey.get(
-                    "walking_distance"
+                    "walking_distance",
+                    0
                 ),
 
                 selected_journey.get(
-                    "public_transport_stops"
-                ),
+                    "public_transport_stops",
+                    0
+                )
             )
         )
 
@@ -900,36 +912,44 @@ class PublicTransportCustomerJourneyFailedState(
     Final state for a Customer whose requested
     journey could not be completed.
 
-    No next state is configured. Therefore the
-    Public Transport Customer FSM finishes here.
+    No next state is configured.
+    Therefore the Public Transport Customer
+    FSM finishes here.
     """
 
-    async def on_start(
-        self
-    ):
+    async def on_start(self):
 
         await super().on_start()
-
-        if self.agent.status != (
-            CUSTOMER_JOURNEY_FAILED
-        ):
-
-            logger.warning(
-                "Public transport customer {} "
-                "finished with an incomplete journey "
-                "at position {}.".format(
-                    self.agent.name,
-                    self.agent.get_position()
-                )
-            )
 
         self.agent.status = (
             CUSTOMER_JOURNEY_FAILED
         )
 
-    async def run(
-        self
-    ):
+        logger.warning(
+            "Public transport customer {} "
+            "finished with an incomplete journey "
+            "at position {}.".format(
+                self.agent.name,
+                self.agent.get_position()
+            )
+        )
+
+        #
+        # Public Transport Statistics
+        #
+
+        self.agent.events_store.emit(
+            event_type="pt_journey_failed",
+            details={
+                "position":
+                    self.agent.get_position(),
+
+                "leg_index":
+                    self.agent.current_leg_index,
+            }
+        )
+
+    async def run(self):
 
         self.agent.clear_current_vehicle()
 
@@ -940,7 +960,7 @@ class PublicTransportCustomerJourneyFailedState(
         #
         # Intentionally no set_next_state().
         #
-        # CUSTOMER_JOURNEY_FAILED is a real
+        # CUSTOMER_JOURNEY_FAILED remains a real
         # terminal state.
         #
 
@@ -1226,18 +1246,8 @@ class PublicTransportCustomerMovingToDestState(
 class PublicTransportCustomerInStopState(
     PublicTransportCustomerStrategyBehaviour
 ):
-    """
-    Registers the Customer in the queue associated with
-    the directional Pattern of the current Public
-    Transport leg.
 
-    The Customer only transitions to CUSTOMER_WAITING
-    after the Stop explicitly accepts the queue request.
-    """
-
-    async def on_start(
-        self
-    ):
+    async def on_start(self):
 
         await super().on_start()
 
@@ -1245,31 +1255,16 @@ class PublicTransportCustomerInStopState(
             CUSTOMER_IN_STOP
         )
 
-    def _bare_jid(
-        self,
-        jid
-    ):
+    def _bare_jid(self, jid):
 
         if jid is None:
             return None
 
-        return str(
-            jid
-        ).split(
-            "/"
-        )[0]
+        return str(jid).split("/")[0]
 
-    async def run(
-        self
-    ):
+    async def run(self):
 
-        leg = (
-            self.agent.get_current_leg()
-        )
-
-        #
-        # Defensive checks.
-        #
+        leg = self.agent.get_current_leg()
 
         if leg is None:
 
@@ -1279,10 +1274,9 @@ class PublicTransportCustomerInStopState(
 
             return
 
-        if leg.get(
-            "type"
-        ) != (
-            "public_transport"
+        if (
+            leg.get("type")
+            != "public_transport"
         ):
 
             self.set_next_state(
@@ -1291,16 +1285,16 @@ class PublicTransportCustomerInStopState(
 
             return
 
-        pattern_id = leg.get(
-            "pattern_id"
+        pattern_id = (
+            leg.get("pattern_id")
         )
 
-        origin_stop = leg.get(
-            "origin_stop"
+        origin_stop = (
+            leg.get("origin_stop")
         )
 
-        destination_stop = leg.get(
-            "destination_stop"
+        destination_stop = (
+            leg.get("destination_stop")
         )
 
         origin_stop_id = (
@@ -1330,13 +1324,10 @@ class PublicTransportCustomerInStopState(
 
             logger.error(
                 "Public transport customer {} "
-                "has an invalid public transport leg.".format(
+                "has an invalid public transport leg "
+                "while entering a stop.".format(
                     self.agent.name
                 )
-            )
-
-            await self.agent.sleep(
-                5
             )
 
             self.set_next_state(
@@ -1346,62 +1337,37 @@ class PublicTransportCustomerInStopState(
             return
 
         #
-        # The logical Stop state should normally have
-        # been established by the previous walking leg
-        # or by alighting from another transport.
+        # current_stop may legitimately be None when
+        # the Journey begins directly at a Stop.
         #
-        # However, the journey may start directly at a
-        # Stop with no access walking leg.
+        # In that case QueueStationAgent performs the
+        # physical proximity check before accepting
+        # the Customer into the queue.
+        #
+        # We only reject the operation when the
+        # Customer explicitly knows that it is at a
+        # DIFFERENT logical Stop.
         #
 
         current_stop = (
             self.agent.get_current_stop()
         )
 
-        if current_stop is None:
-
-            origin_position = (
-                origin_stop.get(
-                    "position"
-                )
-            )
-
-            if (
-                origin_position is not None
-                and self.agent.get_position()
-                == origin_position
-            ):
-
-                self.agent.set_current_stop(
-                    origin_stop_id
-                )
-
-                current_stop = (
-                    origin_stop_id
-                )
-
-        #
-        # The Customer must be at the origin Stop of
-        # the current PT leg.
-        #
-
-        if current_stop != (
-            origin_stop_id
+        if (
+            current_stop is not None
+            and current_stop
+            != origin_stop_id
         ):
 
             logger.error(
                 "Public transport customer {} "
-                "cannot enter queue for pattern {}: "
-                "current stop is {}, expected {}.".format(
+                "cannot enter queue at stop {} "
+                "because current logical stop "
+                "is {}.".format(
                     self.agent.name,
-                    pattern_id,
-                    current_stop,
-                    origin_stop_id
+                    origin_stop_id,
+                    current_stop
                 )
-            )
-
-            await self.agent.sleep(
-                5
             )
 
             self.set_next_state(
@@ -1410,23 +1376,22 @@ class PublicTransportCustomerInStopState(
 
             return
 
-        #
-        # Request entry into the queue associated with
-        # this directional Pattern.
-        #
-
-        sent = (
-            await self.request_stop_queue(
-                origin_stop,
-                pattern_id,
-                destination_stop_id
-            )
+        sent = await self.request_stop_queue(
+            origin_stop,
+            pattern_id,
+            destination_stop_id
         )
 
         if not sent:
 
-            await self.agent.sleep(
-                2
+            logger.warning(
+                "Public transport customer {} "
+                "could not request queue {} "
+                "at stop {}.".format(
+                    self.agent.name,
+                    pattern_id,
+                    origin_stop_id
+                )
             )
 
             self.set_next_state(
@@ -1434,12 +1399,6 @@ class PublicTransportCustomerInStopState(
             )
 
             return
-
-        #
-        # Wait for QueueBehaviour to confirm whether the
-        # Customer was physically close enough and the
-        # requested service exists.
-        #
 
         msg = await self.receive(
             timeout=30
@@ -1447,90 +1406,62 @@ class PublicTransportCustomerInStopState(
 
         if not msg:
 
+            #
+            # QueueStationAgent does not deduplicate
+            # queue entries.
+            #
+            # If ACCEPT was lost, retrying directly
+            # could enqueue the same Customer twice.
+            #
+            # Therefore CANCEL before retrying.
+            #
+
+            await self.cancel_stop_queue(
+                origin_stop,
+                pattern_id
+            )
+
             logger.warning(
                 "Public transport customer {} "
-                "received no queue response from stop {} "
-                "for pattern {}.".format(
+                "did not receive queue confirmation "
+                "from stop {} for pattern {}. "
+                "Cancelling before retry.".format(
                     self.agent.name,
                     origin_stop_id,
                     pattern_id
                 )
             )
 
-            #
-            # The REQUEST may have reached the Stop even
-            # if its ACCEPT was lost.
-            #
-            # Cancel first to avoid creating duplicate
-            # queue entries when retrying.
-            #
-
-            await self.cancel_stop_queue(
-                origin_stop,
-                pattern_id
-            )
-
-            await self.agent.sleep(
-                2
-            )
-
             self.set_next_state(
                 CUSTOMER_IN_STOP
             )
 
             return
 
-        protocol = (
-            msg.get_metadata(
-                "protocol"
-            )
+        protocol = msg.get_metadata(
+            "protocol"
         )
 
-        performative = (
-            msg.get_metadata(
-                "performative"
-            )
+        performative = msg.get_metadata(
+            "performative"
         )
 
-        sender = (
-            self._bare_jid(
-                msg.sender
-            )
+        sender = self._bare_jid(
+            msg.sender
         )
 
-        expected_sender = (
-            self._bare_jid(
-                origin_stop_jid
-            )
+        expected_sender = self._bare_jid(
+            origin_stop_jid
         )
-
-        #
-        # Ignore a response that does not belong to the
-        # Stop currently being registered.
-        #
 
         if (
             protocol != REQUEST_PROTOCOL
             or sender != expected_sender
         ):
 
-            logger.warning(
-                "Public transport customer {} "
-                "received unexpected queue response "
-                "from {} while waiting for {}.".format(
-                    self.agent.name,
-                    sender,
-                    expected_sender
-                )
-            )
-
             await self.cancel_stop_queue(
                 origin_stop,
                 pattern_id
-            )
-
-            await self.agent.sleep(
-                2
             )
 
             self.set_next_state(
@@ -1539,62 +1470,67 @@ class PublicTransportCustomerInStopState(
 
             return
 
-        #
-        # Queue accepted.
-        #
+        try:
 
-        if performative == (
-            ACCEPT_PERFORMATIVE
+            content = (
+                json.loads(msg.body)
+                if msg.body
+                else {}
+            )
+
+        except (
+            json.JSONDecodeError,
+            TypeError
         ):
 
-            content = {}
+            await self.cancel_stop_queue(
+                origin_stop,
+                pattern_id
+            )
 
-            if msg.body:
+            logger.warning(
+                "Public transport customer {} "
+                "received invalid queue response "
+                "from stop {}.".format(
+                    self.agent.name,
+                    origin_stop_id
+                )
+            )
 
-                try:
+            self.set_next_state(
+                CUSTOMER_IN_STOP
+            )
 
-                    content = json.loads(
-                        msg.body
-                    )
+            return
 
-                except (
-                    json.JSONDecodeError,
-                    TypeError,
-                ):
+        if (
+            performative
+            == ACCEPT_PERFORMATIVE
+        ):
 
-                    content = {}
-
-            station_id = (
+            station_id = self._bare_jid(
                 content.get(
                     "station_id"
                 )
             )
 
             if (
-                station_id is not None
-                and self._bare_jid(
-                    station_id
-                )
+                station_id
                 != expected_sender
             ):
-
-                logger.warning(
-                    "Public transport customer {} "
-                    "received inconsistent station_id {} "
-                    "while registering at {}.".format(
-                        self.agent.name,
-                        station_id,
-                        origin_stop_id
-                    )
-                )
 
                 await self.cancel_stop_queue(
                     origin_stop,
                     pattern_id
                 )
 
-                await self.agent.sleep(
-                    2
+                logger.warning(
+                    "Public transport customer {} "
+                    "received queue acceptance for "
+                    "unexpected station {}.".format(
+                        self.agent.name,
+                        station_id
+                    )
                 )
 
                 self.set_next_state(
@@ -1604,10 +1540,8 @@ class PublicTransportCustomerInStopState(
                 return
 
             #
-            # Runtime truth:
-            #
-            # the Customer is now waiting in this
-            # directional Pattern queue.
+            # Only now do we consider the Customer
+            # logically located at the Stop.
             #
 
             self.agent.set_current_stop(
@@ -1620,10 +1554,44 @@ class PublicTransportCustomerInStopState(
 
             self.agent.clear_current_vehicle()
 
+            #
+            # Public Transport Statistics
+            #
+            # Stop has confirmed that the Customer
+            # was actually inserted into its queue.
+            #
+
+            self.agent.events_store.emit(
+                event_type="pt_queue_entered",
+                details={
+                    "pattern_id":
+                        pattern_id,
+
+                    "route_id":
+                        leg.get(
+                            "route_id"
+                        ),
+
+                    "mode":
+                        leg.get(
+                            "mode"
+                        ),
+
+                    "stop_id":
+                        origin_stop_id,
+
+                    "destination_stop":
+                        destination_stop_id,
+
+                    "leg_index":
+                        self.agent.current_leg_index,
+                }
+            )
+
             logger.info(
                 "Public transport customer {} "
-                "registered at stop {} waiting for "
-                "pattern {} to destination {}.".format(
+                "registered at stop {} waiting "
+                "for pattern {} to destination {}.".format(
                     self.agent.name,
                     origin_stop_id,
                     pattern_id,
@@ -1637,27 +1605,21 @@ class PublicTransportCustomerInStopState(
 
             return
 
-        #
-        # Queue explicitly refused.
-        #
-
-        if performative == (
-            REFUSE_PERFORMATIVE
+        if (
+            performative
+            == REFUSE_PERFORMATIVE
         ):
 
-            logger.warning(
+            self.agent.clear_waiting_pattern_id()
+
+            logger.info(
                 "Public transport customer {} "
-                "was refused by stop {} for pattern {}.".format(
+                "was refused queue access at stop {} "
+                "for pattern {}.".format(
                     self.agent.name,
                     origin_stop_id,
                     pattern_id
                 )
-            )
-
-            self.agent.clear_waiting_pattern_id()
-
-            await self.agent.sleep(
-                2
             )
 
             self.set_next_state(
@@ -1666,27 +1628,9 @@ class PublicTransportCustomerInStopState(
 
             return
 
-        #
-        # Unexpected performative.
-        #
-
-        logger.warning(
-            "Public transport customer {} "
-            "received unexpected performative {} "
-            "from stop {}.".format(
-                self.agent.name,
-                performative,
-                origin_stop_id
-            )
-        )
-
         await self.cancel_stop_queue(
             origin_stop,
             pattern_id
-        )
-
-        await self.agent.sleep(
-            2
         )
 
         self.set_next_state(
@@ -2057,49 +2001,23 @@ class PublicTransportCustomerWaitingState(
 class PublicTransportCustomerWaitingForApprovalState(
     PublicTransportCustomerStrategyBehaviour
 ):
-    """
-    Waits for the boarding response from the Vehicle
-    selected while the Customer was waiting at a Stop.
 
-    ACCEPT:
-        Customer boards the Vehicle.
-
-    REFUSE:
-        Customer remains in the Stop queue and waits
-        for another compatible Vehicle.
-    """
-
-    async def on_start(
-        self
-    ):
-
+    async def on_start(self):
         await super().on_start()
 
         self.agent.status = (
             CUSTOMER_WAITING_FOR_APPROVAL
         )
 
-    def _bare_jid(
-        self,
-        jid
-    ):
-
+    def _bare_jid(self, jid):
         if jid is None:
             return None
 
-        return str(
-            jid
-        ).split(
-            "/"
-        )[0]
+        return str(jid).split("/")[0]
 
-    async def run(
-        self
-    ):
+    async def run(self):
 
-        leg = (
-            self.agent.get_current_leg()
-        )
+        leg = self.agent.get_current_leg()
 
         if leg is None:
 
@@ -2111,11 +2029,7 @@ class PublicTransportCustomerWaitingForApprovalState(
 
             return
 
-        if leg.get(
-            "type"
-        ) != (
-            "public_transport"
-        ):
+        if leg.get("type") != "public_transport":
 
             self.agent.clear_current_vehicle()
 
@@ -2137,24 +2051,16 @@ class PublicTransportCustomerWaitingForApprovalState(
 
             return
 
-        pattern_id = leg.get(
-            "pattern_id"
+        pattern_id = (
+            leg.get("pattern_id")
         )
 
-        origin_stop_id = (
-            self.get_stop_id(
-                leg.get(
-                    "origin_stop"
-                )
-            )
+        origin_stop_id = self.get_stop_id(
+            leg.get("origin_stop")
         )
 
-        destination_stop_id = (
-            self.get_stop_id(
-                leg.get(
-                    "destination_stop"
-                )
-            )
+        destination_stop_id = self.get_stop_id(
+            leg.get("destination_stop")
         )
 
         if (
@@ -2179,15 +2085,9 @@ class PublicTransportCustomerWaitingForApprovalState(
 
             return
 
-        expected_vehicle = (
-            self._bare_jid(
-                vehicle_id
-            )
+        expected_vehicle = self._bare_jid(
+            vehicle_id
         )
-
-        #
-        # Reactive boarding transaction.
-        #
 
         while True:
 
@@ -2198,22 +2098,16 @@ class PublicTransportCustomerWaitingForApprovalState(
             if not msg:
                 continue
 
-            protocol = (
-                msg.get_metadata(
-                    "protocol"
-                )
+            protocol = msg.get_metadata(
+                "protocol"
             )
 
-            performative = (
-                msg.get_metadata(
-                    "performative"
-                )
+            performative = msg.get_metadata(
+                "performative"
             )
 
-            sender = (
-                self._bare_jid(
-                    msg.sender
-                )
+            sender = self._bare_jid(
+                msg.sender
             )
 
             if (
@@ -2231,16 +2125,14 @@ class PublicTransportCustomerWaitingForApprovalState(
             try:
 
                 content = (
-                    json.loads(
-                        msg.body
-                    )
+                    json.loads(msg.body)
                     if msg.body
                     else {}
                 )
 
             except (
                 json.JSONDecodeError,
-                TypeError,
+                TypeError
             ):
 
                 logger.error(
@@ -2254,26 +2146,21 @@ class PublicTransportCustomerWaitingForApprovalState(
 
                 continue
 
-            if content.get(
-                "request_type"
-            ) != (
-                "public_transport_board"
+            if (
+                content.get("request_type")
+                != "public_transport_board"
             ):
-
                 continue
 
             if (
-                content.get(
-                    "pattern_id"
-                ) != pattern_id
+                content.get("pattern_id")
+                != pattern_id
 
-                or content.get(
-                    "origin_stop"
-                ) != origin_stop_id
+                or content.get("origin_stop")
+                != origin_stop_id
 
-                or content.get(
-                    "destination_stop"
-                ) != destination_stop_id
+                or content.get("destination_stop")
+                != destination_stop_id
             ):
 
                 logger.warning(
@@ -2288,12 +2175,9 @@ class PublicTransportCustomerWaitingForApprovalState(
 
                 continue
 
-            #
-            # ACCEPT
-            #
-
-            if performative == (
-                ACCEPT_PERFORMATIVE
+            if (
+                performative
+                == ACCEPT_PERFORMATIVE
             ):
 
                 logger.info(
@@ -2306,6 +2190,41 @@ class PublicTransportCustomerWaitingForApprovalState(
                         pattern_id,
                         destination_stop_id
                     )
+                )
+
+                #
+                # Public Transport Statistics
+                #
+                # Customer-side confirmation of boarding.
+                #
+                # This event is emitted only after receiving
+                # ACCEPT from the Vehicle.
+                #
+
+                self.agent.events_store.emit(
+                    event_type="pt_boarded",
+                    details={
+                        "vehicle_id":
+                            expected_vehicle,
+
+                        "pattern_id":
+                            pattern_id,
+
+                        "route_id":
+                            leg.get("route_id"),
+
+                        "mode":
+                            leg.get("mode"),
+
+                        "origin_stop":
+                            origin_stop_id,
+
+                        "destination_stop":
+                            destination_stop_id,
+
+                        "leg_index":
+                            self.agent.current_leg_index,
+                    }
                 )
 
                 self.agent.set_current_vehicle(
@@ -2322,12 +2241,9 @@ class PublicTransportCustomerWaitingForApprovalState(
 
                 return
 
-            #
-            # REFUSE
-            #
-
-            if performative == (
-                REFUSE_PERFORMATIVE
+            if (
+                performative
+                == REFUSE_PERFORMATIVE
             ):
 
                 logger.info(
@@ -2353,49 +2269,23 @@ class PublicTransportCustomerWaitingForApprovalState(
 class PublicTransportCustomerInTransportState(
     PublicTransportCustomerStrategyBehaviour
 ):
-    """
-    Waits while the Customer travels inside a Public
-    Transport Vehicle.
 
-    Customer position updates are handled by the
-    inherited TravelBehaviour.
-
-    This state only waits for the Vehicle to inform that
-    the destination Stop of the current PT leg has been
-    reached.
-    """
-
-    async def on_start(
-        self
-    ):
-
+    async def on_start(self):
         await super().on_start()
 
         self.agent.status = (
             CUSTOMER_IN_TRANSPORT
         )
 
-    def _bare_jid(
-        self,
-        jid
-    ):
-
+    def _bare_jid(self, jid):
         if jid is None:
             return None
 
-        return str(
-            jid
-        ).split(
-            "/"
-        )[0]
+        return str(jid).split("/")[0]
 
-    async def run(
-        self
-    ):
+    async def run(self):
 
-        leg = (
-            self.agent.get_current_leg()
-        )
+        leg = self.agent.get_current_leg()
 
         if leg is None:
 
@@ -2414,20 +2304,14 @@ class PublicTransportCustomerInTransportState(
 
             return
 
-        if leg.get(
-            "type"
-        ) != (
-            "public_transport"
-        ):
+        if leg.get("type") != "public_transport":
 
             logger.error(
                 "Public transport customer {} "
                 "is in transport but current leg "
                 "type is {}.".format(
                     self.agent.name,
-                    leg.get(
-                        "type"
-                    )
+                    leg.get("type")
                 )
             )
 
@@ -2459,28 +2343,24 @@ class PublicTransportCustomerInTransportState(
 
             return
 
-        pattern_id = leg.get(
-            "pattern_id"
+        pattern_id = (
+            leg.get("pattern_id")
         )
 
-        origin_stop = leg.get(
-            "origin_stop"
+        origin_stop = (
+            leg.get("origin_stop")
         )
 
-        destination_stop = leg.get(
-            "destination_stop"
+        destination_stop = (
+            leg.get("destination_stop")
         )
 
-        origin_stop_id = (
-            self.get_stop_id(
-                origin_stop
-            )
+        origin_stop_id = self.get_stop_id(
+            origin_stop
         )
 
-        destination_stop_id = (
-            self.get_stop_id(
-                destination_stop
-            )
+        destination_stop_id = self.get_stop_id(
+            destination_stop
         )
 
         if (
@@ -2503,22 +2383,9 @@ class PublicTransportCustomerInTransportState(
 
             return
 
-        expected_vehicle = (
-            self._bare_jid(
-                vehicle_id
-            )
+        expected_vehicle = self._bare_jid(
+            vehicle_id
         )
-
-        #
-        # Reactive transport wait.
-        #
-        # SPADE receive() without timeout is
-        # non-blocking, so use a positive timeout.
-        #
-        # The loop does not query anything and does not
-        # send any message. It simply remains suspended
-        # waiting for the Vehicle arrival event.
-        #
 
         while True:
 
@@ -2529,48 +2396,39 @@ class PublicTransportCustomerInTransportState(
             if not msg:
                 continue
 
-            protocol = (
-                msg.get_metadata(
-                    "protocol"
-                )
+            protocol = msg.get_metadata(
+                "protocol"
             )
 
-            performative = (
-                msg.get_metadata(
-                    "performative"
-                )
+            performative = msg.get_metadata(
+                "performative"
             )
 
-            sender = (
-                self._bare_jid(
-                    msg.sender
-                )
+            sender = self._bare_jid(
+                msg.sender
             )
 
             if (
                 protocol != REQUEST_PROTOCOL
-                or performative != INFORM_PERFORMATIVE
+                or performative
+                != INFORM_PERFORMATIVE
             ):
                 continue
 
-            if sender != (
-                expected_vehicle
-            ):
+            if sender != expected_vehicle:
                 continue
 
             try:
 
                 content = (
-                    json.loads(
-                        msg.body
-                    )
+                    json.loads(msg.body)
                     if msg.body
                     else {}
                 )
 
             except (
                 json.JSONDecodeError,
-                TypeError,
+                TypeError
             ):
 
                 logger.warning(
@@ -2584,36 +2442,29 @@ class PublicTransportCustomerInTransportState(
 
                 continue
 
-            if content.get(
-                "request_type"
-            ) != (
-                "public_transport_arrival"
+            if (
+                content.get("request_type")
+                != "public_transport_arrival"
             ):
-
                 continue
 
             informed_vehicle = (
                 self._bare_jid(
-                    content.get(
-                        "vehicle_id"
-                    )
+                    content.get("vehicle_id")
                 )
             )
 
             informed_pattern = (
-                content.get(
-                    "pattern_id"
-                )
+                content.get("pattern_id")
             )
 
             informed_stop = (
-                content.get(
-                    "stop"
-                )
+                content.get("stop")
             )
 
-            if informed_vehicle != (
-                expected_vehicle
+            if (
+                informed_vehicle
+                != expected_vehicle
             ):
 
                 logger.warning(
@@ -2628,8 +2479,9 @@ class PublicTransportCustomerInTransportState(
 
                 continue
 
-            if informed_pattern != (
-                pattern_id
+            if (
+                informed_pattern
+                != pattern_id
             ):
 
                 logger.warning(
@@ -2644,8 +2496,9 @@ class PublicTransportCustomerInTransportState(
 
                 continue
 
-            if informed_stop != (
-                destination_stop_id
+            if (
+                informed_stop
+                != destination_stop_id
             ):
 
                 logger.debug(
@@ -2660,17 +2513,16 @@ class PublicTransportCustomerInTransportState(
 
                 continue
 
-            #
-            # PT LEG COMPLETED
-            #
-
             destination_position = (
                 destination_stop.get(
                     "position"
                 )
             )
 
-            if destination_position is not None:
+            if (
+                destination_position
+                is not None
+            ):
 
                 await self.agent.set_position(
                     destination_position
@@ -2678,6 +2530,43 @@ class PublicTransportCustomerInTransportState(
 
             self.agent.set_current_stop(
                 destination_stop_id
+            )
+
+            #
+            # Public Transport Statistics
+            #
+            # Customer-side confirmation that the
+            # Public Transport leg has finished.
+            #
+            # IMPORTANT:
+            # current_leg_index is recorded BEFORE
+            # advance_leg().
+            #
+
+            self.agent.events_store.emit(
+                event_type="pt_alighted",
+                details={
+                    "vehicle_id":
+                        expected_vehicle,
+
+                    "pattern_id":
+                        pattern_id,
+
+                    "route_id":
+                        leg.get("route_id"),
+
+                    "mode":
+                        leg.get("mode"),
+
+                    "origin_stop":
+                        origin_stop_id,
+
+                    "destination_stop":
+                        destination_stop_id,
+
+                    "leg_index":
+                        self.agent.current_leg_index,
+                }
             )
 
             self.agent.clear_current_vehicle()
@@ -2711,39 +2600,74 @@ class PublicTransportCustomerInDestState(
     Final state for a successfully completed
     Public Transport journey.
 
-    No next state is configured. Therefore the
-    Public Transport Customer FSM finishes here.
+    No next state is configured.
+    Therefore the Public Transport Customer
+    FSM finishes here.
     """
 
-    async def on_start(
-        self
-    ):
+    async def on_start(self):
 
         await super().on_start()
-
-        if self.agent.status != (
-            CUSTOMER_IN_DEST
-        ):
-
-            logger.info(
-                "Public transport customer {} "
-                "completed its journey at {}.".format(
-                    self.agent.name,
-                    self.agent.get_position()
-                )
-            )
 
         self.agent.status = (
             CUSTOMER_IN_DEST
         )
 
-    async def run(
-        self
-    ):
+        journey = (
+            self.agent.get_journey()
+            or {}
+        )
+
+        logger.info(
+            "Public transport customer {} "
+            "completed its journey at {}.".format(
+                self.agent.name,
+                self.agent.get_position()
+            )
+        )
 
         #
-        # Cleanup of transient journey state.
+        # Public Transport Statistics
         #
+        # This event is emitted exactly once because
+        # CUSTOMER_IN_DEST is a real terminal FSM state.
+        #
+
+        self.agent.events_store.emit(
+            event_type="pt_journey_completed",
+            details={
+                "final_position":
+                    self.agent.get_position(),
+
+                "transfers":
+                    journey.get(
+                        "transfers",
+                        0
+                    ),
+
+                "walking_distance":
+                    journey.get(
+                        "walking_distance",
+                        0
+                    ),
+
+                "public_transport_stops":
+                    journey.get(
+                        "public_transport_stops",
+                        0
+                    ),
+
+                "legs":
+                    len(
+                        journey.get(
+                            "legs",
+                            []
+                        )
+                    ),
+            }
+        )
+
+    async def run(self):
 
         self.agent.clear_current_vehicle()
 
@@ -2754,10 +2678,8 @@ class PublicTransportCustomerInDestState(
         #
         # Intentionally no set_next_state().
         #
-        # CUSTOMER_IN_DEST is a real terminal state.
-        #
-        # The FSM finishes here while the Agent itself
-        # remains alive.
+        # CUSTOMER_IN_DEST remains a real terminal
+        # state and the FSM finishes here.
         #
 
         return

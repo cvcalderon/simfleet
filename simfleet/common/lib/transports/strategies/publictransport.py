@@ -12,6 +12,7 @@ from simfleet.utils.abstractstrategies import (
 from simfleet.utils.helpers import (
     AlreadyInDestination,
     PathRequestException,
+    distance_in_meters,
 )
 
 from simfleet.utils.status import (
@@ -28,6 +29,7 @@ from simfleet.communications.protocol import (
     REFUSE_PERFORMATIVE,
     INFORM_PERFORMATIVE,
 )
+
 
 
 class PublicTransportStrategyBehaviour(
@@ -80,7 +82,6 @@ class PublicTransportStrategyBehaviour(
         )
 
         for customer_id in customers:
-
             logger.info(
                 "Transport {} dropping customer {} at stop {}".format(
                     self.agent.name,
@@ -132,6 +133,50 @@ class PublicTransportStrategyBehaviour(
             )
 
             self.agent.current_capacity += 1
+
+            #
+            # Public Transport Statistics
+            #
+            # The event is emitted after the customer has
+            # actually been removed from the Vehicle and
+            # capacity has been restored.
+            #
+
+            onboard = (
+                self.agent.capacity
+                - self.agent.current_capacity
+            )
+
+            self.agent.events_store.emit(
+                event_type="pt_customer_alighted",
+                details={
+                    "customer_id":
+                        str(
+                            customer_id
+                        ),
+
+                    "pattern_id":
+                        self.agent.pattern_id,
+
+                    "route_id":
+                        self.agent.route_id,
+
+                    "mode":
+                        self.agent.mode,
+
+                    "stop_id":
+                        self.agent.current_stop,
+
+                    "onboard":
+                        onboard,
+
+                    "free_capacity":
+                        self.agent.current_capacity,
+
+                    "capacity":
+                        self.agent.capacity,
+                }
+            )
 
     async def inform_stop_arrival(
         self
@@ -275,6 +320,60 @@ class PublicTransportStrategyBehaviour(
 
         self.agent.current_capacity -= 1
 
+        #
+        # Public Transport Statistics
+        #
+        # Vehicle-side boarding truth.
+        #
+        # At this point:
+        #
+        # - Customer has been inserted into current_customer.
+        # - Vehicle capacity has already been decreased.
+        #
+        # Customer and Stop will emit their own corresponding
+        # events later. This allows cross-validation between
+        # the three agents.
+        #
+
+        onboard = (
+            self.agent.capacity
+            - self.agent.current_capacity
+        )
+
+        self.agent.events_store.emit(
+            event_type="pt_customer_boarded",
+            details={
+                "customer_id":
+                    str(
+                        customer_id
+                    ),
+
+                "pattern_id":
+                    self.agent.pattern_id,
+
+                "route_id":
+                    self.agent.route_id,
+
+                "mode":
+                    self.agent.mode,
+
+                "stop_id":
+                    self.agent.current_stop,
+
+                "destination_stop":
+                    destination_stop,
+
+                "onboard":
+                    onboard,
+
+                "free_capacity":
+                    self.agent.current_capacity,
+
+                "capacity":
+                    self.agent.capacity,
+            }
+        )
+
         reply = Message()
 
         reply.to = str(
@@ -340,6 +439,89 @@ class PublicTransportStrategyBehaviour(
 
         await self.send(
             reply
+        )
+
+    def emit_segment_completed(
+        self,
+        origin_stop,
+        destination_stop,
+        route_distance=None
+    ):
+
+        if (
+            origin_stop is None
+            or destination_stop is None
+        ):
+            return
+
+        origin_position = (
+            self.agent.get_stop_position(
+                origin_stop
+            )
+        )
+
+        destination_position = (
+            self.agent.get_stop_position(
+                destination_stop
+            )
+        )
+
+        distance = route_distance
+
+        #
+        # For route movement we normally receive the
+        # actual routed distance already calculated by
+        # MovableMixin.
+        #
+        # For teleport movement, or as a safe fallback,
+        # calculate the direct physical distance between
+        # both Stops.
+        #
+        # No additional routing request is performed.
+        #
+
+        if distance is None:
+
+            if (
+                origin_position is not None
+                and destination_position is not None
+            ):
+
+                distance = distance_in_meters(
+                    origin_position,
+                    destination_position
+                )
+
+            else:
+
+                distance = 0.0
+
+        self.agent.events_store.emit(
+            event_type="pt_segment_completed",
+            details={
+                "pattern_id":
+                    self.agent.pattern_id,
+
+                "route_id":
+                    self.agent.route_id,
+
+                "mode":
+                    self.agent.mode,
+
+                "movement_mode":
+                    self.agent.movement_mode,
+
+                "origin_stop":
+                    origin_stop,
+
+                "destination_stop":
+                    destination_stop,
+
+                "distance":
+                    float(
+                        distance
+                    ),
+            }
         )
 
 
@@ -484,7 +666,8 @@ class PublicTransportMovingState(
         if next_stop is None:
 
             logger.error(
-                "Transport {} has no next stop while moving".format(
+                "Transport {} has no next stop "
+                "while moving".format(
                     self.agent.name
                 )
             )
@@ -495,6 +678,10 @@ class PublicTransportMovingState(
 
             return
 
+        origin_stop = (
+            self.agent.current_stop
+        )
+
         destination = (
             self.agent.get_stop_position(
                 next_stop
@@ -504,7 +691,8 @@ class PublicTransportMovingState(
         if destination is None:
 
             logger.error(
-                "Transport {} cannot resolve position for stop {}".format(
+                "Transport {} cannot resolve "
+                "position for stop {}".format(
                     self.agent.name,
                     next_stop
                 )
@@ -517,24 +705,31 @@ class PublicTransportMovingState(
             return
 
         #
-        # TELEPORT MOVEMENT
+        # TELEPORT
         #
 
-        if self.agent.movement_mode == (
-            "teleport"
+        if (
+            self.agent.movement_mode
+            == "teleport"
         ):
 
             try:
 
-                await self.agent.move_to_public_transport_stop(
-                    next_stop
+                await (
+                    self.agent
+                    .move_to_public_transport_stop(
+                        next_stop
+                    )
                 )
 
             except Exception as exc:
 
                 logger.error(
-                    "Transport {} could not teleport to stop {}: {}".format(
+                    "Transport {} could not "
+                    "teleport from stop {} to "
+                    "stop {}: {}".format(
                         self.agent.name,
+                        origin_stop,
                         next_stop,
                         exc
                     )
@@ -545,6 +740,20 @@ class PublicTransportMovingState(
                 )
 
                 return
+
+            #
+            # Public Transport Statistics
+            #
+            # Teleport has no routed distance.
+            # emit_segment_completed() therefore
+            # calculates the physical Stop-to-Stop
+            # distance.
+            #
+
+            self.emit_segment_completed(
+                origin_stop=origin_stop,
+                destination_stop=next_stop,
+            )
 
             self.agent.current_stop = (
                 next_stop
@@ -559,44 +768,46 @@ class PublicTransportMovingState(
             return
 
         #
-        # ROUTE MOVEMENT
+        # ROUTE
+        #
+        # dest must correspond to THIS segment before
+        # is_in_destination() can be interpreted.
+        #
+        # This preserves the stale-destination fix:
+        # the destination from the previous segment
+        # must never make the Vehicle believe that the
+        # current segment has already finished.
         #
 
-        if self.agent.movement_mode != (
-            "route"
+        if (
+            self.agent.dest
+            == destination
         ):
 
-            logger.error(
-                "Transport {} has unsupported movement mode {}".format(
-                    self.agent.name,
-                    self.agent.movement_mode
+            if (
+                self.agent.is_in_destination()
+            ):
+
+                route_distance = None
+
+                if self.agent.distances:
+
+                    route_distance = (
+                        self.agent.distances[-1]
+                    )
+
+                #
+                # Public Transport Statistics
+                #
+                # Exactly one event is emitted when
+                # the segment is actually completed.
+                #
+
+                self.emit_segment_completed(
+                    origin_stop=origin_stop,
+                    destination_stop=next_stop,
+                    route_distance=route_distance,
                 )
-            )
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-
-            return
-
-        #
-        # MovableMixin.dest represents the destination
-        # of the currently active movement.
-        #
-        # We must first verify that this destination is
-        # the same stop that the Public Transport FSM
-        # currently wants to reach.
-        #
-
-        if self.agent.dest == destination:
-
-            #
-            # A route towards this stop already exists.
-            #
-            # Only now is is_in_destination() meaningful.
-            #
-
-            if self.agent.is_in_destination():
 
                 self.agent.current_stop = (
                     next_stop
@@ -611,10 +822,10 @@ class PublicTransportMovingState(
                 return
 
             #
-            # The vehicle is still travelling toward the
-            # same destination.
+            # Vehicle is already travelling towards
+            # the correct destination.
             #
-            # Do not request the route again.
+            # Do NOT request the route again.
             #
 
             await self.agent.sleep(
@@ -628,30 +839,37 @@ class PublicTransportMovingState(
             return
 
         #
-        # No route towards the current next_stop is active.
-        #
-        # self.agent.dest may be None or may still contain
-        # the destination of the previous segment.
+        # There is no active movement towards this
+        # segment destination.
         #
 
         try:
 
-            await self.agent.move_to_public_transport_stop(
-                next_stop
+            await (
+                self.agent
+                .move_to_public_transport_stop(
+                    next_stop
+                )
             )
 
         except AlreadyInDestination:
 
             #
-            # Physically the vehicle is already at the
-            # requested stop, although MovableMixin.dest
-            # may still refer to the previous movement.
+            # Different logical Stops may theoretically
+            # share coordinates.
             #
-            # Synchronize both states.
+            # Treat that as a completed zero/direct
+            # distance segment instead of reusing the
+            # distance from a previous route.
             #
 
             self.agent.dest = (
                 destination
+            )
+
+            self.emit_segment_completed(
+                origin_stop=origin_stop,
+                destination_stop=next_stop,
             )
 
             self.agent.current_stop = (
@@ -669,8 +887,10 @@ class PublicTransportMovingState(
         except PathRequestException:
 
             logger.error(
-                "Transport {} could not obtain route to stop {}".format(
+                "Transport {} could not obtain "
+                "route from stop {} to stop {}".format(
                     self.agent.name,
+                    origin_stop,
                     next_stop
                 )
             )
@@ -686,11 +906,11 @@ class PublicTransportMovingState(
             return
 
         #
-        # move_to() starts MovableMixin.MovingBehaviour
-        # asynchronously.
+        # Route requested successfully.
         #
-        # It does not wait until the vehicle has reached
-        # the destination.
+        # MovableMixin is now moving the Vehicle.
+        # The segment event is NOT emitted here,
+        # because the segment has not finished yet.
         #
 
         await self.agent.sleep(
@@ -721,14 +941,94 @@ class PublicTransportInStopState(
     ):
 
         logger.info(
-            "Transport {} arrived at stop {} on pattern {}".format(
+            "Transport {} arrived at stop {} "
+            "on pattern {}".format(
                 self.agent.name,
                 self.agent.current_stop,
                 self.agent.pattern_id
             )
         )
 
+        #
+        # Passengers leave before new Customers
+        # are allowed to board.
+        #
+
         await self.drop_customers()
+
+        #
+        # Detect whether this Stop closes one complete
+        # execution of the current Pattern.
+        #
+
+        pattern_completed = False
+
+        if (
+            self.agent.route_type
+            == "end-to-end"
+        ):
+
+            pattern_completed = (
+                self.agent.is_pattern_finished()
+            )
+
+        elif (
+            self.agent.route_type
+            == "circular"
+        ):
+
+            pattern_completed = (
+                bool(
+                    self.agent.stop_list
+                )
+                and self.agent.current_stop
+                == self.agent.start_stop
+                and self.agent.rounds > 0
+            )
+
+        onboard = (
+            self.agent.capacity
+            - self.agent.current_capacity
+        )
+
+        #
+        # Public Transport Statistics
+        #
+
+        self.agent.events_store.emit(
+            event_type="pt_stop_arrival",
+            details={
+                "pattern_id":
+                    self.agent.pattern_id,
+
+                "route_id":
+                    self.agent.route_id,
+
+                "mode":
+                    self.agent.mode,
+
+                "route_type":
+                    self.agent.route_type,
+
+                "stop_id":
+                    self.agent.current_stop,
+
+                "pattern_completed":
+                    pattern_completed,
+
+                "round":
+                    self.agent.rounds,
+
+                "onboard":
+                    onboard,
+
+                "free_capacity":
+                    self.agent.current_capacity,
+
+                "capacity":
+                    self.agent.capacity,
+            }
+        )
 
         self.agent.publish_public_transport_presence()
 
@@ -737,7 +1037,6 @@ class PublicTransportInStopState(
         self.set_next_state(
             TRANSPORT_BOARDING
         )
-
 
 class PublicTransportBoardingState(
     PublicTransportStrategyBehaviour

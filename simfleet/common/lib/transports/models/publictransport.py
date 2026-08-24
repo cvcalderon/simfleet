@@ -51,7 +51,7 @@ class PublicTransportAgent(
 
         self.stop_time = kwargs.get(
             "stop_time",
-            5
+            1
         )
 
         if not self.pattern_id:
