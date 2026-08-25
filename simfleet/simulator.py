@@ -277,6 +277,7 @@ class SimulatorAgent(Agent):
             autonomy = transport.get("autonomy")
             current_autonomy = transport.get("current_autonomy")
             speed = transport.get("speed")
+            route_profile = transport.get("route_profile")
             optional = transport.get("optional")
             # New implementation v1
             registration = transport.get("registration")
@@ -306,6 +307,7 @@ class SimulatorAgent(Agent):
                 capacity=capacity,
                 line=line,
                 registration=registration,
+                route_profile=route_profile,
             )
             self.set_icon(agent, icon, default="transport")
 
@@ -332,6 +334,7 @@ class SimulatorAgent(Agent):
             fleet_type = customer["fleet_type"]
             position = customer.get("position")
             speed = customer.get("speed")
+            route_profile = customer.get("route_profile")
             target = customer.get("destination")
             strategy = customer.get("strategy")
             line = customer.get("line")
@@ -358,7 +361,8 @@ class SimulatorAgent(Agent):
                 speed=speed,
                 line=line,
                 max_walking_dist=max_walking_dist,
-                optional=optional
+                optional=optional,
+                route_profile = route_profile,
             )
 
             self.set_icon(agent, icon, default="customer")
@@ -460,6 +464,7 @@ class SimulatorAgent(Agent):
             position = transport.get("position")
             fleet_type = transport.get("fleet_type")
             speed = transport.get("speed")
+            route_profile = transport.get("route_profile")
             target = transport.get("destination")
             strategy = transport.get("strategy")
             # New implementation v1
@@ -482,6 +487,7 @@ class SimulatorAgent(Agent):
                 delayed=delayed,
                 target=target,
                 registration=registration,
+                route_profile=route_profile,
             )
             self.set_icon(agent, icon, default="drone")
 
@@ -1180,6 +1186,7 @@ class SimulatorAgent(Agent):
         capacity=None,
         line=None,
         registration=None,
+        route_profile=None,
     ):
 
         agent = TransportFactory.create_agent(
@@ -1203,6 +1210,7 @@ class SimulatorAgent(Agent):
             line=line,
             lines=self.bus_lines,
             registration=registration,
+            route_profile=route_profile,
         )
 
         if self.simulation_running:
@@ -1228,7 +1236,8 @@ class SimulatorAgent(Agent):
         speed=None,
         line=None,
         max_walking_dist=None,
-        optional=None
+        optional=None,
+        route_profile=None,
     ):
         agent = CustomerFactory.create_agent(
             domain=self.jid.domain,
@@ -1246,7 +1255,8 @@ class SimulatorAgent(Agent):
             target=target,
             line=line,
             max_walking_dist=max_walking_dist,
-            optional=optional
+            optional=optional,
+            route_profile = route_profile,
         )
 
         if self.simulation_running:
@@ -1298,6 +1308,7 @@ class SimulatorAgent(Agent):
         delayed=False,
         target=None,
         registration=None,
+        route_profile=None,
     ):
 
         agent = VehicleFactory.create_agent(
@@ -1314,6 +1325,7 @@ class SimulatorAgent(Agent):
             speed=speed,
             target=target,
             registration=registration,
+            route_profile=route_profile,
         )
 
         if self.simulation_running:
@@ -1464,7 +1476,7 @@ class SimulatorAgent(Agent):
             return time.time() - self.simulation_init_time
         return self.simulation_time
 
-    def request_path(self, origin, destination):
+    def request_path(self, origin, destination, route_profile="driving",):
         """
         Requests a path to the route server.
 
@@ -1475,7 +1487,7 @@ class SimulatorAgent(Agent):
         Returns:
             list, float, float: the path as a list of points, the distance of the path, the estimated duration of the path
         """
-        return async_request_path(self, origin, destination, self.route_host)
+        return async_request_path(self, origin, destination, self.route_host, route_profile)
 
 
 class DelayedLaunchBehaviour(TimeoutBehaviour):

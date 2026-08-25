@@ -18,7 +18,7 @@ class RequestRouteBehaviour(OneShotBehaviour):
     A one-shot behaviour that is executed to request for a new route to the route agent.
     """
 
-    def __init__(self, msg: Message, origin: list, destination: list, route_host: str):
+    def __init__(self, msg: Message, origin: list, destination: list, route_host: str, route_profile: str):
         """
         Behaviour to request a route to a route agent
         Args:
@@ -31,6 +31,7 @@ class RequestRouteBehaviour(OneShotBehaviour):
         self.destination = destination
         self._msg = msg
         self.route_host = route_host
+        self.route_profile = route_profile
         self.result = {"path": None, "distance": None, "duration": None}
         super().__init__()
 
@@ -38,7 +39,7 @@ class RequestRouteBehaviour(OneShotBehaviour):
         try:
             response_time = time.time()
             path, distance, duration = await request_route_to_server(
-                self.origin, self.destination, self.route_host
+                self.origin, self.destination, self.route_host, self.route_profile
             )
             response_time = time.time() - response_time
             if path is None:
@@ -68,7 +69,7 @@ class RequestRouteBehaviour(OneShotBehaviour):
             )
 
 
-async def request_path(agent, origin, destination, route_host):
+async def request_path(agent, origin, destination, route_host, route_profile="driving"):
     """
     Sends a message to the RouteAgent to request a path
 
@@ -98,7 +99,7 @@ async def request_path(agent, origin, destination, route_host):
     msg.thread = str(uuid.uuid4()).replace("-", "")
     template = Template()
     template.thread = msg.thread
-    behav = RequestRouteBehaviour(msg, origin, destination, route_host)
+    behav = RequestRouteBehaviour(msg, origin, destination, route_host, route_profile)
     agent.add_behaviour(behav, template)
 
     while not behav.is_killed():
@@ -183,7 +184,7 @@ def avg(array):
 
 
 async def request_route_to_server(
-    origin, destination, route_host="http://router.project-osrm.org/"
+    origin, destination, route_host="http://router.project-osrm.org/", route_profile="driving"
 ):
     """
     Queries the OSRM for a path.
@@ -198,11 +199,25 @@ async def request_route_to_server(
     """
     try:
 
+        # url = (
+        #     route_host
+        #     + "route/v1/car/{src1},{src2};{dest1},{dest2}?geometries=geojson&overview=full"
+        # )
+        # src1, src2, dest1, dest2 = origin[1], origin[0], destination[1], destination[0]
+
+        route_base = route_host.rstrip("/")
+
+        src1 = origin[1]
+        src2 = origin[0]
+        dest1 = destination[1]
+        dest2 = destination[0]
+
         url = (
-            route_host
-            + "route/v1/car/{src1},{src2};{dest1},{dest2}?geometries=geojson&overview=full"
+            f"{route_base}/route/v1/{route_profile}/"
+            f"{src1},{src2};{dest1},{dest2}"
+            "?geometries=geojson&overview=full"
         )
-        src1, src2, dest1, dest2 = origin[1], origin[0], destination[1], destination[0]
+
         url = url.format(src1=src1, src2=src2, dest1=dest1, dest2=dest2)
 
         async with aiohttp.ClientSession() as session:

@@ -17,8 +17,13 @@ class MovableMixin:
             animation_speed (int): The time in milliseconds between steps in the animation or movement process.
             speed_in_kmh (float): The current speed of the vehicle in kilometers per hour.
             dest (list): The destination coordinates (longitude, latitude) of the vehicle.
-            distances (list): A list of distances traveled.
-            durations (list): A list of durations for each travel route.
+            last_route_distance: Distance in meters of the last successfully planned route.
+            last_osrm_duration: Duration in seconds estimated by OSRM for the last route.
+            last_speed_based_duration: Theoretical duration in seconds calculated using the agent configured speed.
+            total_route_distance: Accumulated distance of successfully planned routes.
+            total_osrm_duration: Accumulated OSRM estimated duration.
+            total_speed_based_duration: Accumulated duration calculated from agent speed.
+            route_count: Number of successfully planned routes.
         """
 
     def __init__(self):
@@ -31,8 +36,18 @@ class MovableMixin:
         self.set("speed_in_kmh", None)
         self.dest = None
 
-        self.distances = []
-        self.durations = []
+        # self.distances = []
+        # self.durations = []
+
+        self.last_route_distance = 0.0
+        self.last_osrm_duration = 0.0
+        self.last_speed_based_duration = 0.0
+
+        self.total_route_distance = 0.0
+        self.total_osrm_duration = 0.0
+        self.total_speed_based_duration = 0.0
+
+        self.route_count = 0
 
 
     async def move_to(self, dest):
@@ -51,14 +66,21 @@ class MovableMixin:
             raise AlreadyInDestination
         counter = 5
         path = None
-        distance, duration = 0, 0
+        #distance, duration = 0, 0
+        distance = 0.0
+        osrm_duration = 0.0
         while counter > 0 and path is None:
             logger.debug(
                 "Requesting path from {} to {}".format(self.get("current_pos"), dest)
             )
-            path, distance, duration = await self.request_path(
-                self.get("current_pos"), dest
+           # path, distance, duration = await self.request_path(
+           #     self.get("current_pos"), dest
+           # )
+            path, distance, osrm_duration = await self.request_path(
+                self.get("current_pos"),
+                dest,
             )
+
             counter -= 1
         if path is None:
             raise PathRequestException("Error requesting route.")
@@ -69,11 +91,32 @@ class MovableMixin:
         except Exception as e:
             logger.error("Exception chunking path {}: {}".format(path, e))
             raise PathRequestException
+
+        speed_in_ms = kmh_to_ms(self.get("speed_in_kmh"))
+        speed_based_duration = (distance / speed_in_ms)
+
         self.dest = dest
-        self.distances.append(distance)
-        self.durations.append(duration)
+        # self.distances.append(distance)
+        # self.durations.append(duration)
+
+        self.last_route_distance = distance
+        self.last_osrm_duration = osrm_duration
+        self.last_speed_based_duration = speed_based_duration
+
+        self.total_route_distance += distance
+        self.total_osrm_duration += osrm_duration
+        self.total_speed_based_duration += speed_based_duration
+
+        self.route_count += 1
+
         behav = MovingBehaviour(period=1)
         self.add_behaviour(behav)
+
+        return (
+            distance,
+            osrm_duration,
+            speed_based_duration,
+        )
 
 
     async def request_path(self, origin, destination):
@@ -97,7 +140,7 @@ class MovableMixin:
             >>> print(duration)
             3.24
         """
-        return await request_path(self, origin, destination, self.route_host)
+        return await request_path(self, origin, destination, self.route_host, self.route_profile)
 
 
     async def step(self):

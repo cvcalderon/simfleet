@@ -24,6 +24,7 @@ class GeoLocatedAgent(SimfleetAgent):
     def __init__(self, agentjid, password):
         super().__init__(agentjid, password)
         self.route_host = None
+        self.route_profile = "driving"
         self.set("current_pos", None)
         self.boundingbox = None
 
@@ -51,6 +52,8 @@ class GeoLocatedAgent(SimfleetAgent):
         """
         self.route_host = route_host
 
+    def set_route_profile(self, route_profile):
+        self.route_profile = route_profile
 
     def set_position(self, coords=None):
         """
@@ -63,7 +66,7 @@ class GeoLocatedAgent(SimfleetAgent):
         if coords:
             self.set("current_pos", coords)
         else:
-            self.set("current_pos", new_random_position(self.boundingbox, self.route_host))
+            self.set("current_pos", new_random_position(self.boundingbox, self.route_host, self.route_profile))
         logger.debug(
             "Agent[{}]: The agent position is ({})".format(self.agent_id, self.get("current_pos"))
         )
@@ -78,7 +81,7 @@ class GeoLocatedAgent(SimfleetAgent):
         if coords:
             self.set("current_pos", coords)
         else:
-            self.set("current_pos", new_random_position(self.boundingbox, self.route_host))
+            self.set("current_pos", new_random_position(self.boundingbox, self.route_host, self.route_profile))
 
     def get_position(self):
         """

@@ -230,7 +230,8 @@ class TransportFactory(Factory):
                      line=None,
                      lines=None,
                      max_walking_dist=None,
-                     registration=None
+                     registration=None,
+                     route_profile=None,
                     ):
         """
         Create a Transport agent.
@@ -292,6 +293,8 @@ class TransportFactory(Factory):
         # Set fleet type, route host, and additional attributes
         agent.set_fleet_type(fleet_type)
         agent.set_route_host(route_host)
+        if route_profile is not None:
+            agent.set_route_profile(route_profile)
         agent.set_boundingbox(bbox)
 
         if autonomy:
@@ -351,7 +354,8 @@ class CustomerFactory(Factory):
         capacity=None,
         line=None,
         lines=None,
-        max_walking_dist=None
+        max_walking_dist=None,
+        route_profile=None,
     ):
         """
         Create a Customer agent.
@@ -430,6 +434,8 @@ class CustomerFactory(Factory):
         # Set fleet type, route host, and additional attributes
         agent.set_fleet_type(fleet_type)
         agent.set_route_host(route_host)
+        if route_profile is not None:
+            agent.set_route_profile(route_profile)
         agent.set_boundingbox(bbox)
 
         agent.set_initial_position(position)
@@ -704,7 +710,8 @@ class VehicleFactory(Factory):
                     line=None,
                     lines=None,
                     max_walking_dist=None,
-                    registration=None
+                    registration=None,
+                    route_profile=None,
                     ):
         """
         Create a Vehicle agent.
@@ -748,6 +755,8 @@ class VehicleFactory(Factory):
         # Set route host, and additional attributes
         agent.set_fleet_type(fleet_type)
         agent.set_route_host(route_host)
+        if route_profile is not None:
+            agent.set_route_profile(route_profile)
         agent.set_boundingbox(bbox)
         agent.set_target_position(target)
 

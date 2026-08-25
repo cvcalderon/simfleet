@@ -72,7 +72,11 @@ def random_position():
         return [lat, lng]
 
 
-def new_random_position(bbox, route_host):
+def new_random_position(
+    bbox,
+    route_host,
+    route_profile="driving",
+):
     """
         Returns a random position inside the map.
 
@@ -93,7 +97,14 @@ def new_random_position(bbox, route_host):
     random_lat = random.uniform(min_lat + (max_lat - min_lat) * (1 - zoom_factor) / 2, max_lat - (max_lat - min_lat) * (1 - zoom_factor) / 2)
 
     # URL del servicio OSRM
-    osrm_url = f'{route_host}/nearest/v1/driving/{random_lon},{random_lat}'
+    #osrm_url = f'{route_host}/nearest/v1/driving/{random_lon},{random_lat}'
+    route_base = route_host.rstrip("/")
+
+    osrm_url = (
+        f"{route_base}/nearest/v1/"
+        f"{route_profile}/"
+        f"{random_lon},{random_lat}"
+    )
 
     # Realizar la solicitud a la API de OSRM
     response = requests.get(osrm_url)
