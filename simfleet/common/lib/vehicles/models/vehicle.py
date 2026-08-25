@@ -115,7 +115,7 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         if coords:
             self.vehicle_dest = coords
         else:
-            self.vehicle_dest = new_random_position(self.boundingbox, self.route_host)
+            self.vehicle_dest = new_random_position(self.boundingbox, self.route_host, self.route_profile)
         logger.debug(
             "Agent[{}]: The agent target position is ({})".format(self.agent_id, self.vehicle_dest)
         )
@@ -190,7 +190,8 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
             "dest": [float("{0:.6f}".format(coord)) for coord in self.dest]
             if self.dest
             else None,
-            "distance": "{0:.2f}".format(sum(self.distances)),
+            #"distance": "{0:.2f}".format(sum(self.distances)),
+            "distance": "{0:.2f}".format(self.total_route_distance),
             "speed": float("{0:.2f}".format(self.animation_speed)) if self.animation_speed else None,
             "path": self.get("path"),
         })

@@ -790,10 +790,9 @@ class PublicTransportMovingState(
 
                 route_distance = None
 
-                if self.agent.distances:
-
+                if self.agent.route_count > 0:
                     route_distance = (
-                        self.agent.distances[-1]
+                        self.agent.last_route_distance
                     )
 
                 #

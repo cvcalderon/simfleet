@@ -432,26 +432,30 @@ class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
                     station_position
                 )
 
-                _path, distance, duration = await self.agent.request_path(
-                    self.agent.get_position(),
-                    station_position
-                )
-
                 travel_km = self.agent.calculate_distance_km(
                     self.agent.get_position(),
                     station_position
                 )
 
                 try:
-                    await self.agent.move_to(station_position)
-                    self.agent.decrease_autonomy_km(travel_km)
+                    (
+                        distance,
+                        osrm_duration,
+                        _speed_based_duration,
+                    ) = await self.agent.move_to(
+                        station_position
+                    )
+
+                    self.agent.decrease_autonomy_km(
+                        travel_km
+                    )
 
                     self.agent.events_store.emit(
                         event_type="travel_to_station",
                         details={
                             "distance": distance,
-                            "duration": duration
-                        }
+                            "duration": _speed_based_duration,
+                        },
                     )
 
                     self.agent.status = TRANSPORT_MOVING_TO_STATION
@@ -834,19 +838,21 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
 
                     self.agent.set_busy()
 
-                    #New statistics - TESTING
-                    path, distance, duration = await self.agent.request_path(
-                        self.agent.get("current_pos"), content["origin"]
+                    (
+                        distance,
+                        osrm_duration,
+                        _speed_based_duration,
+                    ) = await self.agent.move_to(
+                        content["origin"]
                     )
 
-                    # New statistics
-                    # Event 4: Travel to Pickup
                     self.agent.events_store.emit(
                         event_type="travel_to_pickup",
-                        details={"distance": distance, "duration": duration}
+                        details={
+                            "distance": distance,
+                            "duration": _speed_based_duration,
+                        },
                     )
-
-                    await self.agent.move_to(content["origin"])
 
                     self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
                     self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
@@ -1024,18 +1030,17 @@ class ElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
                             details={},
                         )
 
-                        # New statistics - TESTING
-                        path, distance, duration = await self.agent.request_path(
-                            self.agent.get("current_pos"), dest
-                        )
+                        (
+                            distance,
+                            _osrm_duration,
+                            _speed_based_duration,
+                        ) = await self.agent.move_to(dest)
 
-                        await self.agent.move_to(dest)
-
-                        # New statistics
-                        # Event 6: Travel to destination
                         self.agent.events_store.emit(
                             event_type="travel_to_destination",
-                            details={"distance": distance},
+                            details={
+                                "distance": distance,
+                            },
                         )
 
                         self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
@@ -1603,12 +1608,11 @@ class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
                     dest=dest
                 )
 
-                path, distance, duration = await self.agent.request_path(
-                    self.agent.get_position(),
-                    origin
-                )
-
-                await self.agent.move_to(origin)
+                (
+                    distance,
+                    osrm_duration,
+                    _speed_based_duration,
+                ) = await self.agent.move_to(origin)
 
                 self.agent.decrease_autonomy_km(
                     travel_km
@@ -1625,7 +1629,7 @@ class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
                     event_type="travel_to_pickup",
                     details={
                         "distance": distance,
-                        "duration": duration
+                        "duration": _speed_based_duration
                     }
                 )
 
@@ -1901,19 +1905,18 @@ class NPRElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
                     details={}
                 )
 
-                path, distance, duration = await self.agent.request_path(
-                    self.agent.get_position(),
-                    dest
-                )
-
-                await self.agent.move_to(dest)
+                (
+                    distance,
+                    osrm_duration,
+                    _speed_based_duration,
+                ) = await self.agent.move_to(dest)
 
                 self.agent.events_store.emit(
                     event_type="travel_to_destination",
                     details={
                         "distance": distance,
-                        "duration": duration
-                    }
+                        "duration": _speed_based_duration,
+                    },
                 )
 
                 self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
@@ -2284,17 +2287,16 @@ class NPRElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
                 station_position
             )
 
-            path, distance, duration = await self.agent.request_path(
-                self.agent.get_position(),
-                station_position
-            )
-
             travel_km = self.agent.calculate_distance_km(
                 self.agent.get_position(),
                 station_position
             )
 
-            await self.agent.move_to(
+            (
+                distance,
+                osrm_duration,
+                _speed_based_duration,
+            ) = await self.agent.move_to(
                 station_position
             )
 
@@ -2306,8 +2308,8 @@ class NPRElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
                 event_type="travel_to_station",
                 details={
                     "distance": distance,
-                    "duration": duration
-                }
+                    "duration": _speed_based_duration,
+                },
             )
 
             self.agent.status = TRANSPORT_MOVING_TO_STATION

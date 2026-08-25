@@ -83,7 +83,7 @@ class CustomerAgent(GeoLocatedAgent):
         if coords:
             self.customer_dest = coords
         else:
-            self.customer_dest = new_random_position(self.boundingbox, self.route_host)
+            self.customer_dest = new_random_position(self.boundingbox, self.route_host, self.route_profile)
         logger.debug(
             "Agent[{}]: The agent target position is ({})".format(self.agent_id, self.customer_dest)
         )

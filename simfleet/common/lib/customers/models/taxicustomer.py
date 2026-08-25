@@ -131,7 +131,7 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
                             origin, and destination will be used.
         """
         if not self.agent.customer_dest:
-            self.agent.customer_dest = new_random_position(self.agent.boundingbox, self.agent.route_host)
+            self.agent.customer_dest = new_random_position(self.agent.boundingbox, self.agent.route_host, self.route_profile)
 
         if content is None or len(content) == 0:
             content = {

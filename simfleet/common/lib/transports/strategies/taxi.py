@@ -359,19 +359,21 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                     origin=content["origin"], dest=content["dest"]
                 )
 
-                # New statistics - TESTING
-                path, distance, duration = await self.agent.request_path(
-                    self.agent.get("current_pos"), content["origin"]
+                (
+                    distance,
+                    osrm_duration,
+                    speed_based_duration,
+                ) = await self.agent.move_to(
+                    content["origin"]
                 )
 
-                # New statistics
-                # Event 4: Travel to Pickup
                 self.agent.events_store.emit(
                     event_type="travel_to_pickup",
-                    details={"distance": distance, "duration": duration}
+                    details={
+                        "distance": distance,
+                        "duration": osrm_duration,
+                    },
                 )
-
-                await self.agent.move_to(content["origin"])
 
                 self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
                 self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
@@ -576,18 +578,17 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
                             details={},
                         )
 
-                        # New statistics - TESTING
-                        path, distance, duration = await self.agent.request_path(
-                            self.agent.get("current_pos"), dest
-                        )
+                        (
+                            distance,
+                            osrm_duration,
+                            speed_based_duration,
+                        ) = await self.agent.move_to(dest)
 
-                        await self.agent.move_to(dest)
-
-                        # New statistics
-                        # Event 6: Travel to destination
                         self.agent.events_store.emit(
                             event_type="travel_to_destination",
-                            details={"distance": distance},
+                            details={
+                                "distance": distance,
+                            },
                         )
 
                         self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
