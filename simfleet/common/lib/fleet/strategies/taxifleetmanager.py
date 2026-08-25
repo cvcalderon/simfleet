@@ -95,17 +95,14 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
     def select_taxi(self, origin):
         candidates = self.get_taxi_candidates(origin)
 
-        if not candidates:
-            return None
-
-        candidates.sort(
+        return min(
+            candidates,
             key=lambda candidate: (
                 candidate["distance"],
-                candidate["assignments"]
-            )
+                candidate["assignments"],
+            ),
+            default=None,
         )
-
-        return candidates[0]
 
     def find_nearest_return_point(self, position):
         nearest_point = None

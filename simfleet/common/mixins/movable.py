@@ -1,4 +1,5 @@
 from asyncio.log import logger
+from collections import deque
 from simfleet.utils.helpers import AlreadyInDestination, PathRequestException, distance_in_meters, kmh_to_ms
 from spade.behaviour import PeriodicBehaviour
 from simfleet.utils.routing import chunk_path, request_path
@@ -13,7 +14,7 @@ class MovableMixin:
 
         Attributes:
             path (list): A list of coordinates that represents the path the vehicle should follow.
-            chunked_path (list): A list of smaller steps or 'chunks' of the path based on the speed of the vehicle.
+            chunked_path (deque): Queue of movement steps generated from the current path.
             animation_speed (int): The time in milliseconds between steps in the animation or movement process.
             speed_in_kmh (float): The current speed of the vehicle in kilometers per hour.
             dest (list): The destination coordinates (longitude, latitude) of the vehicle.
@@ -87,7 +88,10 @@ class MovableMixin:
 
         self.set("path", path)
         try:
-            self.chunked_path = chunk_path(path, self.get("speed_in_kmh"))
+           # self.chunked_path = chunk_path(path, self.get("speed_in_kmh"))
+
+           self.chunked_path = deque( chunk_path(path, self.get("speed_in_kmh")) )
+
         except Exception as e:
             logger.error("Exception chunking path {}: {}".format(path, e))
             raise PathRequestException
@@ -147,8 +151,10 @@ class MovableMixin:
         """
         Advances one step in the simulation
         """
+       # if self.chunked_path:
+       #     _next = self.chunked_path.pop(0)
         if self.chunked_path:
-            _next = self.chunked_path.pop(0)
+            _next = self.chunked_path.popleft()
             distance = distance_in_meters(self.get_position(), _next)
             self.animation_speed = (
                 distance / kmh_to_ms(self.get("speed_in_kmh")) * ONESECOND_IN_MS
