@@ -5,6 +5,7 @@ from loguru import logger
 from simfleet.common.agents.fleetmanager import FleetManagerStrategyBehaviour
 from simfleet.communications.protocol import REQUEST_PERFORMATIVE, INFORM_PERFORMATIVE, REQUEST_PROTOCOL
 from simfleet.utils.helpers import distance_in_meters
+from simfleet.utils.status import TRANSPORT_WAITING
 
 from spade.message import Message
 
@@ -68,11 +69,15 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
 
             position = data.get("p")
             assignments = data.get("a")
+            status = data.get("st")
 
             if position is None:
                 continue
 
             if assignments is None:
+                continue
+
+            if status is not None and status != TRANSPORT_WAITING:
                 continue
 
             distance = distance_in_meters(

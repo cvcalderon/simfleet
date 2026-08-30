@@ -1,3 +1,5 @@
+import math
+from uuid import uuid4
 import json
 
 from loguru import logger
@@ -35,6 +37,224 @@ from simfleet.communications.protocol import (
 class PublicTransportStrategyBehaviour(
     State
 ):
+
+
+    METRICS_MODALITY = "public_transport"
+    _METRICS_SERVICE_CONTEXTS_ATTR = "_metrics_service_contexts"
+    _METRICS_PENDING_MOVEMENT_ATTR = "_metrics_pending_movement"
+    _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
+
+    def _metrics_modality(self):
+        return self.METRICS_MODALITY
+
+    def get_service_contexts(self):
+        contexts = getattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXTS_ATTR,
+            None,
+        )
+        if contexts is None:
+            contexts = {}
+            setattr(
+                self.agent,
+                self._METRICS_SERVICE_CONTEXTS_ATTR,
+                contexts,
+            )
+        return contexts
+
+    def get_service_context(self, service_id):
+        if service_id is None:
+            return None
+        return self.get_service_contexts().get(str(service_id))
+
+    def get_service_context_for_user(self, user_id):
+        user_id = self.agent.bare_jid(user_id)
+        if user_id is None:
+            return None
+        matches = [
+            context
+            for context in self.get_service_contexts().values()
+            if context.get("user_id") == user_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                "Transport {} has multiple metrics service contexts for user {}.".format(
+                    self.agent.name,
+                    user_id,
+                )
+            )
+        return None
+
+    def create_service_context(
+        self,
+        service_id,
+        user_id,
+        transport_id=None,
+    ):
+        if service_id is None or user_id is None:
+            return None
+        service_id = str(service_id)
+        contexts = self.get_service_contexts()
+        if service_id in contexts:
+            return contexts[service_id]
+        context = {
+            "service_id": service_id,
+            "modality": self.METRICS_MODALITY,
+            "user_id": self.agent.bare_jid(user_id),
+            "transport_id": self.agent.bare_jid(
+                transport_id if transport_id is not None else self.agent.jid
+            ),
+            "requested": True,
+            "assignment_keys": set(),
+            "pending_movement": None,
+        }
+        contexts[service_id] = context
+        return context
+
+    def get_or_create_service_context(self, service_id, user_id, transport_id=None):
+        context = self.get_service_context(service_id)
+        if context is not None:
+            if self.agent.bare_jid(user_id) != context.get("user_id"):
+                return None
+            return context
+        return self.create_service_context(
+            service_id=service_id,
+            user_id=user_id,
+            transport_id=transport_id,
+        )
+
+    def clear_service_context(self, service_id):
+        contexts = self.get_service_contexts()
+        if str(service_id) not in contexts:
+            return True
+        del contexts[str(service_id)]
+        return True
+
+    def _service_event_details(self, context):
+        return {
+            "modality": context["modality"],
+            "service_id": context["service_id"],
+            "user_id": context.get("user_id"),
+            "transport_id": context.get("transport_id"),
+        }
+
+    def add_service_identifiers(self, content, service_id, user_id=None):
+        context = self.get_service_context(service_id)
+        if context is None:
+            raise ValueError("Unknown public-transport service_id.")
+        if user_id is not None and self.agent.bare_jid(user_id) != context.get("user_id"):
+            raise ValueError("Public-transport user_id does not match service context.")
+        result = dict(content or {})
+        result.update(self._service_event_details(context))
+        return result
+
+    def message_matches_service(self, content, service_id=None):
+        if not isinstance(content, dict):
+            return False
+        for key in ("service_id", "modality", "user_id"):
+            if content.get(key) is None:
+                return False
+        context = self.get_service_context(
+            service_id if service_id is not None else content["service_id"]
+        )
+        if context is None:
+            return False
+        if str(content["service_id"]) != context["service_id"]:
+            return False
+        if content["modality"] != context["modality"]:
+            return False
+        if self.agent.bare_jid(content["user_id"]) != context.get("user_id"):
+            return False
+        if content.get("transport_id") is None:
+            return False
+        if (
+            self.agent.bare_jid(content["transport_id"])
+            != context.get("transport_id")
+        ):
+            return False
+        return True
+
+    def assign_service(
+        self,
+        service_id,
+        boarding_key=None,
+        extra_details=None,
+    ):
+        context = self.get_service_context(service_id)
+        if context is None:
+            return False
+        key = str(
+            boarding_key
+            if boarding_key is not None
+            else context.get("transport_id")
+        )
+        if key in context["assignment_keys"]:
+            return False
+        context["assignment_keys"].add(key)
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_assigned",
+            details=details,
+        )
+        return True
+
+    def set_pending_movement(self, phase, distance_m, extra_details=None):
+        if phase not in self._METRICS_MOVEMENT_PHASES:
+            raise ValueError("Invalid metrics movement phase: {}".format(phase))
+        if (
+            isinstance(distance_m, bool)
+            or not isinstance(distance_m, (int, float))
+            or not math.isfinite(distance_m)
+            or distance_m < 0
+        ):
+            raise ValueError("distance_m must be a finite non-negative number.")
+        if getattr(self.agent, self._METRICS_PENDING_MOVEMENT_ATTR, None) is not None:
+            return False
+        details = {
+            "modality": self.METRICS_MODALITY,
+            "transport_id": self.agent.bare_jid(self.agent.jid),
+            "phase": phase,
+            "distance_m": float(distance_m),
+        }
+        details.update(extra_details or {})
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            {"details": details},
+        )
+        return True
+
+    def complete_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+        self.agent.events_store.emit(
+            event_type="movement_completed",
+            details=dict(pending["details"]),
+        )
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
+
+    def discard_pending_movement(self):
+        if getattr(self.agent, self._METRICS_PENDING_MOVEMENT_ATTR, None) is None:
+            return False
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
 
     async def on_start(
         self
@@ -90,6 +310,40 @@ class PublicTransportStrategyBehaviour(
                 )
             )
 
+            context = self.get_service_context_for_user(
+                customer_id
+            )
+
+            if context is None:
+                logger.error(
+                    "Transport {} cannot correlate alighting customer {} "
+                    "with a public-transport service context.".format(
+                        self.agent.name,
+                        customer_id,
+                    )
+                )
+                continue
+
+            content = self.add_service_identifiers(
+                {
+                    "request_type":
+                        "public_transport_arrival",
+
+                    "vehicle_id":
+                        str(
+                            self.agent.jid
+                        ),
+
+                    "pattern_id":
+                        self.agent.pattern_id,
+
+                    "stop":
+                        self.agent.current_stop,
+                },
+                context["service_id"],
+                user_id=customer_id,
+            )
+
             msg = Message()
 
             msg.to = str(
@@ -107,21 +361,7 @@ class PublicTransportStrategyBehaviour(
             )
 
             msg.body = json.dumps(
-                {
-                    "request_type":
-                        "public_transport_arrival",
-
-                    "vehicle_id":
-                        str(
-                            self.agent.jid
-                        ),
-
-                    "pattern_id":
-                        self.agent.pattern_id,
-
-                    "stop":
-                        self.agent.current_stop,
-                }
+                content
             )
 
             await self.send(
@@ -134,48 +374,8 @@ class PublicTransportStrategyBehaviour(
 
             self.agent.current_capacity += 1
 
-            #
-            # Public Transport Statistics
-            #
-            # The event is emitted after the customer has
-            # actually been removed from the Vehicle and
-            # capacity has been restored.
-            #
-
-            onboard = (
-                self.agent.capacity
-                - self.agent.current_capacity
-            )
-
-            self.agent.events_store.emit(
-                event_type="pt_customer_alighted",
-                details={
-                    "customer_id":
-                        str(
-                            customer_id
-                        ),
-
-                    "pattern_id":
-                        self.agent.pattern_id,
-
-                    "route_id":
-                        self.agent.route_id,
-
-                    "mode":
-                        self.agent.mode,
-
-                    "stop_id":
-                        self.agent.current_stop,
-
-                    "onboard":
-                        onboard,
-
-                    "free_capacity":
-                        self.agent.current_capacity,
-
-                    "capacity":
-                        self.agent.capacity,
-                }
+            self.clear_service_context(
+                context["service_id"]
             )
 
     async def inform_stop_arrival(
@@ -303,6 +503,24 @@ class PublicTransportStrategyBehaviour(
             )
         )
 
+        service_id = content.get(
+            "service_id"
+        )
+
+        context = self.get_service_context(
+            service_id
+        )
+
+        if context is None:
+            logger.error(
+                "Transport {} cannot accept customer {} without a "
+                "correlated service context.".format(
+                    self.agent.name,
+                    customer_id,
+                )
+            )
+            return False
+
         logger.info(
             "Transport {} accepted customer {} from {} to {}".format(
                 self.agent.name,
@@ -320,58 +538,29 @@ class PublicTransportStrategyBehaviour(
 
         self.agent.current_capacity -= 1
 
-        #
-        # Public Transport Statistics
-        #
-        # Vehicle-side boarding truth.
-        #
-        # At this point:
-        #
-        # - Customer has been inserted into current_customer.
-        # - Vehicle capacity has already been decreased.
-        #
-        # Customer and Stop will emit their own corresponding
-        # events later. This allows cross-validation between
-        # the three agents.
-        #
-
-        onboard = (
-            self.agent.capacity
-            - self.agent.current_capacity
+        boarding_key = content.get(
+            "boarding_key"
         )
 
-        self.agent.events_store.emit(
-            event_type="pt_customer_boarded",
-            details={
-                "customer_id":
-                    str(
-                        customer_id
-                    ),
+        if boarding_key is None:
+            boarding_key = "{}:{}:{}:{}".format(
+                content.get("leg_index"),
+                self.agent.pattern_id,
+                self.agent.current_stop,
+                destination_stop,
+            )
 
-                "pattern_id":
-                    self.agent.pattern_id,
-
-                "route_id":
-                    self.agent.route_id,
-
-                "mode":
-                    self.agent.mode,
-
-                "stop_id":
-                    self.agent.current_stop,
-
-                "destination_stop":
-                    destination_stop,
-
-                "onboard":
-                    onboard,
-
-                "free_capacity":
-                    self.agent.current_capacity,
-
-                "capacity":
-                    self.agent.capacity,
-            }
+        self.assign_service(
+            service_id,
+            boarding_key=boarding_key,
+            extra_details={
+                "pattern_id": self.agent.pattern_id,
+                "route_id": self.agent.route_id,
+                "mode": self.agent.mode,
+                "origin_stop": self.agent.current_stop,
+                "destination_stop": destination_stop,
+                "leg_index": content.get("leg_index"),
+            },
         )
 
         reply = Message()
@@ -391,7 +580,11 @@ class PublicTransportStrategyBehaviour(
         )
 
         reply.body = json.dumps(
-            content
+            self.add_service_identifiers(
+                content,
+                service_id,
+                user_id=customer_id,
+            )
         )
 
         await self.send(
@@ -403,6 +596,8 @@ class PublicTransportStrategyBehaviour(
         )
 
         self.agent.publish_public_transport_presence()
+
+        return True
 
     async def reject_customer(
         self,
@@ -416,6 +611,25 @@ class PublicTransportStrategyBehaviour(
                 customer_id
             )
         )
+
+        reply_content = dict(
+            content or {}
+        )
+
+        service_id = reply_content.get(
+            "service_id"
+        )
+
+        context = self.get_service_context(
+            service_id
+        )
+
+        if context is not None:
+            reply_content = self.add_service_identifiers(
+                reply_content,
+                service_id,
+                user_id=customer_id,
+            )
 
         reply = Message()
 
@@ -434,25 +648,41 @@ class PublicTransportStrategyBehaviour(
         )
 
         reply.body = json.dumps(
-            content
+            reply_content
         )
 
         await self.send(
             reply
         )
 
-    def emit_segment_completed(
+        if (
+            context is not None
+            and str(customer_id)
+            not in self.agent.get("current_customer")
+        ):
+            self.clear_service_context(
+                service_id
+            )
+
+        return True
+
+    def get_segment_distance(
         self,
         origin_stop,
         destination_stop,
-        route_distance=None
+        route_distance=None,
     ):
 
         if (
             origin_stop is None
             or destination_stop is None
         ):
-            return
+            return None
+
+        if route_distance is not None:
+            return float(
+                route_distance
+            )
 
         origin_position = (
             self.agent.get_stop_position(
@@ -466,62 +696,53 @@ class PublicTransportStrategyBehaviour(
             )
         )
 
-        distance = route_distance
+        if (
+            origin_position is None
+            or destination_position is None
+        ):
+            return 0.0
 
-        #
-        # For route movement we normally receive the
-        # actual routed distance already calculated by
-        # MovableMixin.
-        #
-        # For teleport movement, or as a safe fallback,
-        # calculate the direct physical distance between
-        # both Stops.
-        #
-        # No additional routing request is performed.
-        #
+        return float(
+            distance_in_meters(
+                origin_position,
+                destination_position
+            )
+        )
+
+    def set_pending_segment_movement(
+        self,
+        origin_stop,
+        destination_stop,
+        route_distance=None,
+    ):
+
+        distance = self.get_segment_distance(
+            origin_stop,
+            destination_stop,
+            route_distance=route_distance,
+        )
 
         if distance is None:
+            return False
 
-            if (
-                origin_position is not None
-                and destination_position is not None
-            ):
+        onboard = (
+            self.agent.capacity
+            - self.agent.current_capacity
+        )
 
-                distance = distance_in_meters(
-                    origin_position,
-                    destination_position
-                )
-
-            else:
-
-                distance = 0.0
-
-        self.agent.events_store.emit(
-            event_type="pt_segment_completed",
-            details={
-                "pattern_id":
-                    self.agent.pattern_id,
-
-                "route_id":
-                    self.agent.route_id,
-
-                "mode":
-                    self.agent.mode,
-
-                "movement_mode":
-                    self.agent.movement_mode,
-
-                "origin_stop":
-                    origin_stop,
-
-                "destination_stop":
-                    destination_stop,
-
-                "distance":
-                    float(
-                        distance
-                    ),
-            }
+        return self.set_pending_movement(
+            "service",
+            distance,
+            extra_details={
+                "pattern_id": self.agent.pattern_id,
+                "route_id": self.agent.route_id,
+                "mode": self.agent.mode,
+                "movement_mode": self.agent.movement_mode,
+                "origin_stop": origin_stop,
+                "destination_stop": destination_stop,
+                "onboard": onboard,
+                "capacity": self.agent.capacity,
+            },
         )
 
 
@@ -603,6 +824,46 @@ class PublicTransportSelectStopState(
 
                     return
 
+            if (
+                self.agent.route_type == "end-to-end"
+                and self.agent.start_stop is not None
+                and self.agent.current_stop != self.agent.start_stop
+            ):
+
+                start_position = (
+                    self.agent.get_stop_position(
+                        self.agent.start_stop
+                    )
+                )
+
+                self.agent.current_stop = (
+                    self.agent.start_stop
+                )
+
+                self.agent.next_stop = None
+                self.agent.dest = None
+
+                if start_position is not None:
+                    await self.agent.set_position(
+                        start_position
+                    )
+
+                logger.info(
+                    "Transport {} restarted pattern {} at stop {}".format(
+                        self.agent.name,
+                        self.agent.pattern_id,
+                        self.agent.current_stop
+                    )
+                )
+
+                self.agent.publish_public_transport_presence()
+
+                self.set_next_state(
+                    TRANSPORT_IN_DEST
+                )
+
+                return
+
             self.agent.next_stop = None
 
             self.agent.publish_public_transport_presence()
@@ -672,6 +933,8 @@ class PublicTransportMovingState(
                 )
             )
 
+            self.discard_pending_movement()
+
             self.set_next_state(
                 TRANSPORT_WAITING
             )
@@ -697,6 +960,8 @@ class PublicTransportMovingState(
                     next_stop
                 )
             )
+
+            self.discard_pending_movement()
 
             self.set_next_state(
                 TRANSPORT_WAITING
@@ -735,25 +1000,21 @@ class PublicTransportMovingState(
                     )
                 )
 
+                self.discard_pending_movement()
+
                 self.set_next_state(
                     TRANSPORT_WAITING
                 )
 
                 return
 
-            #
-            # Public Transport Statistics
-            #
-            # Teleport has no routed distance.
-            # emit_segment_completed() therefore
-            # calculates the physical Stop-to-Stop
-            # distance.
-            #
-
-            self.emit_segment_completed(
-                origin_stop=origin_stop,
-                destination_stop=next_stop,
+            # Teleport movement returns only after the
+            # vehicle has physically reached the stop.
+            self.set_pending_segment_movement(
+                origin_stop,
+                next_stop,
             )
+            self.complete_pending_movement()
 
             self.agent.current_stop = (
                 next_stop
@@ -770,14 +1031,6 @@ class PublicTransportMovingState(
         #
         # ROUTE
         #
-        # dest must correspond to THIS segment before
-        # is_in_destination() can be interpreted.
-        #
-        # This preserves the stale-destination fix:
-        # the destination from the previous segment
-        # must never make the Vehicle believe that the
-        # current segment has already finished.
-        #
 
         if (
             self.agent.dest
@@ -788,25 +1041,16 @@ class PublicTransportMovingState(
                 self.agent.is_in_destination()
             ):
 
-                route_distance = None
-
-                if self.agent.route_count > 0:
-                    route_distance = (
-                        self.agent.last_route_distance
+                if not self.complete_pending_movement():
+                    route_distance = None
+                    if self.agent.route_count > 0:
+                        route_distance = self.agent.last_route_distance
+                    self.set_pending_segment_movement(
+                        origin_stop,
+                        next_stop,
+                        route_distance=route_distance,
                     )
-
-                #
-                # Public Transport Statistics
-                #
-                # Exactly one event is emitted when
-                # the segment is actually completed.
-                #
-
-                self.emit_segment_completed(
-                    origin_stop=origin_stop,
-                    destination_stop=next_stop,
-                    route_distance=route_distance,
-                )
+                    self.complete_pending_movement()
 
                 self.agent.current_stop = (
                     next_stop
@@ -820,13 +1064,6 @@ class PublicTransportMovingState(
 
                 return
 
-            #
-            # Vehicle is already travelling towards
-            # the correct destination.
-            #
-            # Do NOT request the route again.
-            #
-
             await self.agent.sleep(
                 1
             )
@@ -837,11 +1074,6 @@ class PublicTransportMovingState(
 
             return
 
-        #
-        # There is no active movement towards this
-        # segment destination.
-        #
-
         try:
 
             await (
@@ -851,25 +1083,28 @@ class PublicTransportMovingState(
                 )
             )
 
-        except AlreadyInDestination:
+            route_distance = None
+            if self.agent.route_count > 0:
+                route_distance = self.agent.last_route_distance
 
-            #
-            # Different logical Stops may theoretically
-            # share coordinates.
-            #
-            # Treat that as a completed zero/direct
-            # distance segment instead of reusing the
-            # distance from a previous route.
-            #
+            self.set_pending_segment_movement(
+                origin_stop,
+                next_stop,
+                route_distance=route_distance,
+            )
+
+        except AlreadyInDestination:
 
             self.agent.dest = (
                 destination
             )
 
-            self.emit_segment_completed(
-                origin_stop=origin_stop,
-                destination_stop=next_stop,
+            self.set_pending_segment_movement(
+                origin_stop,
+                next_stop,
+                route_distance=0.0,
             )
+            self.complete_pending_movement()
 
             self.agent.current_stop = (
                 next_stop
@@ -894,6 +1129,8 @@ class PublicTransportMovingState(
                 )
             )
 
+            self.discard_pending_movement()
+
             await self.agent.sleep(
                 1
             )
@@ -903,14 +1140,6 @@ class PublicTransportMovingState(
             )
 
             return
-
-        #
-        # Route requested successfully.
-        #
-        # MovableMixin is now moving the Vehicle.
-        # The segment event is NOT emitted here,
-        # because the segment has not finished yet.
-        #
 
         await self.agent.sleep(
             1
@@ -988,45 +1217,6 @@ class PublicTransportInStopState(
         onboard = (
             self.agent.capacity
             - self.agent.current_capacity
-        )
-
-        #
-        # Public Transport Statistics
-        #
-
-        self.agent.events_store.emit(
-            event_type="pt_stop_arrival",
-            details={
-                "pattern_id":
-                    self.agent.pattern_id,
-
-                "route_id":
-                    self.agent.route_id,
-
-                "mode":
-                    self.agent.mode,
-
-                "route_type":
-                    self.agent.route_type,
-
-                "stop_id":
-                    self.agent.current_stop,
-
-                "pattern_completed":
-                    pattern_completed,
-
-                "round":
-                    self.agent.rounds,
-
-                "onboard":
-                    onboard,
-
-                "free_capacity":
-                    self.agent.current_capacity,
-
-                "capacity":
-                    self.agent.capacity,
-            }
         )
 
         self.agent.publish_public_transport_presence()
@@ -1121,6 +1311,38 @@ class PublicTransportBoardingState(
             msg.sender
         )
 
+        bare_customer_id = self.agent.bare_jid(
+            customer_id
+        )
+
+        service_id = content.get(
+            "service_id"
+        )
+
+        identity_valid = (
+            service_id is not None
+            and content.get("modality") == self.METRICS_MODALITY
+            and self.agent.bare_jid(content.get("user_id")) == bare_customer_id
+            and self.agent.bare_jid(content.get("transport_id"))
+            == self.agent.bare_jid(self.agent.jid)
+        )
+
+        context = None
+
+        if identity_valid:
+            context = self.get_or_create_service_context(
+                service_id=service_id,
+                user_id=bare_customer_id,
+                transport_id=self.agent.jid,
+            )
+            identity_valid = (
+                context is not None
+                and self.message_matches_service(
+                    content,
+                    service_id=service_id,
+                )
+            )
+
         destination_stop = (
             content.get(
                 "destination_stop"
@@ -1135,7 +1357,9 @@ class PublicTransportBoardingState(
         )
 
         valid = (
-            content.get(
+            identity_valid
+
+            and content.get(
                 "pattern_id"
             ) == self.agent.pattern_id
 

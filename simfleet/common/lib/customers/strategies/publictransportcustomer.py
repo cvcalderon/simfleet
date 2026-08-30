@@ -1,3 +1,5 @@
+import math
+from uuid import uuid4
 import json
 
 from loguru import logger
@@ -46,6 +48,448 @@ class PublicTransportCustomerStrategyBehaviour(
     the customer while keeping the concrete state
     transitions in specialized FSM states.
     """
+
+
+    METRICS_MODALITY = "public_transport"
+    _METRICS_SERVICE_CONTEXT_ATTR = "_metrics_service_context"
+    _METRICS_PENDING_MOVEMENT_ATTR = "_metrics_pending_movement"
+    _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
+
+    def _metrics_modality(self):
+        modality = self.METRICS_MODALITY
+        if modality is None:
+            raise ValueError(
+                "A concrete metrics strategy must declare METRICS_MODALITY."
+            )
+        return modality
+
+    def get_service_context(self):
+        return getattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            None,
+        )
+
+    def create_service_context(
+        self,
+        service_id=None,
+        user_id=None,
+        transport_id=None,
+        origin=None,
+        destination=None,
+        emit_requested=False,
+    ):
+        current = self.get_service_context()
+        if current is not None:
+            requested_id = str(service_id) if service_id is not None else None
+            if (
+                current.get("terminal_status") is None
+                and (
+                    requested_id is None
+                    or current.get("service_id") == requested_id
+                )
+            ):
+                return current
+            logger.warning(
+                "Agent[{}]: Refusing to replace metrics service context [{}] "
+                "with [{}] before it is cleared.".format(
+                    self.agent.name,
+                    current.get("service_id"),
+                    requested_id,
+                )
+            )
+            return None
+
+        if service_id is None:
+            if not emit_requested:
+                logger.warning(
+                    "Agent[{}]: A transport-side metrics context requires "
+                    "the customer-created service_id.".format(self.agent.name)
+                )
+                return None
+            service_id = str(uuid4())
+        else:
+            service_id = str(service_id)
+
+        if not emit_requested and user_id is None:
+            logger.warning(
+                "Agent[{}]: A transport-side metrics context requires user_id.".format(
+                    self.agent.name
+                )
+            )
+            return None
+
+        context = {
+            "service_id": service_id,
+            "modality": self._metrics_modality(),
+            "user_id": self.agent.bare_jid(
+                user_id if user_id is not None else self.agent.jid
+            ),
+            "transport_id": self.agent.bare_jid(transport_id),
+            "origin": origin,
+            "destination": destination,
+            "requested": True,
+            "request_emitted": False,
+            "assigned": False,
+            "transport_ids": [],
+            "assignment_keys": set(),
+            "started": False,
+            "terminal_status": None,
+            "pending_movement": None,
+        }
+        setattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            context,
+        )
+
+        if emit_requested:
+            details = self._service_event_details(context)
+            details["origin"] = origin
+            details["destination"] = destination
+            self.agent.events_store.emit(
+                event_type="service_requested",
+                details=details,
+            )
+            context["request_emitted"] = True
+
+        return context
+
+    def get_or_create_service_context(self, **kwargs):
+        context = self.get_service_context()
+        service_id = kwargs.get("service_id")
+        if context is not None:
+            if (
+                service_id is None
+                or context.get("service_id") == str(service_id)
+            ):
+                return context
+            logger.warning(
+                "Agent[{}]: Message/service context mismatch: [{}] != [{}].".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                    service_id,
+                )
+            )
+            return None
+        return self.create_service_context(**kwargs)
+
+    def clear_service_context(self):
+        context = self.get_service_context()
+        if context is None:
+            return True
+        if context.get("terminal_status") is None:
+            logger.warning(
+                "Agent[{}]: Refusing to clear unfinished metrics service [{}].".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+        if context.get("pending_movement") is not None:
+            logger.warning(
+                "Agent[{}]: Refusing to clear metrics service [{}] with a "
+                "pending movement.".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+        setattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            None,
+        )
+        return True
+
+    def _service_event_details(self, context=None):
+        context = context or self.get_service_context()
+        if context is None:
+            return None
+        return {
+            "modality": context["modality"],
+            "service_id": context["service_id"],
+            "user_id": context.get("user_id"),
+            "transport_id": context.get("transport_id"),
+        }
+
+    def add_service_identifiers(
+        self,
+        content=None,
+        context=None,
+        transport_id=None,
+    ):
+        context = context or self.get_service_context()
+        if context is None:
+            raise ValueError("Cannot propagate identifiers without a service context.")
+        result = dict(content or {})
+        if transport_id is not None:
+            context["transport_id"] = self.agent.bare_jid(transport_id)
+        result.update(self._service_event_details(context))
+        return result
+
+    def message_matches_service(self, content, context=None):
+        context = context or self.get_service_context()
+        if context is None or not isinstance(content, dict):
+            return False
+
+        for key in ("service_id", "modality", "user_id"):
+            if content.get(key) is None:
+                return False
+
+        if str(content["service_id"]) != context["service_id"]:
+            return False
+        if content["modality"] != context["modality"]:
+            return False
+        if self.agent.bare_jid(content["user_id"]) != context.get("user_id"):
+            return False
+
+        expected_transport = context.get("transport_id")
+        received_transport = content.get("transport_id")
+        if expected_transport is not None:
+            if received_transport is None:
+                return False
+            if self.agent.bare_jid(received_transport) != expected_transport:
+                return False
+        return True
+
+    def mark_service_assigned(
+        self,
+        transport_id,
+        boarding_key=None,
+    ):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+
+        transport_id = self.agent.bare_jid(
+            transport_id
+        )
+        if transport_id is None:
+            return False
+
+        key = str(
+            boarding_key
+            if boarding_key is not None
+            else transport_id
+        )
+
+        if key in context["assignment_keys"]:
+            context["transport_id"] = transport_id
+            return False
+
+        context["assignment_keys"].add(
+            key
+        )
+
+        if transport_id not in context["transport_ids"]:
+            context["transport_ids"].append(
+                transport_id
+            )
+
+        context["transport_id"] = transport_id
+        context["assigned"] = True
+        return True
+
+    def clear_candidate_transport(self, transport_id=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if transport_id is not None:
+            transport_id = self.agent.bare_jid(transport_id)
+            if context.get("transport_id") != transport_id:
+                return False
+        context["transport_id"] = None
+        return True
+
+    def mark_service_started(self, transport_id=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if transport_id is not None:
+            transport_id = self.agent.bare_jid(transport_id)
+            if (
+                context.get("transport_id") is not None
+                and context.get("transport_id") != transport_id
+            ):
+                return False
+            context["transport_id"] = transport_id
+        if context.get("transport_id") is None:
+            return False
+        context["assigned"] = True
+        context["started"] = True
+        return True
+
+    def assign_service(self, transport_id, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        transport_id = self.agent.bare_jid(transport_id)
+        if transport_id is None:
+            return False
+        if context.get("assigned"):
+            return False
+
+        context["transport_id"] = transport_id
+        context["assigned"] = True
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_assigned",
+            details=details,
+        )
+        return True
+
+    def start_service(self, transport_id=None, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if context.get("started"):
+            return False
+        if transport_id is not None:
+            context["transport_id"] = self.agent.bare_jid(transport_id)
+        if context.get("transport_id") is None:
+            return False
+
+        context["started"] = True
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_started",
+            details=details,
+        )
+        return True
+
+    def complete_service(self, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if not context.get("started"):
+            logger.warning(
+                "Agent[{}]: Refusing to complete service [{}] before it starts.".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+
+        context["terminal_status"] = "completed"
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_completed",
+            details=details,
+        )
+        return True
+
+    def fail_service(self, failure_reason=None, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+
+        context["terminal_status"] = "failed"
+        details = self._service_event_details(context)
+        if failure_reason is not None:
+            details["failure_reason"] = failure_reason
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_failed",
+            details=details,
+        )
+        return True
+
+    def set_pending_movement(
+        self,
+        phase,
+        distance_m,
+        extra_details=None,
+        require_service=True,
+    ):
+        if phase not in self._METRICS_MOVEMENT_PHASES:
+            raise ValueError("Invalid metrics movement phase: {}".format(phase))
+        if (
+            isinstance(distance_m, bool)
+            or not isinstance(distance_m, (int, float))
+            or not math.isfinite(distance_m)
+            or distance_m < 0
+        ):
+            raise ValueError("distance_m must be a finite non-negative number.")
+
+        context = self.get_service_context()
+        if require_service and context is None:
+            return False
+        if getattr(self.agent, self._METRICS_PENDING_MOVEMENT_ATTR, None) is not None:
+            logger.warning(
+                "Agent[{}]: Refusing to overwrite a pending metrics movement.".format(
+                    self.agent.name
+                )
+            )
+            return False
+
+        details = {
+            "modality": self._metrics_modality(),
+            "transport_id": None,
+            "user_id": None,
+            "service_id": None,
+            "phase": phase,
+            "distance_m": float(distance_m),
+        }
+        if context is not None:
+            details.update(self._service_event_details(context))
+        else:
+            details["transport_id"] = self.agent.bare_jid(self.agent.jid)
+        details.update(extra_details or {})
+
+        pending = {"details": details}
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            pending,
+        )
+        if context is not None:
+            context["pending_movement"] = pending
+        return True
+
+    def complete_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+
+        self.agent.events_store.emit(
+            event_type="movement_completed",
+            details=dict(pending["details"]),
+        )
+        context = self.get_service_context()
+        if context is not None and context.get("pending_movement") is pending:
+            context["pending_movement"] = None
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
+
+    def discard_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+        context = self.get_service_context()
+        if context is not None and context.get("pending_movement") is pending:
+            context["pending_movement"] = None
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
 
     async def on_start(
         self
@@ -154,25 +598,40 @@ class PublicTransportCustomerStrategyBehaviour(
 
             return False
 
-        content = {
-            "request_type":
-                "public_transport_journeys",
+        context = self.get_service_context()
 
-            "origin":
-                origin,
+        if context is None:
+            context = self.create_service_context(
+                origin=origin,
+                destination=destination,
+                emit_requested=True,
+            )
 
-            "dest":
-                destination,
+        if context is None:
+            return False
 
-            "max_access_walking_distance":
-                self.agent.get_max_access_walking_distance(),
+        content = self.add_service_identifiers(
+            {
+                "request_type":
+                    "public_transport_journeys",
 
-            "max_transfer_walking_distance":
-                self.agent.get_max_transfer_walking_distance(),
+                "origin":
+                    origin,
 
-            "max_transfers":
-                self.agent.get_max_transfers(),
-        }
+                "dest":
+                    destination,
+
+                "max_access_walking_distance":
+                    self.agent.get_max_access_walking_distance(),
+
+                "max_transfer_walking_distance":
+                    self.agent.get_max_transfer_walking_distance(),
+
+                "max_transfers":
+                    self.agent.get_max_transfers(),
+            },
+            context=context,
+        )
 
         msg = Message()
 
@@ -351,6 +810,10 @@ class PublicTransportCustomerStrategyBehaviour(
         ):
             return False
 
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+
         pattern_id = leg.get(
             "pattern_id"
         )
@@ -386,19 +849,36 @@ class PublicTransportCustomerStrategyBehaviour(
 
             return False
 
-        content = {
-            "request_type":
-                "public_transport_board",
+        boarding_key = "{}:{}:{}:{}".format(
+            self.agent.current_leg_index,
+            pattern_id,
+            origin_stop,
+            destination_stop,
+        )
 
-            "pattern_id":
-                pattern_id,
+        content = self.add_service_identifiers(
+            {
+                "request_type":
+                    "public_transport_board",
 
-            "origin_stop":
-                origin_stop,
+                "pattern_id":
+                    pattern_id,
 
-            "destination_stop":
-                destination_stop,
-        }
+                "origin_stop":
+                    origin_stop,
+
+                "destination_stop":
+                    destination_stop,
+
+                "leg_index":
+                    self.agent.current_leg_index,
+
+                "boarding_key":
+                    boarding_key,
+            },
+            context=context,
+            transport_id=vehicle_id,
+        )
 
         msg = Message()
 
@@ -828,55 +1308,6 @@ class PublicTransportCustomerWaitingForJourneyState(
             selected_journey
         )
 
-        #
-        # Public Transport Statistics
-        #
-        # This is the beginning of EXECUTION of the
-        # selected Journey, not the beginning of
-        # journey planning.
-        #
-        # StatisticsStore supplies the event timestamp.
-        #
-        # Therefore:
-        #
-        # pt_journey_completed.timestamp
-        # -
-        # pt_journey_started.timestamp
-        #
-        # gives total_journey_time.
-        #
-
-        self.agent.events_store.emit(
-            event_type="pt_journey_started",
-            details={
-                "transfers":
-                    selected_journey.get(
-                        "transfers",
-                        0
-                    ),
-
-                "walking_distance":
-                    selected_journey.get(
-                        "walking_distance",
-                        0
-                    ),
-
-                "public_transport_stops":
-                    selected_journey.get(
-                        "public_transport_stops",
-                        0
-                    ),
-
-                "legs":
-                    len(
-                        selected_journey.get(
-                            "legs",
-                            []
-                        )
-                    ),
-            }
-        )
-
         logger.info(
             "Public transport customer {} "
             "selected journey with {} transfers, "
@@ -934,19 +1365,14 @@ class PublicTransportCustomerJourneyFailedState(
             )
         )
 
-        #
-        # Public Transport Statistics
-        #
+        self.discard_pending_movement()
 
-        self.agent.events_store.emit(
-            event_type="pt_journey_failed",
-            details={
-                "position":
-                    self.agent.get_position(),
-
-                "leg_index":
-                    self.agent.current_leg_index,
-            }
+        self.fail_service(
+            "no_feasible_journey",
+            extra_details={
+                "position": self.agent.get_position(),
+                "leg_index": self.agent.current_leg_index,
+            },
         )
 
     async def run(self):
@@ -1062,13 +1488,6 @@ class PublicTransportCustomerMovingToDestState(
             self.agent.get_current_leg()
         )
 
-        #
-        # Defensive check.
-        #
-        # Normally this state is entered only when the
-        # dispatcher has identified a walking leg.
-        #
-
         if leg is None:
 
             self.set_next_state(
@@ -1112,23 +1531,47 @@ class PublicTransportCustomerMovingToDestState(
 
             return
 
-        #
-        # Keep the generic PedestrianAgent runtime
-        # attribute synchronized.
-        #
+        context = self.get_service_context()
+
+        if context is None:
+            logger.error(
+                "Public transport customer {} has no metrics service "
+                "context while executing a walking leg.".format(
+                    self.agent.name
+                )
+            )
+            self.set_next_state(
+                CUSTOMER_WAITING_TO_MOVE
+            )
+            return
+
+        phase = (
+            "service"
+            if context.get("started")
+            else "approach"
+        )
+
+        movement_details = {
+            "transport_id": None,
+            "leg_index": self.agent.current_leg_index,
+            "movement_mode": "walking",
+        }
 
         self.agent.pedestrian_dest = (
             destination
         )
 
-        #
-        # The Customer may already be physically at
-        # the destination.
-        #
-
         if self.agent.get_position() == (
             destination
         ):
+
+            if not self.complete_pending_movement():
+                self.set_pending_movement(
+                    phase,
+                    0,
+                    extra_details=movement_details,
+                )
+                self.complete_pending_movement()
 
             self.complete_walking_leg(
                 leg
@@ -1140,18 +1583,19 @@ class PublicTransportCustomerMovingToDestState(
 
             return
 
-        #
-        # A movement towards this exact destination is
-        # already active.
-        #
-        # Do not request another route.
-        #
-
         if self.agent.dest == (
             destination
         ):
 
             if self.agent.is_in_destination():
+
+                if not self.complete_pending_movement():
+                    self.set_pending_movement(
+                        phase,
+                        0,
+                        extra_details=movement_details,
+                    )
+                    self.complete_pending_movement()
 
                 self.complete_walking_leg(
                     leg
@@ -1173,29 +1617,31 @@ class PublicTransportCustomerMovingToDestState(
 
             return
 
-        #
-        # No movement towards the current walking-leg
-        # destination is active.
-        #
-        # self.agent.dest may still contain the
-        # destination of a previous walking leg.
-        #
-
         try:
 
-            await self.agent.move_to(
+            distance, _, _ = await self.agent.move_to(
                 destination
+            )
+
+            self.set_pending_movement(
+                phase,
+                distance,
+                extra_details=movement_details,
             )
 
         except AlreadyInDestination:
 
-            #
-            # Synchronize MovableMixin state.
-            #
-
             self.agent.dest = (
                 destination
             )
+
+            if not self.complete_pending_movement():
+                self.set_pending_movement(
+                    phase,
+                    0,
+                    extra_details=movement_details,
+                )
+                self.complete_pending_movement()
 
             self.complete_walking_leg(
                 leg
@@ -1217,6 +1663,8 @@ class PublicTransportCustomerMovingToDestState(
                 )
             )
 
+            self.discard_pending_movement()
+
             await self.agent.sleep(
                 2
             )
@@ -1226,13 +1674,6 @@ class PublicTransportCustomerMovingToDestState(
             )
 
             return
-
-        #
-        # move_to() creates MovingBehaviour
-        # asynchronously.
-        #
-        # The FSM only monitors its completion.
-        #
 
         await self.agent.sleep(
             1
@@ -1553,40 +1994,6 @@ class PublicTransportCustomerInStopState(
             )
 
             self.agent.clear_current_vehicle()
-
-            #
-            # Public Transport Statistics
-            #
-            # Stop has confirmed that the Customer
-            # was actually inserted into its queue.
-            #
-
-            self.agent.events_store.emit(
-                event_type="pt_queue_entered",
-                details={
-                    "pattern_id":
-                        pattern_id,
-
-                    "route_id":
-                        leg.get(
-                            "route_id"
-                        ),
-
-                    "mode":
-                        leg.get(
-                            "mode"
-                        ),
-
-                    "stop_id":
-                        origin_stop_id,
-
-                    "destination_stop":
-                        destination_stop_id,
-
-                    "leg_index":
-                        self.agent.current_leg_index,
-                }
-            )
 
             logger.info(
                 "Public transport customer {} "
@@ -2078,6 +2485,7 @@ class PublicTransportCustomerWaitingForApprovalState(
             )
 
             self.agent.clear_current_vehicle()
+            self.clear_candidate_transport()
 
             self.set_next_state(
                 CUSTOMER_WAITING
@@ -2152,6 +2560,18 @@ class PublicTransportCustomerWaitingForApprovalState(
             ):
                 continue
 
+            if not self.message_matches_service(
+                content
+            ):
+                logger.warning(
+                    "Public transport customer {} ignored a stale or "
+                    "uncorrelated boarding response from {}.".format(
+                        self.agent.name,
+                        expected_vehicle,
+                    )
+                )
+                continue
+
             if (
                 content.get("pattern_id")
                 != pattern_id
@@ -2192,39 +2612,25 @@ class PublicTransportCustomerWaitingForApprovalState(
                     )
                 )
 
-                #
-                # Public Transport Statistics
-                #
-                # Customer-side confirmation of boarding.
-                #
-                # This event is emitted only after receiving
-                # ACCEPT from the Vehicle.
-                #
+                boarding_key = content.get(
+                    "boarding_key"
+                )
 
-                self.agent.events_store.emit(
-                    event_type="pt_boarded",
-                    details={
-                        "vehicle_id":
-                            expected_vehicle,
+                self.mark_service_assigned(
+                    expected_vehicle,
+                    boarding_key=boarding_key,
+                )
 
-                        "pattern_id":
-                            pattern_id,
-
-                        "route_id":
-                            leg.get("route_id"),
-
-                        "mode":
-                            leg.get("mode"),
-
-                        "origin_stop":
-                            origin_stop_id,
-
-                        "destination_stop":
-                            destination_stop_id,
-
-                        "leg_index":
-                            self.agent.current_leg_index,
-                    }
+                self.start_service(
+                    expected_vehicle,
+                    extra_details={
+                        "pattern_id": pattern_id,
+                        "route_id": leg.get("route_id"),
+                        "mode": leg.get("mode"),
+                        "origin_stop": origin_stop_id,
+                        "destination_stop": destination_stop_id,
+                        "leg_index": self.agent.current_leg_index,
+                    },
                 )
 
                 self.agent.set_current_vehicle(
@@ -2255,6 +2661,10 @@ class PublicTransportCustomerWaitingForApprovalState(
                         origin_stop_id,
                         pattern_id
                     )
+                )
+
+                self.clear_candidate_transport(
+                    expected_vehicle
                 )
 
                 self.agent.clear_current_vehicle()
@@ -2448,6 +2858,18 @@ class PublicTransportCustomerInTransportState(
             ):
                 continue
 
+            if not self.message_matches_service(
+                content
+            ):
+                logger.warning(
+                    "Public transport customer {} ignored a stale or "
+                    "uncorrelated arrival from {}.".format(
+                        self.agent.name,
+                        expected_vehicle,
+                    )
+                )
+                continue
+
             informed_vehicle = (
                 self._bare_jid(
                     content.get("vehicle_id")
@@ -2462,55 +2884,13 @@ class PublicTransportCustomerInTransportState(
                 content.get("stop")
             )
 
-            if (
-                informed_vehicle
-                != expected_vehicle
-            ):
-
-                logger.warning(
-                    "Public transport customer {} "
-                    "received arrival for vehicle {} "
-                    "while travelling in {}.".format(
-                        self.agent.name,
-                        informed_vehicle,
-                        expected_vehicle
-                    )
-                )
-
+            if informed_vehicle != expected_vehicle:
                 continue
 
-            if (
-                informed_pattern
-                != pattern_id
-            ):
-
-                logger.warning(
-                    "Public transport customer {} "
-                    "received arrival for pattern {} "
-                    "while travelling on {}.".format(
-                        self.agent.name,
-                        informed_pattern,
-                        pattern_id
-                    )
-                )
-
+            if informed_pattern != pattern_id:
                 continue
 
-            if (
-                informed_stop
-                != destination_stop_id
-            ):
-
-                logger.debug(
-                    "Public transport customer {} "
-                    "ignored arrival at stop {} while "
-                    "travelling towards {}.".format(
-                        self.agent.name,
-                        informed_stop,
-                        destination_stop_id
-                    )
-                )
-
+            if informed_stop != destination_stop_id:
                 continue
 
             destination_position = (
@@ -2519,54 +2899,13 @@ class PublicTransportCustomerInTransportState(
                 )
             )
 
-            if (
-                destination_position
-                is not None
-            ):
-
+            if destination_position is not None:
                 await self.agent.set_position(
                     destination_position
                 )
 
             self.agent.set_current_stop(
                 destination_stop_id
-            )
-
-            #
-            # Public Transport Statistics
-            #
-            # Customer-side confirmation that the
-            # Public Transport leg has finished.
-            #
-            # IMPORTANT:
-            # current_leg_index is recorded BEFORE
-            # advance_leg().
-            #
-
-            self.agent.events_store.emit(
-                event_type="pt_alighted",
-                details={
-                    "vehicle_id":
-                        expected_vehicle,
-
-                    "pattern_id":
-                        pattern_id,
-
-                    "route_id":
-                        leg.get("route_id"),
-
-                    "mode":
-                        leg.get("mode"),
-
-                    "origin_stop":
-                        origin_stop_id,
-
-                    "destination_stop":
-                        destination_stop_id,
-
-                    "leg_index":
-                        self.agent.current_leg_index,
-                }
             )
 
             self.agent.clear_current_vehicle()
@@ -2626,45 +2965,16 @@ class PublicTransportCustomerInDestState(
             )
         )
 
-        #
-        # Public Transport Statistics
-        #
-        # This event is emitted exactly once because
-        # CUSTOMER_IN_DEST is a real terminal FSM state.
-        #
+        self.complete_pending_movement()
 
-        self.agent.events_store.emit(
-            event_type="pt_journey_completed",
-            details={
-                "final_position":
-                    self.agent.get_position(),
-
-                "transfers":
-                    journey.get(
-                        "transfers",
-                        0
-                    ),
-
-                "walking_distance":
-                    journey.get(
-                        "walking_distance",
-                        0
-                    ),
-
-                "public_transport_stops":
-                    journey.get(
-                        "public_transport_stops",
-                        0
-                    ),
-
-                "legs":
-                    len(
-                        journey.get(
-                            "legs",
-                            []
-                        )
-                    ),
-            }
+        self.complete_service(
+            extra_details={
+                "final_position": self.agent.get_position(),
+                "transfers": journey.get("transfers", 0),
+                "walking_distance_m": journey.get("walking_distance", 0),
+                "public_transport_stops": journey.get("public_transport_stops", 0),
+                "legs": len(journey.get("legs", [])),
+            },
         )
 
     async def run(self):
@@ -2675,12 +2985,7 @@ class PublicTransportCustomerInDestState(
 
         self.agent.pedestrian_dest = None
 
-        #
-        # Intentionally no set_next_state().
-        #
-        # CUSTOMER_IN_DEST remains a real terminal
-        # state and the FSM finishes here.
-        #
+        self.clear_service_context()
 
         return
 

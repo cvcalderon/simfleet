@@ -200,12 +200,23 @@ class StationSharingFleetManagerStrategy(FleetManagerStrategyBehaviour):
             INFORM_PERFORMATIVE
         )
 
+        reply_content = {
+            "request_type": "station_sharing_candidates",
+            "origin_stations": origin_stations,
+            "destination_stations": destination_stations,
+        }
+
+        for key in (
+            "service_id",
+            "modality",
+            "user_id",
+            "transport_id",
+        ):
+            if key in content:
+                reply_content[key] = content.get(key)
+
         reply.body = json.dumps(
-            {
-                "request_type": "station_sharing_candidates",
-                "origin_stations": origin_stations,
-                "destination_stations": destination_stations,
-            }
+            reply_content
         )
 
         await self.send(

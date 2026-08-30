@@ -11,6 +11,7 @@ from simfleet.communications.protocol import (
     REQUEST_PERFORMATIVE,
 )
 from simfleet.utils.helpers import distance_in_meters
+from simfleet.utils.status import TRANSPORT_WAITING
 
 
 class SharingFleetManagerStrategy(FleetManagerStrategyBehaviour):
@@ -107,9 +108,19 @@ class SharingFleetManagerStrategy(FleetManagerStrategyBehaviour):
                 "p"
             )
 
+            status = data.get(
+                "st"
+            )
+
             if (
                 resource_jid is None
                 or position is None
+            ):
+                continue
+
+            if (
+                status is not None
+                and status != TRANSPORT_WAITING
             ):
                 continue
 
@@ -149,11 +160,22 @@ class SharingFleetManagerStrategy(FleetManagerStrategyBehaviour):
             INFORM_PERFORMATIVE
         )
 
+        reply_content = {
+            "request_type": "sharing_candidates",
+            "vehicles": candidates,
+        }
+
+        for key in (
+            "service_id",
+            "modality",
+            "user_id",
+            "transport_id",
+        ):
+            if key in content:
+                reply_content[key] = content.get(key)
+
         reply.body = json.dumps(
-            {
-                "request_type": "sharing_candidates",
-                "vehicles": candidates,
-            }
+            reply_content
         )
 
         await self.send(

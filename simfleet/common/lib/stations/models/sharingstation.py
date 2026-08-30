@@ -39,14 +39,6 @@ class SharingStationAgent(ServiceStationAgent):
         super().__init__(agentjid, password)
 
     async def setup(self):
-        await super().setup()
-
-        logger.info(
-            "Agent[{}]: Sharing station running".format(
-                self.name
-            )
-        )
-
         try:
             template = Template()
             template.set_metadata(
@@ -87,6 +79,14 @@ class SharingStationAgent(ServiceStationAgent):
                     e
                 )
             )
+
+        await super().setup()
+
+        logger.info(
+            "Agent[{}]: Sharing station running".format(
+                self.name
+            )
+        )
 
     def get_capacity(self):
         """
@@ -593,6 +593,5 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
                     e
                 )
             )
-
 
 

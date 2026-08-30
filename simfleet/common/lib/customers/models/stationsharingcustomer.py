@@ -23,6 +23,7 @@ class StationSharingCustomerAgent(PedestrianAgent):
         self.trip_failed = False
         self.failure_operation = None
         self.failure_reason = None
+        self.failure_station_id = None
 
     def set_origin_station_candidates(self, stations):
         if stations is None:
@@ -137,39 +138,20 @@ class StationSharingCustomerAgent(PedestrianAgent):
         reason,
         station=None
     ):
+        """Store station-sharing failure state without emitting statistics.
+
+        Canonical service_failed events are emitted exclusively by strategy
+        modules under the mobility statistics contract.
+        """
         self.trip_failed = True
         self.failure_operation = operation
         self.failure_reason = reason
-
-        details = {
-            "customer_id": str(self.jid),
-            "operation": operation,
-            "reason": reason,
-        }
-
+        self.failure_station_id = None
         if station is not None:
-            details.update(
-                {
-                    "station_jid": station.get("jid"),
-                    "station_position": station.get("position"),
-                    "available_bikes_snapshot": station.get(
-                        "available_bikes"
-                    ),
-                    "available_docks_snapshot": station.get(
-                        "available_docks"
-                    ),
-                    "capacity": station.get(
-                        "capacity"
-                    ),
-                }
-            )
-
-        self.events_store.emit(
-            event_type="bike_operation_failed",
-            details=details
-        )
+            self.failure_station_id = station.get("jid")
 
     def clear_trip_failure(self):
         self.trip_failed = False
         self.failure_operation = None
         self.failure_reason = None
+        self.failure_station_id = None
