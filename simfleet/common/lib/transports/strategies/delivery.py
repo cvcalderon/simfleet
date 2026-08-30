@@ -1,3 +1,5 @@
+import math
+from uuid import uuid4
 import asyncio
 import json
 
@@ -40,6 +42,550 @@ from simfleet.utils.status import (
 # ==================================================================
 
 class DeliveryStrategyBehaviour(State):
+
+
+    METRICS_MODALITY = "delivery"
+    _METRICS_SERVICE_CONTEXT_ATTR = "_metrics_service_context"
+    _METRICS_PENDING_MOVEMENT_ATTR = "_metrics_pending_movement"
+    _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
+
+    def _metrics_modality(self):
+        modality = self.METRICS_MODALITY
+        if modality is None:
+            raise ValueError(
+                "A concrete metrics strategy must declare METRICS_MODALITY."
+            )
+        return modality
+
+    def get_service_context(self):
+        return getattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            None,
+        )
+
+    def create_service_context(
+        self,
+        service_id=None,
+        user_id=None,
+        transport_id=None,
+        origin=None,
+        destination=None,
+        emit_requested=False,
+    ):
+        current = self.get_service_context()
+        if current is not None:
+            requested_id = str(service_id) if service_id is not None else None
+            if (
+                current.get("terminal_status") is None
+                and (
+                    requested_id is None
+                    or current.get("service_id") == requested_id
+                )
+            ):
+                return current
+            logger.warning(
+                "Agent[{}]: Refusing to replace metrics service context [{}] "
+                "with [{}] before it is cleared.".format(
+                    self.agent.name,
+                    current.get("service_id"),
+                    requested_id,
+                )
+            )
+            return None
+
+        if service_id is None:
+            if not emit_requested:
+                logger.warning(
+                    "Agent[{}]: A transport-side metrics context requires "
+                    "the customer-created service_id.".format(self.agent.name)
+                )
+                return None
+            service_id = str(uuid4())
+        else:
+            service_id = str(service_id)
+
+        if not emit_requested and user_id is None:
+            logger.warning(
+                "Agent[{}]: A transport-side metrics context requires user_id.".format(
+                    self.agent.name
+                )
+            )
+            return None
+
+        context = {
+            "service_id": service_id,
+            "modality": self._metrics_modality(),
+            "user_id": self.agent.bare_jid(
+                user_id if user_id is not None else self.agent.jid
+            ),
+            "transport_id": self.agent.bare_jid(transport_id),
+            "origin": origin,
+            "destination": destination,
+            "requested": True,
+            "request_emitted": False,
+            "assigned": False,
+            "started": False,
+            "terminal_status": None,
+            "pending_movement": None,
+        }
+        setattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            context,
+        )
+
+        if emit_requested:
+            details = self._service_event_details(context)
+            details["origin"] = origin
+            details["destination"] = destination
+            self.agent.events_store.emit(
+                event_type="service_requested",
+                details=details,
+            )
+            context["request_emitted"] = True
+
+        return context
+
+    def get_or_create_service_context(self, **kwargs):
+        context = self.get_service_context()
+        service_id = kwargs.get("service_id")
+        if context is not None:
+            if (
+                service_id is None
+                or context.get("service_id") == str(service_id)
+            ):
+                return context
+            logger.warning(
+                "Agent[{}]: Message/service context mismatch: [{}] != [{}].".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                    service_id,
+                )
+            )
+            return None
+        return self.create_service_context(**kwargs)
+
+    def clear_service_context(self):
+        context = self.get_service_context()
+        if context is None:
+            return True
+        if context.get("terminal_status") is None:
+            logger.warning(
+                "Agent[{}]: Refusing to clear unfinished metrics service [{}].".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+        if context.get("pending_movement") is not None:
+            logger.warning(
+                "Agent[{}]: Refusing to clear metrics service [{}] with a "
+                "pending movement.".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+        setattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            None,
+        )
+        return True
+
+    def _service_event_details(self, context=None):
+        context = context or self.get_service_context()
+        if context is None:
+            return None
+        return {
+            "modality": context["modality"],
+            "service_id": context["service_id"],
+            "user_id": context.get("user_id"),
+            "transport_id": context.get("transport_id"),
+        }
+
+    def add_service_identifiers(
+        self,
+        content=None,
+        context=None,
+        transport_id=None,
+    ):
+        context = context or self.get_service_context()
+        if context is None:
+            raise ValueError("Cannot propagate identifiers without a service context.")
+        result = dict(content or {})
+        if transport_id is not None:
+            context["transport_id"] = self.agent.bare_jid(transport_id)
+        result.update(self._service_event_details(context))
+        return result
+
+    def message_matches_service(self, content, context=None):
+        context = context or self.get_service_context()
+        if context is None or not isinstance(content, dict):
+            return False
+
+        for key in ("service_id", "modality", "user_id"):
+            if content.get(key) is None:
+                return False
+
+        if str(content["service_id"]) != context["service_id"]:
+            return False
+        if content["modality"] != context["modality"]:
+            return False
+        if self.agent.bare_jid(content["user_id"]) != context.get("user_id"):
+            return False
+
+        expected_transport = context.get("transport_id")
+        received_transport = content.get("transport_id")
+        if expected_transport is not None:
+            if received_transport is None:
+                return False
+            if self.agent.bare_jid(received_transport) != expected_transport:
+                return False
+        return True
+
+    def mark_service_assigned(self, transport_id):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        transport_id = self.agent.bare_jid(transport_id)
+        if transport_id is None:
+            return False
+        if context.get("assigned"):
+            return context.get("transport_id") == transport_id
+        context["transport_id"] = transport_id
+        context["assigned"] = True
+        return True
+
+    def mark_service_started(self, transport_id=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if transport_id is not None:
+            transport_id = self.agent.bare_jid(transport_id)
+            if (
+                context.get("transport_id") is not None
+                and context.get("transport_id") != transport_id
+            ):
+                return False
+            context["transport_id"] = transport_id
+        if context.get("transport_id") is None:
+            return False
+        context["assigned"] = True
+        context["started"] = True
+        return True
+
+    def mark_service_completed(self):
+        """Mirror a successful terminal event emitted by the delivery requester."""
+        context = self.get_service_context()
+        if context is None:
+            return False
+        if context.get("terminal_status") is not None:
+            return context.get("terminal_status") == "completed"
+        if not context.get("started"):
+            return False
+        context["terminal_status"] = "completed"
+        return True
+
+    def assign_service(self, transport_id, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        transport_id = self.agent.bare_jid(transport_id)
+        if transport_id is None:
+            return False
+        if context.get("assigned"):
+            return False
+
+        context["transport_id"] = transport_id
+        context["assigned"] = True
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_assigned",
+            details=details,
+        )
+        return True
+
+    def start_service(self, transport_id=None, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if context.get("started"):
+            return False
+        if transport_id is not None:
+            context["transport_id"] = self.agent.bare_jid(transport_id)
+        if context.get("transport_id") is None:
+            return False
+
+        context["started"] = True
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_started",
+            details=details,
+        )
+        return True
+
+    def complete_service(self, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if not context.get("started"):
+            logger.warning(
+                "Agent[{}]: Refusing to complete service [{}] before it starts.".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+
+        context["terminal_status"] = "completed"
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_completed",
+            details=details,
+        )
+        return True
+
+    def fail_service(self, failure_reason=None, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+
+        context["terminal_status"] = "failed"
+        details = self._service_event_details(context)
+        if failure_reason is not None:
+            details["failure_reason"] = failure_reason
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_failed",
+            details=details,
+        )
+        return True
+
+    def set_pending_movement(
+        self,
+        phase,
+        distance_m,
+        extra_details=None,
+        require_service=True,
+    ):
+        if phase not in self._METRICS_MOVEMENT_PHASES:
+            raise ValueError("Invalid metrics movement phase: {}".format(phase))
+        if (
+            isinstance(distance_m, bool)
+            or not isinstance(distance_m, (int, float))
+            or not math.isfinite(distance_m)
+            or distance_m < 0
+        ):
+            raise ValueError("distance_m must be a finite non-negative number.")
+
+        context = self.get_service_context()
+        if require_service and context is None:
+            return False
+        if getattr(self.agent, self._METRICS_PENDING_MOVEMENT_ATTR, None) is not None:
+            logger.warning(
+                "Agent[{}]: Refusing to overwrite a pending metrics movement.".format(
+                    self.agent.name
+                )
+            )
+            return False
+
+        details = {
+            "modality": self._metrics_modality(),
+            "transport_id": None,
+            "user_id": None,
+            "service_id": None,
+            "phase": phase,
+            "distance_m": float(distance_m),
+        }
+        if context is not None:
+            details.update(self._service_event_details(context))
+        else:
+            details["transport_id"] = self.agent.bare_jid(self.agent.jid)
+        details.update(extra_details or {})
+
+        pending = {"details": details}
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            pending,
+        )
+        if context is not None:
+            context["pending_movement"] = pending
+        return True
+
+    def complete_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+
+        self.agent.events_store.emit(
+            event_type="movement_completed",
+            details=dict(pending["details"]),
+        )
+        context = self.get_service_context()
+        if context is not None and context.get("pending_movement") is pending:
+            context["pending_movement"] = None
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
+
+    def discard_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+        context = self.get_service_context()
+        if context is not None and context.get("pending_movement") is pending:
+            context["pending_movement"] = None
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
+
+
+    _METRICS_PENDING_OFFER_ATTR = "_metrics_pending_offer"
+    _METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR = "_metrics_active_message_context"
+
+    def _validate_metrics_service_request(self, content):
+        """Validate a strict schema-1.0 Taxi-like request before proposing."""
+        if not isinstance(content, dict):
+            return False
+        for key in (
+            "service_id",
+            "modality",
+            "user_id",
+            "customer_id",
+            "origin",
+            "dest",
+        ):
+            if content.get(key) is None:
+                return False
+        if content.get("modality") != self._metrics_modality():
+            return False
+        if self.agent.bare_jid(content.get("user_id")) != self.agent.bare_jid(
+            content.get("customer_id")
+        ):
+            return False
+        if content.get("transport_id") is not None:
+            return False
+        return True
+
+    def store_pending_offer(self, content):
+        if not self._validate_metrics_service_request(content):
+            return None
+        pending = {
+            "service_id": str(content["service_id"]),
+            "modality": content["modality"],
+            "user_id": self.agent.bare_jid(content["user_id"]),
+            "customer_id": self.agent.bare_jid(content["customer_id"]),
+            "transport_id": self.agent.bare_jid(self.agent.jid),
+            "origin": content["origin"],
+            "destination": content["dest"],
+        }
+        setattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, pending)
+        return pending
+
+    def get_pending_offer(self):
+        return getattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
+
+    def clear_pending_offer(self):
+        setattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
+        return True
+
+    def pending_offer_message_details(self):
+        pending = self.get_pending_offer()
+        if pending is None:
+            return None
+        return {
+            "service_id": pending["service_id"],
+            "modality": pending["modality"],
+            "user_id": pending["user_id"],
+            "transport_id": pending["transport_id"],
+        }
+
+    def message_matches_pending_offer(self, content):
+        pending = self.get_pending_offer()
+        if pending is None or not isinstance(content, dict):
+            return False
+        for key in ("service_id", "modality", "user_id", "transport_id", "customer_id"):
+            if content.get(key) is None:
+                return False
+        return (
+            str(content["service_id"]) == pending["service_id"]
+            and content["modality"] == pending["modality"]
+            and self.agent.bare_jid(content["user_id"]) == pending["user_id"]
+            and self.agent.bare_jid(content["transport_id"]) == pending["transport_id"]
+            and self.agent.bare_jid(content["customer_id"]) == pending["customer_id"]
+        )
+
+    def activate_pending_offer(self, content):
+        if not self.message_matches_pending_offer(content):
+            return None
+        pending = dict(self.get_pending_offer())
+        setattr(self.agent, self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR, pending)
+        self.clear_pending_offer()
+        return pending
+
+    def get_active_message_context(self):
+        return getattr(
+            self.agent,
+            self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR,
+            None,
+        )
+
+    def active_service_message_details(self):
+        active = self.get_active_message_context()
+        if active is None:
+            return None
+        return {
+            "service_id": active["service_id"],
+            "modality": active["modality"],
+            "user_id": active["user_id"],
+            "transport_id": active["transport_id"],
+        }
+
+    def add_active_service_identifiers(self, content=None):
+        details = self.active_service_message_details()
+        if details is None:
+            return dict(content or {})
+        result = dict(content or {})
+        result.update(details)
+        return result
+
+    def message_matches_active_service(self, content):
+        active = self.get_active_message_context()
+        if active is None or not isinstance(content, dict):
+            return False
+        for key in ("service_id", "modality", "user_id", "transport_id"):
+            if content.get(key) is None:
+                return False
+        return (
+            str(content["service_id"]) == active["service_id"]
+            and content["modality"] == active["modality"]
+            and self.agent.bare_jid(content["user_id"]) == active["user_id"]
+            and self.agent.bare_jid(content["transport_id"]) == active["transport_id"]
+        )
+
+    def clear_active_message_context(self):
+        setattr(self.agent, self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR, None)
+        return True
 
     async def on_start(self):
         logger.debug(
@@ -101,6 +647,7 @@ class DeliveryStrategyBehaviour(State):
         """
         if content is None:
             content = {}
+        content = self.add_active_service_identifiers(content)
         logger.info(
             "Agent[{}]: The agent sent cancel proposal to [{}]".format(
                 self.agent.name, agent_id
@@ -124,6 +671,7 @@ class DeliveryStrategyBehaviour(State):
         """
         if data is None:
             data = {}
+        data = self.add_active_service_identifiers(data)
         msg = Message()
         msg.to = customer_id
         msg.set_metadata("protocol", REQUEST_PROTOCOL)
@@ -147,6 +695,7 @@ class DeliveryStrategyBehaviour(State):
         )
         if data is None:
             data = {}
+        data = self.add_active_service_identifiers(data)
         reply = Message()
         reply.to = customer_id
         reply.set_metadata("protocol", REQUEST_PROTOCOL)
@@ -195,22 +744,21 @@ class DeliveryWaitingState(DeliveryStrategyBehaviour):
         content = json.loads(msg.body)
         performative = msg.get_metadata("performative")
         if performative == REQUEST_PERFORMATIVE:
+            if self.store_pending_offer(content) is None:
+                logger.warning(
+                    "Agent[{}]: Ignoring request without valid schema-1.0 identifiers.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_WAITING)
+                return
 
-            # New statistics
-            # Event 1: Customer Request Reception
-            self.agent.events_store.emit(
-                event_type="customer_request_reception",
-                details={}
+
+
+            await self.send_proposal(
+                content["customer_id"],
+                self.pending_offer_message_details(),
             )
-
-            # New statistics
-            # Event 2: Transport Offer
-            self.agent.events_store.emit(
-                event_type="transport_offer",
-                details={}
-            )
-
-            await self.send_proposal(content["customer_id"], {})
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
             return
 
@@ -243,20 +791,35 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
         content = json.loads(msg.body)
         performative = msg.get_metadata("performative")
         if performative == ACCEPT_PERFORMATIVE:
+            if not self.message_matches_pending_offer(content):
+                logger.warning(
+                    "Agent[{}]: Ignoring stale or mismatched acceptance.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+                return
+            active = self.activate_pending_offer(content)
             # Handle acceptance by the customer or station
             try:
+                context = self.create_service_context(
+                    service_id=active["service_id"],
+                    user_id=active["user_id"],
+                    transport_id=active["transport_id"],
+                    origin=active["origin"],
+                    destination=active["destination"],
+                    emit_requested=False,
+                )
+                if context is None:
+                    raise RuntimeError("Unable to create Delivery metrics service context.")
+                if not self.assign_service(self.agent.jid):
+                    raise RuntimeError("Unable to emit Delivery service assignment.")
                 logger.debug(
                     "Agent[{}]: The agent got accept from [{}]".format(
                         self.agent.name, content["customer_id"]
                     )
                 )
 
-                # New statistics
-                # Event 3: Transport Offer Acceptance
-                self.agent.events_store.emit(
-                    event_type="transport_offer_acceptance",
-                    details={}
-                )
 
                 await self.inform_customer(
                     customer_id=content["customer_id"], status=TRANSPORT_MOVING_TO_CUSTOMER
@@ -281,13 +844,12 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
                     content["origin"]
                 )
 
-                self.agent.events_store.emit(
-                    event_type="travel_to_pickup",
-                    details={
-                        "distance": distance,
-                        "duration": osrm_duration,
-                    },
-                )
+                if not self.set_pending_movement("approach", distance):
+                    logger.warning(
+                        "Agent[{}]: Could not register Delivery approach movement.".format(
+                            self.agent.name
+                        )
+                    )
 
                 self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
                 self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
@@ -301,7 +863,17 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
                     )
                 )
 
-                await self.cancel_proposal(content["customer_id"])
+                self.fail_service("approach_route_failed")
+                self.discard_pending_movement()
+                await self.cancel_proposal(
+                    content["customer_id"],
+                    {
+                        "terminal_status": "failed",
+                        "failure_reason": "approach_route_failed",
+                    },
+                )
+                self.clear_service_context()
+                self.clear_active_message_context()
                 self.agent.remove_assigned_customer()
                 self.agent.status = TRANSPORT_WAITING
                 self.agent.set_available()
@@ -310,6 +882,8 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
 
             except AlreadyInDestination:
 
+                self.set_pending_movement("approach", 0)
+                self.complete_pending_movement()
                 await self.inform_customer(
                     customer_id=content["customer_id"], status=TRANSPORT_IN_CUSTOMER_PLACE
                 )
@@ -324,7 +898,17 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
                     )
                 )
 
-                await self.cancel_proposal(content["customer_id"])
+                self.fail_service("approach_unexpected_error")
+                self.discard_pending_movement()
+                await self.cancel_proposal(
+                    content["customer_id"],
+                    {
+                        "terminal_status": "failed",
+                        "failure_reason": "approach_unexpected_error",
+                    },
+                )
+                self.clear_service_context()
+                self.clear_active_message_context()
                 self.agent.remove_assigned_customer()
                 self.agent.status = TRANSPORT_WAITING
                 self.agent.set_available()
@@ -332,9 +916,18 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
                 return
 
         elif performative == REFUSE_PERFORMATIVE:
+            if not self.message_matches_pending_offer(content):
+                logger.warning(
+                    "Agent[{}]: Ignoring stale or mismatched refusal.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+                return
             logger.debug(
                 "Agent[{}]: The agent got refusal from customer/station".format(self.agent.name)
             )
+            self.clear_pending_offer()
             self.set_next_state(TRANSPORT_WAITING)
             return
 
@@ -375,12 +968,36 @@ class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
                         return
 
                     elif performative == REFUSE_PERFORMATIVE:
+                        try:
+                            content = json.loads(msg.body)
+                        except (json.JSONDecodeError, TypeError):
+                            self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
+                            return
+                        if not self.message_matches_active_service(content):
+                            logger.warning(
+                                "Agent[{}]: Ignoring stale refusal while moving to customer.".format(
+                                    self.agent.name
+                                )
+                            )
+                            self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
+                            return
                         logger.debug(
                             "Agent[{}]: The agent got refusal from customer/station".format(
                                 self.agent.name
                             )
                         )
 
+                        self.fail_service("customer_cancelled_before_pickup")
+                        self.discard_pending_movement()
+                        await self.cancel_proposal(
+                            customer_id,
+                            {
+                                "terminal_status": "failed",
+                                "failure_reason": "customer_cancelled_before_pickup",
+                            },
+                        )
+                        self.clear_service_context()
+                        self.clear_active_message_context()
                         self.agent.remove_assigned_customer()
                         self.agent.status = TRANSPORT_WAITING
                         self.agent.set_available()
@@ -395,6 +1012,7 @@ class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
                         self.agent.agent_id, self.agent.status
                     )
                 )
+                self.complete_pending_movement()
                 await self.inform_customer(
                     customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE
                 )
@@ -408,7 +1026,17 @@ class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
                     self.agent.name, customer_id
                 )
             )
-            await self.cancel_proposal(customer_id)
+            self.fail_service("approach_route_failed")
+            self.discard_pending_movement()
+            await self.cancel_proposal(
+                customer_id,
+                {
+                    "terminal_status": "failed",
+                    "failure_reason": "approach_route_failed",
+                },
+            )
+            self.clear_service_context()
+            self.clear_active_message_context()
             self.agent.remove_assigned_customer()
             self.agent.status = TRANSPORT_WAITING
             self.agent.set_available()
@@ -417,6 +1045,9 @@ class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
 
         except AlreadyInDestination:
 
+            if not self.complete_pending_movement():
+                self.set_pending_movement("approach", 0)
+                self.complete_pending_movement()
             await self.inform_customer(
                 customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE
             )
@@ -427,7 +1058,17 @@ class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
             logger.error(
                 "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
             )
-            await self.cancel_proposal(customer_id)
+            self.fail_service("approach_unexpected_error")
+            self.discard_pending_movement()
+            await self.cancel_proposal(
+                customer_id,
+                {
+                    "terminal_status": "failed",
+                    "failure_reason": "approach_unexpected_error",
+                },
+            )
+            self.clear_service_context()
+            self.clear_active_message_context()
             self.agent.remove_assigned_customer()
             self.agent.status = TRANSPORT_WAITING
             self.agent.set_available()
@@ -459,6 +1100,15 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
         content = json.loads(msg.body)
         performative = msg.get_metadata("performative")
 
+        if performative in (INFORM_PERFORMATIVE, CANCEL_PERFORMATIVE) and not self.message_matches_active_service(content):
+            logger.warning(
+                "Agent[{}]: Ignoring stale message at delivery collection.".format(
+                    self.agent.name
+                )
+            )
+            self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
+            return
+
         if performative == INFORM_PERFORMATIVE:
             if "status" in content:
                 status = content["status"]
@@ -477,6 +1127,8 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
                         self.agent.add_customer_in_transport(
                             customer_id=customer_id, dest=dest
                         )
+                        if not self.start_service(self.agent.jid):
+                            raise RuntimeError("Unable to emit Delivery service start.")
                         #await self.agent.remove_assigned_taxicustomer()
 
                         await self.unassigned_customer()
@@ -485,12 +1137,6 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
                             "Agent[{}]: The agent on route to [{}] destination.".format(self.agent.name, customer_id)
                         )
 
-                        # New statistics
-                        # Event 5: Customer Pickup
-                        self.agent.events_store.emit(
-                            event_type="customer_pickup",
-                            details={},
-                        )
 
                         (
                             distance,
@@ -498,19 +1144,29 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
                             speed_based_duration,
                         ) = await self.agent.move_to(dest)
 
-                        self.agent.events_store.emit(
-                            event_type="travel_to_destination",
-                            details={
-                                "distance": distance,
-                            },
-                        )
+                        if not self.set_pending_movement("service", distance):
+                            logger.warning(
+                                "Agent[{}]: Could not register Delivery service movement.".format(
+                                    self.agent.name
+                                )
+                            )
 
                         self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
                         self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
 
                     except PathRequestException:
 
-                        await self.cancel_customer(customer_id=customer_id)
+                        self.fail_service("service_route_failed")
+                        self.discard_pending_movement()
+                        await self.cancel_customer(
+                            customer_id=customer_id,
+                            data={
+                                "terminal_status": "failed",
+                                "failure_reason": "service_route_failed",
+                            },
+                        )
+                        self.clear_service_context()
+                        self.clear_active_message_context()
 
                         if customer_id in self.agent.get("current_customer"):
                             self.agent.remove_customer_in_transport(customer_id)
@@ -521,6 +1177,11 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
                         return
 
                     except AlreadyInDestination:
+                        self.set_pending_movement("service", 0)
+                        self.complete_pending_movement()
+                        await self.inform_customer(
+                            customer_id=customer_id, status=CUSTOMER_IN_DEST
+                        )
                         self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
                         self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
                         return
@@ -533,9 +1194,21 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
                             )
                         )
 
+                        self.fail_service("service_unexpected_error")
+                        self.discard_pending_movement()
+                        await self.cancel_customer(
+                            customer_id=customer_id,
+                            data={
+                                "terminal_status": "failed",
+                                "failure_reason": "service_unexpected_error",
+                            },
+                        )
+
                         if customer_id in self.agent.get("current_customer"):
                             self.agent.remove_customer_in_transport(customer_id)
 
+                        self.clear_service_context()
+                        self.clear_active_message_context()
                         self.agent.status = TRANSPORT_WAITING
                         self.agent.set_available()
                         self.set_next_state(TRANSPORT_WAITING)
@@ -543,6 +1216,10 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
 
 
         elif performative == CANCEL_PERFORMATIVE:
+            self.fail_service("customer_cancelled_at_pickup")
+            self.discard_pending_movement()
+            self.clear_service_context()
+            self.clear_active_message_context()
 
             if self.agent.get("assigned_customer"):
                 self.agent.remove_assigned_customer()
@@ -593,13 +1270,8 @@ class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
                     )
                 )
 
-                # New statistics
-                # Event 6: Trip completion
-                self.agent.events_store.emit(
-                    event_type="trip_completion",
-                    details={},
-                )
 
+                self.complete_pending_movement()
                 await self.inform_customer(
                     customer_id=customer_id, status=CUSTOMER_IN_DEST
                 )
@@ -612,7 +1284,17 @@ class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
                     self.agent.name, customer_id
                 )
             )
-            await self.cancel_proposal(customer_id)
+            self.fail_service("service_route_failed")
+            self.discard_pending_movement()
+            await self.cancel_customer(
+                customer_id=customer_id,
+                data={
+                    "terminal_status": "failed",
+                    "failure_reason": "service_route_failed",
+                },
+            )
+            self.clear_service_context()
+            self.clear_active_message_context()
 
             if customer_id in self.agent.get("current_customer"):
                 self.agent.remove_customer_in_transport(customer_id)
@@ -624,13 +1306,9 @@ class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
 
         except AlreadyInDestination:
 
-            # New statistics
-            # Event 6: Trip completion
-            self.agent.events_store.emit(
-                event_type="trip_completion",
-                details={},
-            )
-
+            if not self.complete_pending_movement():
+                self.set_pending_movement("service", 0)
+                self.complete_pending_movement()
             await self.inform_customer(
                 customer_id=customer_id, status=CUSTOMER_IN_DEST
             )
@@ -645,7 +1323,17 @@ class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
                 )
             )
 
-            await self.cancel_proposal(customer_id)
+            self.fail_service("service_unexpected_error")
+            self.discard_pending_movement()
+            await self.cancel_customer(
+                customer_id=customer_id,
+                data={
+                    "terminal_status": "failed",
+                    "failure_reason": "service_unexpected_error",
+                },
+            )
+            self.clear_service_context()
+            self.clear_active_message_context()
 
             if customer_id in self.agent.get("current_customer"):
                 self.agent.remove_customer_in_transport(customer_id)
@@ -682,13 +1370,30 @@ class DeliveryArrivedAtCustomerDestState(DeliveryStrategyBehaviour):
             content = json.loads(msg.body)
             performative = msg.get_metadata("performative")
 
+            if performative in (INFORM_PERFORMATIVE, CANCEL_PERFORMATIVE) and not self.message_matches_active_service(content):
+                logger.warning(
+                    "Agent[{}]: Ignoring stale message at delivery completion.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
+                return
+
             if performative == INFORM_PERFORMATIVE:
                 if "status" in content:
                     status = content["status"]
 
                     if status == CUSTOMER_IN_DEST:
 
+                        if not self.mark_service_completed():
+                            logger.warning(
+                                "Agent[{}]: Could not mirror completed Delivery service.".format(
+                                    self.agent.name
+                                )
+                            )
                         self.agent.remove_customer_in_transport(customer_id)
+                        self.clear_service_context()
+                        self.clear_active_message_context()
 
                         self.agent.increment_completed_assignments()
                         self.agent.set_available()
@@ -704,6 +1409,10 @@ class DeliveryArrivedAtCustomerDestState(DeliveryStrategyBehaviour):
 
 
             elif performative == CANCEL_PERFORMATIVE:
+                self.fail_service("customer_cancelled_at_destination")
+                self.discard_pending_movement()
+                self.clear_service_context()
+                self.clear_active_message_context()
 
                 if customer_id in self.agent.get("current_customer"):
                     self.agent.remove_customer_in_transport(customer_id)

@@ -1,3 +1,5 @@
+import math
+from uuid import uuid4
 import json
 
 from loguru import logger
@@ -59,6 +61,711 @@ class ElectricTaxiStrategyBehaviour(State):
             Abstract method that must be implemented by subclasses.
     """
 
+
+    METRICS_MODALITY = "electric_taxi"
+    _METRICS_SERVICE_CONTEXT_ATTR = "_metrics_service_context"
+    _METRICS_PENDING_MOVEMENT_ATTR = "_metrics_pending_movement"
+    _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
+
+    def _metrics_modality(self):
+        modality = self.METRICS_MODALITY
+        if modality is None:
+            raise ValueError(
+                "A concrete metrics strategy must declare METRICS_MODALITY."
+            )
+        return modality
+
+    def get_service_context(self):
+        return getattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            None,
+        )
+
+    def create_service_context(
+        self,
+        service_id=None,
+        user_id=None,
+        transport_id=None,
+        origin=None,
+        destination=None,
+        emit_requested=False,
+    ):
+        current = self.get_service_context()
+        if current is not None:
+            requested_id = str(service_id) if service_id is not None else None
+            if (
+                current.get("terminal_status") is None
+                and (
+                    requested_id is None
+                    or current.get("service_id") == requested_id
+                )
+            ):
+                return current
+            logger.warning(
+                "Agent[{}]: Refusing to replace metrics service context [{}] "
+                "with [{}] before it is cleared.".format(
+                    self.agent.name,
+                    current.get("service_id"),
+                    requested_id,
+                )
+            )
+            return None
+
+        if service_id is None:
+            if not emit_requested:
+                logger.warning(
+                    "Agent[{}]: A transport-side metrics context requires "
+                    "the customer-created service_id.".format(self.agent.name)
+                )
+                return None
+            service_id = str(uuid4())
+        else:
+            service_id = str(service_id)
+
+        if not emit_requested and user_id is None:
+            logger.warning(
+                "Agent[{}]: A transport-side metrics context requires user_id.".format(
+                    self.agent.name
+                )
+            )
+            return None
+
+        context = {
+            "service_id": service_id,
+            "modality": self._metrics_modality(),
+            "user_id": self.agent.bare_jid(
+                user_id if user_id is not None else self.agent.jid
+            ),
+            "transport_id": self.agent.bare_jid(transport_id),
+            "origin": origin,
+            "destination": destination,
+            "requested": True,
+            "request_emitted": False,
+            "assigned": False,
+            "started": False,
+            "terminal_status": None,
+            "pending_movement": None,
+        }
+        setattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            context,
+        )
+
+        if emit_requested:
+            details = self._service_event_details(context)
+            details["origin"] = origin
+            details["destination"] = destination
+            self.agent.events_store.emit(
+                event_type="service_requested",
+                details=details,
+            )
+            context["request_emitted"] = True
+
+        return context
+
+    def get_or_create_service_context(self, **kwargs):
+        context = self.get_service_context()
+        service_id = kwargs.get("service_id")
+        if context is not None:
+            if (
+                service_id is None
+                or context.get("service_id") == str(service_id)
+            ):
+                return context
+            logger.warning(
+                "Agent[{}]: Message/service context mismatch: [{}] != [{}].".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                    service_id,
+                )
+            )
+            return None
+        return self.create_service_context(**kwargs)
+
+    def clear_service_context(self):
+        context = self.get_service_context()
+        if context is None:
+            return True
+        if context.get("terminal_status") is None:
+            logger.warning(
+                "Agent[{}]: Refusing to clear unfinished metrics service [{}].".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+        if context.get("pending_movement") is not None:
+            logger.warning(
+                "Agent[{}]: Refusing to clear metrics service [{}] with a "
+                "pending movement.".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+        setattr(
+            self.agent,
+            self._METRICS_SERVICE_CONTEXT_ATTR,
+            None,
+        )
+        return True
+
+    def _service_event_details(self, context=None):
+        context = context or self.get_service_context()
+        if context is None:
+            return None
+        return {
+            "modality": context["modality"],
+            "service_id": context["service_id"],
+            "user_id": context.get("user_id"),
+            "transport_id": context.get("transport_id"),
+        }
+
+    def add_service_identifiers(
+        self,
+        content=None,
+        context=None,
+        transport_id=None,
+    ):
+        context = context or self.get_service_context()
+        if context is None:
+            raise ValueError("Cannot propagate identifiers without a service context.")
+        result = dict(content or {})
+        if transport_id is not None:
+            context["transport_id"] = self.agent.bare_jid(transport_id)
+        result.update(self._service_event_details(context))
+        return result
+
+    def message_matches_service(self, content, context=None):
+        context = context or self.get_service_context()
+        if context is None or not isinstance(content, dict):
+            return False
+
+        for key in ("service_id", "modality", "user_id"):
+            if content.get(key) is None:
+                return False
+
+        if str(content["service_id"]) != context["service_id"]:
+            return False
+        if content["modality"] != context["modality"]:
+            return False
+        if self.agent.bare_jid(content["user_id"]) != context.get("user_id"):
+            return False
+
+        expected_transport = context.get("transport_id")
+        received_transport = content.get("transport_id")
+        if expected_transport is not None:
+            if received_transport is None:
+                return False
+            if self.agent.bare_jid(received_transport) != expected_transport:
+                return False
+        return True
+
+    def mark_service_assigned(self, transport_id):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        transport_id = self.agent.bare_jid(transport_id)
+        if transport_id is None:
+            return False
+        if context.get("assigned"):
+            return context.get("transport_id") == transport_id
+        context["transport_id"] = transport_id
+        context["assigned"] = True
+        return True
+
+    def mark_service_started(self, transport_id=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if transport_id is not None:
+            transport_id = self.agent.bare_jid(transport_id)
+            if (
+                context.get("transport_id") is not None
+                and context.get("transport_id") != transport_id
+            ):
+                return False
+            context["transport_id"] = transport_id
+        if context.get("transport_id") is None:
+            return False
+        context["assigned"] = True
+        context["started"] = True
+        return True
+
+    def mark_service_completed(self):
+        """Mirror the successful terminal event emitted by the customer."""
+        context = self.get_service_context()
+        if context is None:
+            return False
+        if context.get("terminal_status") is not None:
+            return context.get("terminal_status") == "completed"
+        if not context.get("started"):
+            return False
+        context["terminal_status"] = "completed"
+        return True
+
+    def assign_service(self, transport_id, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        transport_id = self.agent.bare_jid(transport_id)
+        if transport_id is None:
+            return False
+        if context.get("assigned"):
+            return False
+
+        context["transport_id"] = transport_id
+        context["assigned"] = True
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_assigned",
+            details=details,
+        )
+        return True
+
+    def start_service(self, transport_id=None, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if context.get("started"):
+            return False
+        if transport_id is not None:
+            context["transport_id"] = self.agent.bare_jid(transport_id)
+        if context.get("transport_id") is None:
+            return False
+
+        context["started"] = True
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_started",
+            details=details,
+        )
+        return True
+
+    def complete_service(self, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+        if not context.get("started"):
+            logger.warning(
+                "Agent[{}]: Refusing to complete service [{}] before it starts.".format(
+                    self.agent.name,
+                    context.get("service_id"),
+                )
+            )
+            return False
+
+        context["terminal_status"] = "completed"
+        details = self._service_event_details(context)
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_completed",
+            details=details,
+        )
+        return True
+
+    def fail_service(self, failure_reason=None, extra_details=None):
+        context = self.get_service_context()
+        if context is None or context.get("terminal_status") is not None:
+            return False
+
+        context["terminal_status"] = "failed"
+        details = self._service_event_details(context)
+        if failure_reason is not None:
+            details["failure_reason"] = failure_reason
+        details.update(extra_details or {})
+        self.agent.events_store.emit(
+            event_type="service_failed",
+            details=details,
+        )
+        return True
+
+    def set_pending_movement(
+        self,
+        phase,
+        distance_m,
+        extra_details=None,
+        require_service=True,
+    ):
+        if phase not in self._METRICS_MOVEMENT_PHASES:
+            raise ValueError("Invalid metrics movement phase: {}".format(phase))
+        if (
+            isinstance(distance_m, bool)
+            or not isinstance(distance_m, (int, float))
+            or not math.isfinite(distance_m)
+            or distance_m < 0
+        ):
+            raise ValueError("distance_m must be a finite non-negative number.")
+
+        context = self.get_service_context()
+        if require_service and context is None:
+            return False
+        if getattr(self.agent, self._METRICS_PENDING_MOVEMENT_ATTR, None) is not None:
+            logger.warning(
+                "Agent[{}]: Refusing to overwrite a pending metrics movement.".format(
+                    self.agent.name
+                )
+            )
+            return False
+
+        details = {
+            "modality": self._metrics_modality(),
+            "transport_id": None,
+            "user_id": None,
+            "service_id": None,
+            "phase": phase,
+            "distance_m": float(distance_m),
+        }
+        if context is not None:
+            details.update(self._service_event_details(context))
+        else:
+            details["transport_id"] = self.agent.bare_jid(self.agent.jid)
+        details.update(extra_details or {})
+
+        pending = {"details": details}
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            pending,
+        )
+        if context is not None:
+            context["pending_movement"] = pending
+        return True
+
+    def complete_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+
+        self.agent.events_store.emit(
+            event_type="movement_completed",
+            details=dict(pending["details"]),
+        )
+        context = self.get_service_context()
+        if context is not None and context.get("pending_movement") is pending:
+            context["pending_movement"] = None
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
+
+    def discard_pending_movement(self):
+        pending = getattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        if pending is None:
+            return False
+        context = self.get_service_context()
+        if context is not None and context.get("pending_movement") is pending:
+            context["pending_movement"] = None
+        setattr(
+            self.agent,
+            self._METRICS_PENDING_MOVEMENT_ATTR,
+            None,
+        )
+        return True
+
+
+    _METRICS_CHARGING_CONTEXT_ATTR = "_metrics_charging_context"
+
+    def get_charging_context(self):
+        return getattr(
+            self.agent,
+            self._METRICS_CHARGING_CONTEXT_ATTR,
+            None,
+        )
+
+    def create_charging_context(self, station_id, charging_id=None):
+        current = self.get_charging_context()
+        if current is not None:
+            requested_id = str(charging_id) if charging_id is not None else None
+            if (
+                not current.get("completed")
+                and (
+                    requested_id is None
+                    or current.get("charging_id") == requested_id
+                )
+            ):
+                return current
+            logger.warning(
+                "Agent[{}]: Refusing to replace charging context [{}] before "
+                "it is cleared.".format(
+                    self.agent.name,
+                    current.get("charging_id"),
+                )
+            )
+            return None
+        if station_id is None:
+            return None
+        context = {
+            "charging_id": str(charging_id) if charging_id is not None else str(uuid4()),
+            "modality": self.METRICS_MODALITY,
+            "transport_id": self.agent.bare_jid(self.agent.jid),
+            "station_id": self.agent.bare_jid(station_id),
+            "arrived": False,
+            "started": False,
+            "completed": False,
+        }
+        setattr(
+            self.agent,
+            self._METRICS_CHARGING_CONTEXT_ATTR,
+            context,
+        )
+        return context
+
+    def clear_charging_context(self):
+        context = self.get_charging_context()
+        if context is None:
+            return True
+        if not context.get("completed"):
+            logger.warning(
+                "Agent[{}]: Refusing to clear unfinished charging session [{}].".format(
+                    self.agent.name,
+                    context.get("charging_id"),
+                )
+            )
+            return False
+        setattr(
+            self.agent,
+            self._METRICS_CHARGING_CONTEXT_ATTR,
+            None,
+        )
+        return True
+
+    def abandon_charging_context(self):
+        """Drop an unfinished internal charging context without inventing a public failure.
+
+        Any already-emitted charging milestones remain in the log and will therefore
+        be reconstructed as an unfinished charging session. A later station attempt
+        receives a new charging_id.
+        """
+        context = self.get_charging_context()
+        if context is None:
+            return True
+        setattr(self.agent, self._METRICS_CHARGING_CONTEXT_ATTR, None)
+        return True
+
+    def _charging_event_details(self, context=None):
+        context = context or self.get_charging_context()
+        if context is None:
+            return None
+        return {
+            "modality": context["modality"],
+            "charging_id": context["charging_id"],
+            "transport_id": context["transport_id"],
+            "station_id": context["station_id"],
+        }
+
+    def charging_message_matches_context(
+        self,
+        content,
+        sender=None
+    ):
+        """Validate that a charging message belongs to the active station."""
+
+        context = self.get_charging_context()
+
+        if context is None or not isinstance(content, dict):
+            return False
+
+        expected_station = context.get("station_id")
+
+        #
+        # The XMPP sender is the authoritative station identity.
+        #
+        if sender is not None:
+            return (
+                self.agent.bare_jid(sender)
+                == expected_station
+            )
+
+        #
+        # Backward-compatible fallback for messages where
+        # sender is not available to the caller.
+        #
+        station_id = content.get("station_id")
+
+        if station_id is None:
+            return True
+
+        return (
+            self.agent.bare_jid(station_id)
+            == expected_station
+        )
+
+    def charging_arrived(self):
+        context = self.get_charging_context()
+        if context is None or context.get("arrived"):
+            return False
+        context["arrived"] = True
+        self.agent.events_store.emit(
+            event_type="charging_arrived",
+            details=self._charging_event_details(context),
+        )
+        return True
+
+    def charging_started(self):
+        context = self.get_charging_context()
+        if context is None or context.get("started") or not context.get("arrived"):
+            return False
+        context["started"] = True
+        self.agent.events_store.emit(
+            event_type="charging_started",
+            details=self._charging_event_details(context),
+        )
+        return True
+
+    def charging_completed(self):
+        context = self.get_charging_context()
+        if context is None or context.get("completed") or not context.get("started"):
+            return False
+        context["completed"] = True
+        self.agent.events_store.emit(
+            event_type="charging_completed",
+            details=self._charging_event_details(context),
+        )
+        return True
+
+
+    _METRICS_PENDING_OFFER_ATTR = "_metrics_pending_offer"
+    _METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR = "_metrics_active_message_context"
+
+    def _validate_metrics_service_request(self, content):
+        """Validate a strict schema-1.0 Taxi-like request before proposing."""
+        if not isinstance(content, dict):
+            return False
+        for key in (
+            "service_id",
+            "modality",
+            "user_id",
+            "customer_id",
+            "origin",
+            "dest",
+        ):
+            if content.get(key) is None:
+                return False
+        if content.get("modality") != self._metrics_modality():
+            return False
+        if self.agent.bare_jid(content.get("user_id")) != self.agent.bare_jid(
+            content.get("customer_id")
+        ):
+            return False
+        if content.get("transport_id") is not None:
+            return False
+        return True
+
+    def store_pending_offer(self, content):
+        if not self._validate_metrics_service_request(content):
+            return None
+        pending = {
+            "service_id": str(content["service_id"]),
+            "modality": content["modality"],
+            "user_id": self.agent.bare_jid(content["user_id"]),
+            "customer_id": self.agent.bare_jid(content["customer_id"]),
+            "transport_id": self.agent.bare_jid(self.agent.jid),
+            "origin": content["origin"],
+            "destination": content["dest"],
+        }
+        setattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, pending)
+        return pending
+
+    def get_pending_offer(self):
+        return getattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
+
+    def clear_pending_offer(self):
+        setattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
+        return True
+
+    def pending_offer_message_details(self):
+        pending = self.get_pending_offer()
+        if pending is None:
+            return None
+        return {
+            "service_id": pending["service_id"],
+            "modality": pending["modality"],
+            "user_id": pending["user_id"],
+            "transport_id": pending["transport_id"],
+        }
+
+    def message_matches_pending_offer(self, content):
+        pending = self.get_pending_offer()
+        if pending is None or not isinstance(content, dict):
+            return False
+        for key in ("service_id", "modality", "user_id", "transport_id", "customer_id"):
+            if content.get(key) is None:
+                return False
+        return (
+            str(content["service_id"]) == pending["service_id"]
+            and content["modality"] == pending["modality"]
+            and self.agent.bare_jid(content["user_id"]) == pending["user_id"]
+            and self.agent.bare_jid(content["transport_id"]) == pending["transport_id"]
+            and self.agent.bare_jid(content["customer_id"]) == pending["customer_id"]
+        )
+
+    def activate_pending_offer(self, content):
+        if not self.message_matches_pending_offer(content):
+            return None
+        pending = dict(self.get_pending_offer())
+        setattr(self.agent, self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR, pending)
+        self.clear_pending_offer()
+        return pending
+
+    def get_active_message_context(self):
+        return getattr(
+            self.agent,
+            self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR,
+            None,
+        )
+
+    def active_service_message_details(self):
+        active = self.get_active_message_context()
+        if active is None:
+            return None
+        return {
+            "service_id": active["service_id"],
+            "modality": active["modality"],
+            "user_id": active["user_id"],
+            "transport_id": active["transport_id"],
+        }
+
+    def add_active_service_identifiers(self, content=None):
+        details = self.active_service_message_details()
+        if details is None:
+            return dict(content or {})
+        result = dict(content or {})
+        result.update(details)
+        return result
+
+    def message_matches_active_service(self, content):
+        active = self.get_active_message_context()
+        if active is None or not isinstance(content, dict):
+            return False
+        for key in ("service_id", "modality", "user_id", "transport_id"):
+            if content.get(key) is None:
+                return False
+        return (
+            str(content["service_id"]) == active["service_id"]
+            and content["modality"] == active["modality"]
+            and self.agent.bare_jid(content["user_id"]) == active["user_id"]
+            and self.agent.bare_jid(content["transport_id"]) == active["transport_id"]
+        )
+
+    def clear_active_message_context(self):
+        setattr(self.agent, self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR, None)
+        return True
+
     async def on_start(self):
         """
                 Logs the beginning of the strategy execution.
@@ -100,29 +807,27 @@ class ElectricTaxiStrategyBehaviour(State):
             station_id
         )
 
+    def check_and_decrease_autonomy(
+        self,
+        customer_orig,
+        customer_dest
+    ):
 
+        travel_km = self.agent.calculate_service_km(
+            customer_orig,
+            customer_dest
+        )
 
-    def check_and_decrease_autonomy(self, customer_orig, customer_dest):
-        """
-        Verifies if the ttransport has enough autonomy for a trip and decreases autonomy if possible.
-
-        Args:
-            customer_orig (list): The customer's origin coordinates (x, y).
-            customer_dest (list): The customer's destination coordinates (x, y).
-
-        Returns:
-            bool: True if autonomy is sufficient and decreased, False otherwise.
-        """
-
-        if self.agent.has_enough_autonomy(customer_orig, customer_dest):
-            autonomy = self.agent.get_autonomy()
-            travel_km = self.agent.calculate_km_expense(
-                self.agent.get_position(), customer_orig, customer_dest
-            )
-            self.agent.decrease_autonomy_km(travel_km)
-            return True
-        else:
+        if not self.agent.has_enough_autonomy_km(
+            travel_km
+        ):
             return False
+
+        self.agent.decrease_autonomy_km(
+            travel_km
+        )
+
+        return True
 
     async def drop_station(self):
         """
@@ -195,6 +900,7 @@ class ElectricTaxiStrategyBehaviour(State):
         """
         if content is None:
             content = {}
+        content = self.add_active_service_identifiers(content)
         logger.info(
             "Agent[{}]: The agent sent cancel proposal to agent [{}]".format(
                 self.agent.name, agent_id
@@ -218,6 +924,7 @@ class ElectricTaxiStrategyBehaviour(State):
         """
         if data is None:
             data = {}
+        data = self.add_active_service_identifiers(data)
         msg = Message()
         msg.to = customer_id
         msg.set_metadata("protocol", REQUEST_PROTOCOL)
@@ -241,6 +948,7 @@ class ElectricTaxiStrategyBehaviour(State):
         )
         if data is None:
             data = {}
+        data = self.add_active_service_identifiers(data)
         reply = Message()
         reply.to = customer_id
         reply.set_metadata("protocol", REQUEST_PROTOCOL)
@@ -328,39 +1036,36 @@ class ElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
         content = json.loads(msg.body)
         performative = msg.get_metadata("performative")
         if performative == REQUEST_PERFORMATIVE:
+            if self.store_pending_offer(content) is None:
+                logger.warning(
+                    "Agent[{}]: Ignoring request without valid schema-1.0 identifiers.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_WAITING)
+                return
 
-            # New statistics
-            # Event 1: Customer Request Reception
-            self.agent.events_store.emit(
-                event_type="customer_request_reception",
-                details={}
-            )
 
             if not self.agent.has_enough_autonomy_for_service(
                 content["origin"],
                 content["dest"]
             ):
 
-                # New statistics
-                # Event 1e: Need for Service
-                self.agent.events_store.emit(
-                    event_type="transport_need_for_service",
-                    details={}
-                )
 
-                await self.cancel_proposal(content["customer_id"])
+                await self.cancel_proposal(
+                    content["customer_id"],
+                    self.pending_offer_message_details(),
+                )
+                self.clear_pending_offer()
                 self.set_next_state(TRANSPORT_NEEDS_CHARGING)
                 return
             else:
 
-                # New statistics
-                # Event 2: Transport Offer
-                self.agent.events_store.emit(
-                    event_type="transport_offer",
-                    details={}
-                )
 
-                await self.send_proposal(content["customer_id"], {})
+                await self.send_proposal(
+                    content["customer_id"],
+                    self.pending_offer_message_details(),
+                )
                 self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
                 return
         else:
@@ -368,425 +1073,290 @@ class ElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
             return
 
 class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the 'Needs Charging' state. The taxi is searching for or moving to a charging station.
-
-        Methods:
-            on_start(): Logs the transition to the 'Needs Charging' state.
-            run(): Manages the behavior of the taxi while it finds a charging station and handles exceptions.
-        """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_NEEDS_CHARGING
         self.agent.set_busy()
 
     async def run(self):
-
-        if (
-            self.agent.get_stations() is None
-            or self.agent.get_number_stations() < 1
-        ):
+        if self.agent.get_stations() is None or self.agent.get_number_stations() < 1:
             logger.info(
                 "Agent[{}]: The agent looking for a station.".format(
                     self.agent.name
                 )
             )
-
-            # New
             stations = await self.agent.get_list_agent_position(
                 self.agent.service_type,
                 self.agent.get_stations()
             )
             self.agent.set_stations(stations)
+
+            if not stations:
+                await self.agent.sleep(1)
+
             self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
-        else:
-            nearby_station_dest = self.agent.nearst_agent(
-                self.agent.get_stations(),
-                self.agent.get_position()
-            )
 
-            if nearby_station_dest is None:
-                logger.warning(
-                    "Agent[{}]: No charging station available.".format(
-                        self.agent.name
-                    )
-                )
-                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
-                return
+        nearby_station_dest = self.agent.nearst_agent(
+            self.agent.get_stations(),
+            self.agent.get_position()
+        )
 
-            self.agent.set_nearby_station(nearby_station_dest)
-            station_id = self.agent.get_nearby_station_id()
-            station_position = self.agent.get_nearby_station_position()
-
-            logger.info(
-                "Agent[{}]: The agent selected station [{}].".format(
-                    self.agent.name,
-                    station_id
-                )
-            )
-
-            try:
-                await self.go_to_the_station(
-                    station_id,
-                    station_position
-                )
-
-                travel_km = self.agent.calculate_distance_km(
-                    self.agent.get_position(),
-                    station_position
-                )
-
-                try:
-                    (
-                        distance,
-                        osrm_duration,
-                        _speed_based_duration,
-                    ) = await self.agent.move_to(
-                        station_position
-                    )
-
-                    self.agent.decrease_autonomy_km(
-                        travel_km
-                    )
-
-                    self.agent.events_store.emit(
-                        event_type="travel_to_station",
-                        details={
-                            "distance": distance,
-                            "duration": _speed_based_duration,
-                        },
-                    )
-
-                    self.agent.status = TRANSPORT_MOVING_TO_STATION
-                    self.set_next_state(TRANSPORT_MOVING_TO_STATION)
-                    return
-
-                except AlreadyInDestination:
-                    logger.debug(
-                        "Agent[{}]: The agent is already in the stations' ({}) position. . .".format(
-                            self.agent.name, self.agent.get_nearby_station_id()
-                        )
-                    )
-
-                    arguments = {
-                        "transport_need":
-                            self.agent.max_autonomy_km
-                            - self.agent.current_autonomy_km
-                    }
-
-                    content = {
-                        "service_name": self.agent.service_type,
-                        "object_type": "transport",
-                        "args": arguments
-                    }
-                    await self.request_access_station(
-                        station_id,
-                        content
-                    )
-
-                    self.agent.events_store.emit(
-                        event_type="arrival_at_station",
-                        details={}
-                    )
-
-                    self.agent.status = TRANSPORT_IN_STATION_PLACE
-                    self.set_next_state(TRANSPORT_IN_STATION_PLACE)
-                    return
-
-                return
-
-
-            except PathRequestException:
-                logger.error(
-                    "Agent[{}]: The agent could not get a path to station [{}].".format(
-                        self.agent.name,
-                        self.agent.get_nearby_station_id()
-                    )
-                )
-                await self.drop_station()
-                self.agent.status = TRANSPORT_NEEDS_CHARGING
-                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
-                return
-            except Exception as e:
-                logger.error(
-                    "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
-                )
-                await self.drop_station()
-                self.agent.status = TRANSPORT_NEEDS_CHARGING
-                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
-                return
-
-
-class ElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi is moving towards the charging station.
-
-        Methods:
-            on_start(): Logs the transition to 'Moving to Station'.
-            run(): Handles movement towards the charging station and transitions accordingly.
-        """
-    async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_MOVING_TO_STATION
-
-    async def run(self):
-        try:
-
-            if not self.agent.is_in_destination():
-
-                await self.agent.sleep(1)
-                self.set_next_state(TRANSPORT_MOVING_TO_STATION)
-            else:
-
-                arguments = {
-                    "transport_need":
-                        self.agent.max_autonomy_km
-                        - self.agent.current_autonomy_km
-                }
-
-                # New statistics
-                # Event 3e: Arrival at Station
-                self.agent.events_store.emit(
-                    event_type="arrival_at_station",
-                    details={}
-                )
-
-                content = {
-                    "service_name": self.agent.service_type,
-                    "object_type": "transport",
-                    "args": arguments
-                }
-                await self.request_access_station(
-                    self.agent.get_current_station(),
-                    content
-                )
-
-                self.agent.status = TRANSPORT_IN_STATION_PLACE
-                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
-
-        except AlreadyInDestination:
+        if nearby_station_dest is None:
             logger.warning(
-                "Agent[{}]: The agent has arrived to destination.".format(
-                    self.agent.agent_id
-                )
-            )
-
-            arguments = {
-                "transport_need":
-                    self.agent.max_autonomy_km
-                    - self.agent.current_autonomy_km
-            }
-
-            content = {
-                "service_name": self.agent.service_type,
-                "object_type": "transport",
-                "args": arguments
-            }
-
-            await self.request_access_station(
-                self.agent.get_current_station(),
-                content
-            )
-
-            # New statistics
-            # Event 3e: Arrival at Station
-            self.agent.events_store.emit(
-                event_type="arrival_at_station",
-                details={}
-            )
-
-            self.agent.status = TRANSPORT_IN_STATION_PLACE
-            self.set_next_state(TRANSPORT_IN_STATION_PLACE)
-            return
-        except PathRequestException:
-            logger.error(
-                "Agent[{}]: The agent could not get a path to customer. Cancelling...".format(
+                "Agent[{}]: No charging station available.".format(
                     self.agent.name
                 )
             )
+
+            await self.agent.sleep(1)
+
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
+
+        self.agent.set_nearby_station(nearby_station_dest)
+        station_id = self.agent.get_nearby_station_id()
+        station_position = self.agent.get_nearby_station_position()
+        logger.info("Agent[{}]: The agent selected station [{}].".format(self.agent.name, station_id))
+
+        # A charging_id is independent from service_id. It is created before travel
+        # so the same session is used for physical arrival/start/completion.
+        if self.get_charging_context() is None:
+            if self.create_charging_context(station_id) is None:
+                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+                return
+
+        try:
+            await self.go_to_the_station(station_id, station_position)
+            travel_km = self.agent.calculate_distance_km(
+                self.agent.get_position(), station_position
+            )
+            try:
+                distance, _osrm_duration, _speed_based_duration = await self.agent.move_to(
+                    station_position
+                )
+                if not self.set_pending_movement(
+                    "auxiliary", distance, require_service=False
+                ):
+                    raise RuntimeError("Unable to register charging-station movement.")
+                self.agent.decrease_autonomy_km(travel_km)
+                self.agent.status = TRANSPORT_MOVING_TO_STATION
+                self.set_next_state(TRANSPORT_MOVING_TO_STATION)
+                return
+            except AlreadyInDestination:
+                self.set_pending_movement("auxiliary", 0, require_service=False)
+                self.complete_pending_movement()
+                self.charging_arrived()
+                arguments = {
+                    "transport_need": self.agent.max_autonomy_km - self.agent.current_autonomy_km
+                }
+                await self.request_access_station(
+                    station_id,
+                    {"service_name": self.agent.service_type, "object_type": "transport", "args": arguments},
+                )
+                self.agent.status = TRANSPORT_IN_STATION_PLACE
+                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+                return
+        except PathRequestException:
+            logger.error("Agent[{}]: The agent could not get a path to station [{}].".format(self.agent.name, station_id))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
+            await self.drop_station()
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
+        except Exception as e:
+            logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name, e))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
             await self.drop_station()
             self.agent.status = TRANSPORT_NEEDS_CHARGING
             self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
 
+class ElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
+    async def on_start(self):
+        await super().on_start()
+        self.agent.status = TRANSPORT_MOVING_TO_STATION
+
+    async def _arrive_and_request(self):
+        station_id = self.agent.get_current_station()
+        self.complete_pending_movement()
+        if self.get_charging_context() is None:
+            if self.create_charging_context(station_id) is None:
+                return False
+        self.charging_arrived()
+        arguments = {
+            "transport_need": self.agent.max_autonomy_km - self.agent.current_autonomy_km
+        }
+        await self.request_access_station(
+            station_id,
+            {"service_name": self.agent.service_type, "object_type": "transport", "args": arguments},
+        )
+        self.agent.status = TRANSPORT_IN_STATION_PLACE
+        self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+        return True
+
+    async def run(self):
+        try:
+            if not self.agent.is_in_destination():
+                await self.agent.sleep(1)
+                self.set_next_state(TRANSPORT_MOVING_TO_STATION)
+                return
+            await self._arrive_and_request()
+            return
+        except AlreadyInDestination:
+            if not self.complete_pending_movement():
+                self.set_pending_movement("auxiliary", 0, require_service=False)
+            await self._arrive_and_request()
+            return
+        except PathRequestException:
+            logger.error("Agent[{}]: The agent could not complete the path to charging station.".format(self.agent.name))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
+            await self.drop_station()
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
+        except Exception as e:
+            logger.error("Unexpected charging-route error in [{}]: {}".format(self.agent.name, e))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
+            await self.drop_station()
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
 
 class ElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi is at the charging station, waiting for confirmation to begin charging.
-
-        Methods:
-            on_start(): Logs the transition to 'In Station Place'.
-            run(): Handles the taxi's behavior while waiting in the station queue.
-        """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_IN_STATION_PLACE
 
     async def run(self):
-
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_IN_STATION_PLACE)
             return
-        content = json.loads(msg.body)
+        try:
+            content = json.loads(msg.body)
+        except (json.JSONDecodeError, TypeError):
+            self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+            return
         performative = msg.get_metadata("performative")
         if performative == ACCEPT_PERFORMATIVE:
-            if content.get("station_id") is not None:
-                logger.debug(
-                    "Agent[{}]: The agent received a message with ACCEPT_PERFORMATIVE from [{}]".format(
-                        self.agent.name, content["station_id"]
-                    )
-                )
-
-                # New statistics
-                # Event 4e: Wait for Service
-                self.agent.events_store.emit(
-                    event_type="wait_for_service",
-                    details={}
-                )
-
-                self.agent.status = TRANSPORT_IN_WAITING_LIST
-                self.set_next_state(TRANSPORT_IN_WAITING_LIST)
-
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                logger.warning("Agent[{}]: Ignoring charging-station ACCEPT with mismatched station.".format(self.agent.name))
+                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
                 return
-
-
-        elif performative == REFUSE_PERFORMATIVE:
+            self.agent.status = TRANSPORT_IN_WAITING_LIST
+            self.set_next_state(TRANSPORT_IN_WAITING_LIST)
+            return
+        if performative == REFUSE_PERFORMATIVE:
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+                return
+            # The already-emitted arrival remains an unfinished charging session.
+            self.abandon_charging_context()
             await self.drop_station()
             self.agent.status = TRANSPORT_NEEDS_CHARGING
             self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
-
-        else:
-
-            self.set_next_state(TRANSPORT_IN_STATION_PLACE)
-            return
-
+        self.set_next_state(TRANSPORT_IN_STATION_PLACE)
 
 class ElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi is in the waiting list at the charging station.
-
-        Methods:
-            on_start(): Logs the transition to 'In Waiting List'.
-            run(): Handles waiting for confirmation to start charging.
-        """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_IN_WAITING_LIST
 
     async def run(self):
-
         msg = await self.receive(timeout=5)
         if not msg:
             self.set_next_state(TRANSPORT_IN_WAITING_LIST)
             return
-        content = json.loads(msg.body)
-        performative = msg.get_metadata("performative")
-
-        if performative == INFORM_PERFORMATIVE:
-            if content.get("station_id") is not None:
-                logger.debug(
-                    "Agent[{}]: The agent received a message with INFORM_PERFORMATIVE from [{}]".format(
-                        self.agent.name, content["station_id"]
-                    )
-                )
-                if content.get("serving") is not None and content.get("serving"):
-
-                    # New statistics
-                    # Event 5e: Service Start
-                    self.agent.events_store.emit(
-                        event_type="service_start",
-                        details={}
-                    )
-
-                    self.agent.status = TRANSPORT_CHARGING
-                    self.set_next_state(TRANSPORT_CHARGING)
-                    return
-
-        elif performative == REFUSE_PERFORMATIVE:
-            if content.get("station_id") is not None:
-                logger.debug(
-                    "Agent[{}]: The agent received a message with REFUSE_PERFORMATIVE from [{}]".format(
-                        self.agent.name, content["station_id"]
-                    )
-                )
-                await self.drop_station()
-                self.agent.status = TRANSPORT_NEEDS_CHARGING
-                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
-                return
-
-        else:
+        try:
+            content = json.loads(msg.body)
+        except (json.JSONDecodeError, TypeError):
             self.set_next_state(TRANSPORT_IN_WAITING_LIST)
             return
-
+        performative = msg.get_metadata("performative")
+        if performative == INFORM_PERFORMATIVE:
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_IN_WAITING_LIST)
+                return
+            if content.get("serving"):
+                if not self.charging_started():
+                    logger.warning("Agent[{}]: Charging start milestone could not be emitted.".format(self.agent.name))
+                    self.set_next_state(TRANSPORT_IN_WAITING_LIST)
+                    return
+                self.agent.status = TRANSPORT_CHARGING
+                self.set_next_state(TRANSPORT_CHARGING)
+                return
+        elif performative == REFUSE_PERFORMATIVE:
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_IN_WAITING_LIST)
+                return
+            self.abandon_charging_context()
+            await self.drop_station()
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
+        self.set_next_state(TRANSPORT_IN_WAITING_LIST)
 
 class ElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the 'Charging' state. The taxi is currently charging in the station.
-
-        Methods:
-            on_start(): Logs the transition to 'Charging'.
-            run(): Monitors the charging process and transitions back to 'Waiting' when charging completes.
-        """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_CHARGING
 
     async def run(self):
-
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_CHARGING)
             return
-        content = json.loads(msg.body)
-        protocol = msg.get_metadata("protocol")
-        performative = msg.get_metadata("performative")
-        if protocol == REQUEST_PROTOCOL and performative == INFORM_PERFORMATIVE:
-            if content["charged"]:
-                self.agent.increase_full_autonomy_km()
-                await self.drop_station()
-
-                # New statistics
-                # Event 6e: Service Completion
-                self.agent.events_store.emit(
-                    event_type="service_completion",
-                    details={}
-                )
-
-                if self.agent.has_return_position():
-                    logger.info(
-                        "Agent[{}]: Charging completed. "
-                        "Continuing pending return to {}.".format(
-                            self.agent.name,
-                            self.agent.get_return_position()
-                        )
-                    )
-                    self.agent.set_busy()
-                    self.agent.status = TRANSPORT_WAITING_FOR_RETURN
-                    self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                    return
-
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-
-        else:
+        try:
+            content = json.loads(msg.body)
+        except (json.JSONDecodeError, TypeError):
             self.set_next_state(TRANSPORT_CHARGING)
             return
-
+        protocol = msg.get_metadata("protocol")
+        performative = msg.get_metadata("performative")
+        if protocol == REQUEST_PROTOCOL and performative == INFORM_PERFORMATIVE and content.get("charged"):
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_CHARGING)
+                return
+            if not self.charging_completed():
+                self.set_next_state(TRANSPORT_CHARGING)
+                return
+            self.agent.increase_full_autonomy_km()
+            await self.drop_station()
+            self.clear_charging_context()
+            if self.agent.has_return_position():
+                logger.info("Agent[{}]: Charging completed. Continuing pending return to {}.".format(self.agent.name, self.agent.get_return_position()))
+                self.agent.status = TRANSPORT_WAITING_FOR_RETURN
+                self.agent.set_busy()
+                self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
+                return
+            self.agent.status = TRANSPORT_WAITING
+            self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING)
+            return
+        self.set_next_state(TRANSPORT_CHARGING)
 
 class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi is waiting for approval from a customer or station.
-        After making a transport offer, the taxi waits for a response (approval or refusal).
-
-        Methods:
-            on_start(): Logs the transition to 'Waiting For Approval'.
-            run(): Handles incoming approval or refusal messages and transitions accordingly.
-        """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
@@ -796,590 +1366,273 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
         if not msg:
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
             return
-        content = json.loads(msg.body)
-        performative = msg.get_metadata("performative")
-        if performative == ACCEPT_PERFORMATIVE:
-            # Handle acceptance by the customer or station
-            try:
-                logger.debug(
-                    "Agent[{}]: The agent got accept from [{}]".format(
-                        self.agent.name, content["customer_id"]
-                    )
-                )
-                if not self.check_and_decrease_autonomy(
-                    content["origin"], content["dest"]
-                ):
-                    await self.cancel_proposal(content["customer_id"])
-                    self.set_next_state(TRANSPORT_NEEDS_CHARGING)
-                    return
-                else:
-
-                    # New statistics
-                    # Event 3: Transport Offer Acceptance
-                    self.agent.events_store.emit(
-                        event_type="transport_offer_acceptance",
-                        details={}
-                    )
-
-                    await self.inform_customer(
-                        customer_id=content["customer_id"], status=TRANSPORT_MOVING_TO_CUSTOMER
-                    )
-
-                    #await self.agent.add_assigned_taxicustomer(
-                    #    customer_id=content["customer_id"],
-                    #    origin=content["origin"], dest=content["dest"]
-                    #)
-
-                    self.agent.add_assigned_customer(
-                        customer_id=content["customer_id"],
-                        origin=content["origin"],
-                        dest=content["dest"]
-                    )
-
-                    self.agent.set_busy()
-
-                    (
-                        distance,
-                        osrm_duration,
-                        _speed_based_duration,
-                    ) = await self.agent.move_to(
-                        content["origin"]
-                    )
-
-                    self.agent.events_store.emit(
-                        event_type="travel_to_pickup",
-                        details={
-                            "distance": distance,
-                            "duration": _speed_based_duration,
-                        },
-                    )
-
-                    self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
-                    self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
-                    return
-            except PathRequestException:
-                logger.error(
-                    "Agent[{}]: The agent could not get a path to customer [{}]. Cancelling...".format(
-                        self.agent.name, content["customer_id"]
-                    )
-                )
-                await self.cancel_proposal(content["customer_id"])
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-
-            except AlreadyInDestination:
-
-                await self.inform_customer(
-                    customer_id=content["customer_id"], status=TRANSPORT_IN_CUSTOMER_PLACE
-                )
-                self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-                self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
-                return
-            except Exception as e:
-                logger.error(
-                    "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
-                )
-                await self.cancel_proposal(content["customer_id"])
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-
-        elif performative == REFUSE_PERFORMATIVE:
-            logger.debug(
-                "Agent[{}]: The agent got refusal from customer/station".format(self.agent.name)
-            )
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
-        else:
+        try:
+            content = json.loads(msg.body)
+        except (json.JSONDecodeError, TypeError):
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
             return
-
-class ElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi is moving towards the customer to pick them up.
-
-        Methods:
-            on_start(): Logs the transition to 'Moving To Customer'.
-            run(): Handles the movement to the customer and manages unexpected issues during the trip.
-        """
-    async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
-
-    async def run(self):
-
-        customers = self.get("assigned_customer")
-        customer_id = next(iter(customers.items()))[0]
-
-        try:
-
-            if not self.agent.is_in_destination():
-
-                msg = await self.receive(timeout=2)
-
-                if msg:
-
-                    performative = msg.get_metadata("performative")
-                    if performative == REQUEST_PERFORMATIVE:
-                        self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
-                        return
-                    elif performative == REFUSE_PERFORMATIVE:
-                        logger.debug(
-                            "Agent[{}]: The agent got refusal from customer/station".format(self.agent.name)
-                        )
-                        self.agent.remove_assigned_customer()
-                        self.agent.status = TRANSPORT_WAITING
-                        self.agent.set_available()
-                        self.set_next_state(TRANSPORT_WAITING)
-                        return
-
-                else:
-                    self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
-            else:
-                logger.info(
-                    "Agent[{}]: The agent has arrived to destination. Status: {}".format(
-                        self.agent.agent_id, self.agent.status
-                    )
+        performative = msg.get_metadata("performative")
+        if performative == ACCEPT_PERFORMATIVE:
+            if not self.message_matches_pending_offer(content):
+                logger.warning("Agent[{}]: Ignoring stale or mismatched acceptance.".format(self.agent.name))
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+                return
+            active = self.activate_pending_offer(content)
+            customer_id = content["customer_id"]
+            if not self.check_and_decrease_autonomy(content["origin"], content["dest"]):
+                # Acceptance is not yet a canonical assignment: the electric taxi
+                # rejects it operationally so the same user service may retry.
+                await self.cancel_proposal(customer_id)
+                self.clear_active_message_context()
+                self.agent.set_busy()
+                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+                return
+            try:
+                context = self.create_service_context(
+                    service_id=active["service_id"], user_id=active["user_id"],
+                    transport_id=active["transport_id"], origin=active["origin"],
+                    destination=active["destination"], emit_requested=False,
                 )
-                await self.inform_customer(
-                    customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE
+                if context is None or not self.assign_service(self.agent.jid):
+                    raise RuntimeError("Unable to establish Electric Taxi metrics service context.")
+                self.agent.add_assigned_customer(
+                    customer_id=customer_id, origin=content["origin"], dest=content["dest"]
                 )
+                self.agent.set_busy()
+                await self.inform_customer(customer_id=customer_id, status=TRANSPORT_MOVING_TO_CUSTOMER)
+                distance, _osrm_duration, _speed_based_duration = await self.agent.move_to(content["origin"])
+                if not self.set_pending_movement("approach", distance):
+                    raise RuntimeError("Unable to register Electric Taxi approach movement.")
+                self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
+                self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
+                return
+            except AlreadyInDestination:
+                self.set_pending_movement("approach", 0)
+                self.complete_pending_movement()
+                await self.inform_customer(customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE)
                 self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
                 self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
                 return
+            except PathRequestException:
+                self.fail_service("approach_route_failed")
+                self.discard_pending_movement()
+                await self.cancel_proposal(customer_id, {"terminal_status":"failed","failure_reason":"approach_route_failed"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if self.agent.get("assigned_customer"):
+                    self.agent.remove_assigned_customer()
+                self.agent.status = TRANSPORT_WAITING; self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING); return
+            except Exception as e:
+                logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name, e))
+                self.fail_service("approach_unexpected_error")
+                self.discard_pending_movement()
+                await self.cancel_proposal(customer_id, {"terminal_status":"failed","failure_reason":"approach_unexpected_error"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if self.agent.get("assigned_customer"):
+                    self.agent.remove_assigned_customer()
+                self.agent.status = TRANSPORT_WAITING; self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING); return
+        elif performative == REFUSE_PERFORMATIVE:
+            if not self.message_matches_pending_offer(content):
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL); return
+            self.clear_pending_offer(); self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING); return
+        self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
 
-        except PathRequestException:
-            logger.error(
-                "Agent[{}]: The agent could not get a path to customer [{}]. Cancelling...".format(
-                    self.agent.name, customer_id
-                )
-            )
-            await self.cancel_proposal(customer_id)
-            self.agent.status = TRANSPORT_WAITING
-            self.set_next_state(TRANSPORT_WAITING)
-            return
+class ElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
+    async def on_start(self):
+        await super().on_start(); self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
+
+    async def run(self):
+        customers = self.get("assigned_customer")
+        if not customers:
+            self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        customer_id = next(iter(customers.items()))[0]
+        try:
+            if not self.agent.is_in_destination():
+                msg = await self.receive(timeout=2)
+                if msg and msg.get_metadata("performative") == REFUSE_PERFORMATIVE:
+                    try: content=json.loads(msg.body)
+                    except (json.JSONDecodeError,TypeError):
+                        self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER); return
+                    if not self.message_matches_active_service(content):
+                        self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER); return
+                    self.fail_service("customer_cancelled_before_pickup")
+                    self.discard_pending_movement()
+                    await self.cancel_proposal(customer_id,{"terminal_status":"failed","failure_reason":"customer_cancelled_before_pickup"})
+                    self.clear_service_context(); self.clear_active_message_context(); self.agent.remove_assigned_customer()
+                    self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+                self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER); return
+            self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=TRANSPORT_IN_CUSTOMER_PLACE)
+            self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER; self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
         except AlreadyInDestination:
-
-            await self.inform_customer(
-                customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE
-            )
-            self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-            self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
-            return
+            if not self.complete_pending_movement():
+                self.set_pending_movement("approach",0); self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=TRANSPORT_IN_CUSTOMER_PLACE)
+            self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER; self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        except PathRequestException:
+            self.fail_service("approach_route_failed"); self.discard_pending_movement()
+            await self.cancel_proposal(customer_id,{"terminal_status":"failed","failure_reason":"approach_route_failed"})
+            self.clear_service_context(); self.clear_active_message_context(); self.agent.remove_assigned_customer()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         except Exception as e:
-            logger.error(
-                "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
-            )
-            await self.cancel_proposal(customer_id)
-            self.agent.status = TRANSPORT_WAITING
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
+            logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
+            self.fail_service("approach_unexpected_error"); self.discard_pending_movement()
+            await self.cancel_proposal(customer_id,{"terminal_status":"failed","failure_reason":"approach_unexpected_error"})
+            self.clear_service_context(); self.clear_active_message_context(); self.agent.remove_assigned_customer()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class ElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi has arrived at the customer's location.
-
-        Methods:
-            on_start(): Logs the transition to 'Arrived At Customer'.
-            run(): Handles the pickup of the customer and begins the journey to their destination.
-        """
-
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
+        await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER
 
     async def run(self):
+        msg=await self.receive(timeout=60)
+        if not msg: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        try: content=json.loads(msg.body)
+        except (json.JSONDecodeError,TypeError): self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        performative=msg.get_metadata("performative")
+        if performative in (INFORM_PERFORMATIVE,CANCEL_PERFORMATIVE) and not self.message_matches_active_service(content):
+            self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        if performative==INFORM_PERFORMATIVE and content.get("status")==CUSTOMER_IN_TRANSPORT:
+            customers=self.get("assigned_customer")
+            if not customers: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+            customer_id=next(iter(customers.items()))[0]; dest=next(iter(customers.items()))[1]["destination"]
+            try:
+                self.agent.add_customer_in_transport(customer_id=customer_id,dest=dest)
+                if not self.start_service(self.agent.jid): raise RuntimeError("Unable to emit Electric Taxi service start.")
+                self.agent.remove_assigned_customer()
+                distance,_osrm_duration,_speed_based_duration=await self.agent.move_to(dest)
+                if not self.set_pending_movement("service",distance): raise RuntimeError("Unable to register Electric Taxi service movement.")
+                self.agent.status=TRANSPORT_MOVING_TO_DESTINATION; self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION); return
+            except AlreadyInDestination:
+                self.set_pending_movement("service",0); self.complete_pending_movement()
+                await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
+                self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+            except PathRequestException:
+                self.fail_service("service_route_failed"); self.discard_pending_movement()
+                await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_route_failed"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+                self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+            except Exception as e:
+                logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
+                self.fail_service("service_unexpected_error"); self.discard_pending_movement()
+                await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_unexpected_error"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+                self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        elif performative==CANCEL_PERFORMATIVE:
+            self.fail_service("customer_cancelled_at_pickup"); self.discard_pending_movement()
+            self.clear_service_context(); self.clear_active_message_context()
+            if self.agent.get("assigned_customer"): self.agent.remove_assigned_customer()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
 
-        msg = await self.receive(timeout=60)
-
-        if not msg:
-            self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
-            return
-        content = json.loads(msg.body)
-        performative = msg.get_metadata("performative")
-
-        if performative == INFORM_PERFORMATIVE:
-            if "status" in content:
-                status = content["status"]
-
-                if status == CUSTOMER_IN_TRANSPORT:
-
-                    customers = self.get("assigned_customer")
-                    customer_id = next(iter(customers.items()))[0]
-                    dest = next(iter(customers.items()))[1]["destination"]
-
-                    try:
-                        logger.debug(
-                            "Agent[{}]: Customer [{}] in transport.".format(self.agent.name, customer_id)
-                        )
-
-                        self.agent.add_customer_in_transport(
-                            customer_id=customer_id, dest=dest
-                        )
-                        self.agent.remove_assigned_customer()
-
-                        logger.info(
-                            "Agent[{}]: The agent on route to [{}] destination".format(self.agent.name, customer_id)
-                        )
-
-                        # New statistics
-                        # Event 5: Customer Pickup
-                        self.agent.events_store.emit(
-                            event_type="customer_pickup",
-                            details={},
-                        )
-
-                        (
-                            distance,
-                            _osrm_duration,
-                            _speed_based_duration,
-                        ) = await self.agent.move_to(dest)
-
-                        self.agent.events_store.emit(
-                            event_type="travel_to_destination",
-                            details={
-                                "distance": distance,
-                            },
-                        )
-
-                        self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
-                        self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
-
-                    except PathRequestException:
-                        await self.cancel_customer(customer_id=customer_id)
-                        self.agent.status = TRANSPORT_WAITING
-                        self.set_next_state(TRANSPORT_WAITING)
-                    except AlreadyInDestination:
-                        self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
-
-                    except Exception as e:
-                        logger.error(
-                            "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
-                        )
-
-        elif performative == CANCEL_PERFORMATIVE:
-            self.agent.status = TRANSPORT_WAITING
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-        else:
-            self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-            self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
-            return
-
-# MOD-STRATEGY-04 - New status
 class ElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi is transporting the customer to their destination.
-
-        Methods:
-            on_start(): Logs the transition to 'Moving To Destination'.
-            run(): Manages the trip to the customer's destination.
-        """
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+        await super().on_start(); self.agent.status=TRANSPORT_MOVING_TO_DESTINATION
 
     async def run(self):
-
-        customers = self.get("current_customer")
-        customer_id = next(iter(customers.items()))[0]
-
+        customers=self.get("current_customer")
+        if not customers: self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        customer_id=next(iter(customers.items()))[0]
         try:
-
             if not self.agent.is_in_destination():
-                await self.agent.sleep(1)
-                self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
-            else:
-                logger.info(
-                    "Agent[{}]: The agent has arrived to destination. Status: {}".format(
-                        self.agent.agent_id, self.agent.status
-                    )
-                )
-
-                # New statistics
-                # Event 6: Trip completion
-                self.agent.events_store.emit(
-                    event_type="trip_completion",
-                    details={},
-                )
-
-                await self.inform_customer(
-                    customer_id=customer_id, status=CUSTOMER_IN_DEST
-                )
-                self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-                self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
-
-        except PathRequestException:
-            logger.error(
-                "Agent[{}]: The agent could not get a path to customer [{}]. Cancelling...".format(
-                    self.agent.name, customer_id
-                )
-            )
-            await self.cancel_proposal(customer_id)
-            self.agent.status = TRANSPORT_WAITING
-            self.set_next_state(TRANSPORT_WAITING)
-            return
+                await self.agent.sleep(1); self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION); return
+            self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
+            self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
         except AlreadyInDestination:
-
-            # New statistics
-            # Event 6: Trip completion
-            self.agent.events_store.emit(
-                event_type="trip_completion",
-                details={},
-            )
-
-            await self.inform_customer(
-                customer_id=customer_id, status=CUSTOMER_IN_DEST
-            )
-            self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-            self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
-            return
+            if not self.complete_pending_movement(): self.set_pending_movement("service",0); self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
+            self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        except PathRequestException:
+            self.fail_service("service_route_failed"); self.discard_pending_movement()
+            await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_route_failed"})
+            self.clear_service_context(); self.clear_active_message_context()
+            if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         except Exception as e:
-            logger.error(
-                "Unexpected error in transport [{}]: {}".format(self.agent.name, e)
-            )
-            await self.cancel_proposal(customer_id)
-            self.agent.status = TRANSPORT_WAITING
-            self.set_next_state(TRANSPORT_WAITING)
-            return
+            logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
+            self.fail_service("service_unexpected_error"); self.discard_pending_movement()
+            await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_unexpected_error"})
+            self.clear_service_context(); self.clear_active_message_context()
+            if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class ElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
-    """
-        Represents the state where the taxi has arrived at the customer's destination.
-
-        Methods:
-            on_start(): Logs the transition to 'Arrived At Destination'.
-            run(): Handles the process of dropping the customer off and resets the taxi to 'Waiting' state.
-        """
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+        await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION
 
     async def run(self):
-
-        customers = self.get("current_customer")
-        customer_id = next(iter(customers.items()))[0]
-
-        msg = await self.receive(timeout=60)
-
-        if not msg:
-            self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
-            return
-        else:
-            content = json.loads(msg.body)
-            performative = msg.get_metadata("performative")
-
-            if performative == INFORM_PERFORMATIVE:
-                if "status" in content:
-                    status = content["status"]
-
-                    if status == CUSTOMER_IN_DEST:
-                        self.agent.remove_customer_in_transport(customer_id)
-                        self.agent.increment_completed_assignments()
-                        self.agent.set_busy()
-
-                        logger.debug(
-                            "Agent[{}]: The electric taxi has completed the service "
-                            "for customer [{}].".format(
-                                self.agent.agent_id,
-                                customer_id
-                            )
-                        )
-
-                        self.agent.status = TRANSPORT_WAITING_FOR_RETURN
-                        self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                        return
-
-            elif performative == CANCEL_PERFORMATIVE:
-                self.agent.status = TRANSPORT_WAITING
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-            else:
-                self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
-                return
+        customers=self.get("current_customer")
+        if not customers: self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        customer_id=next(iter(customers.items()))[0]
+        msg=await self.receive(timeout=60)
+        if not msg: self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        try: content=json.loads(msg.body)
+        except (json.JSONDecodeError,TypeError): self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        performative=msg.get_metadata("performative")
+        if performative in (INFORM_PERFORMATIVE,CANCEL_PERFORMATIVE) and not self.message_matches_active_service(content):
+            self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        if performative==INFORM_PERFORMATIVE and content.get("status")==CUSTOMER_IN_DEST:
+            if not self.mark_service_completed(): logger.warning("Agent[{}]: Could not mirror completed Electric Taxi service.".format(self.agent.name))
+            self.agent.remove_customer_in_transport(customer_id); self.clear_active_message_context(); self.agent.increment_completed_assignments()
+            self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.agent.set_busy(); self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
+        if performative==CANCEL_PERFORMATIVE:
+            self.fail_service("customer_cancelled_at_destination"); self.discard_pending_movement(); self.clear_service_context(); self.clear_active_message_context()
+            if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
 
 class ElectricTaxiWaitingForReturnState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-
-        self.agent.status = TRANSPORT_WAITING_FOR_RETURN
-        self.return_requested = False
+        await super().on_start(); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.return_requested=False
 
     async def run(self):
-
-        # 1. Obtain a return point only if there is no pending one
         if not self.agent.has_return_position():
-
             if not self.return_requested:
-                await self.request_return_position()
-                self.return_requested = True
-
-            msg = await self.receive(timeout=5)
-
-            if not msg:
-                self.return_requested = False
-                self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                return
-
-            performative = msg.get_metadata("performative")
-
-            if performative != INFORM_PERFORMATIVE:
-                self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                return
-
-            try:
-                content = json.loads(msg.body)
-
-            except (json.JSONDecodeError, TypeError):
-                self.return_requested = False
-                self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                return
-
-            if content.get("request_type") != "taxi_return":
-                self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                return
-
-            return_position = content.get("return_position")
-
-            if return_position is None:
-                self.return_requested = False
-                self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-                return
-
+                await self.request_return_position(); self.return_requested=True
+            msg=await self.receive(timeout=5)
+            if not msg: self.return_requested=False; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
+            if msg.get_metadata("performative")!=INFORM_PERFORMATIVE: self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
+            try: content=json.loads(msg.body)
+            except (json.JSONDecodeError,TypeError): self.return_requested=False; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
+            if content.get("request_type")!="taxi_return": self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
+            return_position=content.get("return_position")
+            if return_position is None: self.return_requested=False; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
             self.agent.set_return_position(return_position)
-
-            logger.info(
-                "Agent[{}]: Return position received: {}".format(
-                    self.agent.name,
-                    return_position
-                )
-            )
-
-        # 2. From here on, a return point already exists.
-        #    This block is also executed after charging.
-        return_position = self.agent.get_return_position()
-
-        if return_position is None:
-            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-            return
-
-        return_km = self.agent.calculate_distance_km(
-            self.agent.get_position(),
-            return_position
-        )
-
-        # 3. Option A: charge only if the return cannot be completed
+        return_position=self.agent.get_return_position()
+        if return_position is None: self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
+        return_km=self.agent.calculate_distance_km(self.agent.get_position(),return_position)
         if not self.agent.has_enough_autonomy_km(return_km):
-
-            logger.info(
-                "Agent[{}]: Not enough autonomy to reach return point {}. "
-                "Charging is required.".format(
-                    self.agent.name,
-                    return_position
-                )
-            )
-
-            self.agent.set_busy()
-            self.agent.status = TRANSPORT_NEEDS_CHARGING
-            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
-            return
-
-        # 4. Enough autonomy: complete the pending return
+            self.agent.status=TRANSPORT_NEEDS_CHARGING; self.agent.set_busy(); self.set_next_state(TRANSPORT_NEEDS_CHARGING); return
         try:
-            await self.agent.move_to(return_position)
-
+            distance,_osrm_duration,_speed_based_duration=await self.agent.move_to(return_position)
+            if not self.set_pending_movement("auxiliary",distance,require_service=False): raise RuntimeError("Unable to register Electric Taxi return movement.")
             self.agent.decrease_autonomy_km(return_km)
-
-            self.agent.status = TRANSPORT_MOVING_TO_RETURN
-            self.set_next_state(TRANSPORT_MOVING_TO_RETURN)
-            return
-
+            self.agent.status=TRANSPORT_MOVING_TO_RETURN; self.set_next_state(TRANSPORT_MOVING_TO_RETURN); return
         except AlreadyInDestination:
-
-            logger.info(
-                "Agent[{}]: Electric taxi is already at return point {}.".format(
-                    self.agent.name,
-                    return_position
-                )
-            )
-
-            self.agent.clear_return_position()
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
+            self.set_pending_movement("auxiliary",0,require_service=False); self.complete_pending_movement(); self.clear_service_context()
+            self.agent.clear_return_position(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         except PathRequestException:
-
-            logger.error(
-                "Agent[{}]: Could not get a path to return point {}.".format(
-                    self.agent.name,
-                    return_position
-                )
-            )
-
-            await self.agent.sleep(1)
-
-            # Keep the same return point and retry
-            self.agent.status = TRANSPORT_WAITING_FOR_RETURN
-            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-            return
-
+            self.discard_pending_movement(); await self.agent.sleep(1); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
         except Exception as e:
-
-            logger.error(
-                "Unexpected error returning electric taxi [{}]: {}".format(
-                    self.agent.name,
-                    e
-                )
-            )
-
-            self.agent.status = TRANSPORT_WAITING_FOR_RETURN
-            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-            return
-
+            logger.error("Unexpected error returning electric taxi [{}]: {}".format(self.agent.name,e)); self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
 
 class ElectricTaxiMovingToReturnState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-
-        self.agent.status = TRANSPORT_MOVING_TO_RETURN
+        await super().on_start(); self.agent.status=TRANSPORT_MOVING_TO_RETURN
 
     async def run(self):
-
-        return_position = self.agent.get_return_position()
-
+        return_position=self.agent.get_return_position()
         if return_position is None:
-            logger.warning(
-                "Agent[{}]: No return position available while returning.".format(
-                    self.agent.name
-                )
-            )
-
-            self.agent.status = TRANSPORT_WAITING_FOR_RETURN
-            self.set_next_state(TRANSPORT_WAITING_FOR_RETURN)
-            return
-
+            self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
         if not self.agent.is_in_destination():
-            await self.agent.sleep(1)
-            self.set_next_state(TRANSPORT_MOVING_TO_RETURN)
-            return
-
-        logger.info(
-            "Agent[{}]: Electric taxi arrived at return point {}.".format(
-                self.agent.name,
-                return_position
-            )
-        )
-
-        self.agent.clear_return_position()
-        self.agent.status = TRANSPORT_WAITING
-        self.agent.set_available()
-        self.set_next_state(TRANSPORT_WAITING)
-        return
+            await self.agent.sleep(1); self.set_next_state(TRANSPORT_MOVING_TO_RETURN); return
+        self.complete_pending_movement(); self.clear_service_context(); self.agent.clear_return_position(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class FSMElectricTaxiBehaviour(FSMSimfleetBehaviour):
     """
@@ -1516,39 +1769,36 @@ class NRPElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
         content = json.loads(msg.body)
         performative = msg.get_metadata("performative")
         if performative == REQUEST_PERFORMATIVE:
+            if self.store_pending_offer(content) is None:
+                logger.warning(
+                    "Agent[{}]: Ignoring request without valid schema-1.0 identifiers.".format(
+                        self.agent.name
+                    )
+                )
+                self.set_next_state(TRANSPORT_WAITING)
+                return
 
-            # New statistics
-            # Event 1: Customer Request Reception
-            self.agent.events_store.emit(
-                event_type="customer_request_reception",
-                details={}
-            )
 
             if not self.agent.has_enough_autonomy_for_service(
                 content["origin"],
                 content["dest"]
             ):
 
-                # New statistics
-                # Event 1e: Need for Service
-                self.agent.events_store.emit(
-                    event_type="transport_need_for_service",
-                    details={}
-                )
 
-                await self.cancel_proposal(content["customer_id"])
+                await self.cancel_proposal(
+                    content["customer_id"],
+                    self.pending_offer_message_details(),
+                )
+                self.clear_pending_offer()
                 self.set_next_state(TRANSPORT_NEEDS_CHARGING)
                 return
             else:
 
-                # New statistics
-                # Event 2: Transport Offer
-                self.agent.events_store.emit(
-                    event_type="transport_offer",
-                    details={}
-                )
 
-                await self.send_proposal(content["customer_id"], {})
+                await self.send_proposal(
+                    content["customer_id"],
+                    self.pending_offer_message_details(),
+                )
                 self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
                 return
         else:
@@ -1557,99 +1807,65 @@ class NRPElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
 
 
 class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
 
     async def run(self):
-
         msg = await self.receive(timeout=60)
-
         if not msg:
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
             return
-
         try:
             content = json.loads(msg.body)
-
         except (json.JSONDecodeError, TypeError):
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
             return
-
         performative = msg.get_metadata("performative")
-
         if performative == ACCEPT_PERFORMATIVE:
-
+            if not self.message_matches_pending_offer(content):
+                logger.warning("Agent[{}]: Ignoring stale or mismatched acceptance.".format(self.agent.name))
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
+                return
+            active = self.activate_pending_offer(content)
             customer_id = content["customer_id"]
-            origin = content["origin"]
-            dest = content["dest"]
-
-            travel_km = self.agent.calculate_service_km(
-                origin,
-                dest
-            )
-
-            if not self.agent.has_enough_autonomy_km(
-                travel_km
-            ):
+            if not self.agent.has_enough_autonomy_km(self.agent.calculate_service_km(content["origin"], content["dest"])):
                 await self.cancel_proposal(customer_id)
-
+                self.clear_active_message_context()
                 self.agent.set_busy()
                 self.agent.status = TRANSPORT_NEEDS_CHARGING
                 self.set_next_state(TRANSPORT_NEEDS_CHARGING)
                 return
-
             try:
-
+                context = self.create_service_context(
+                    service_id=active["service_id"], user_id=active["user_id"],
+                    transport_id=active["transport_id"], origin=active["origin"],
+                    destination=active["destination"], emit_requested=False,
+                )
+                if context is None or not self.assign_service(self.agent.jid):
+                    raise RuntimeError("Unable to establish Electric Taxi metrics service context.")
                 self.agent.add_assigned_customer(
-                    customer_id=customer_id,
-                    origin=origin,
-                    dest=dest
+                    customer_id=customer_id, origin=content["origin"], dest=content["dest"]
                 )
-
-                (
-                    distance,
-                    osrm_duration,
-                    _speed_based_duration,
-                ) = await self.agent.move_to(origin)
-
-                self.agent.decrease_autonomy_km(
-                    travel_km
-                )
-
                 self.agent.set_busy()
-
-                self.agent.events_store.emit(
-                    event_type="transport_offer_acceptance",
-                    details={}
-                )
-
-                self.agent.events_store.emit(
-                    event_type="travel_to_pickup",
-                    details={
-                        "distance": distance,
-                        "duration": _speed_based_duration
-                    }
-                )
-
-                await self.inform_customer(
-                    customer_id=customer_id,
-                    status=TRANSPORT_MOVING_TO_CUSTOMER
-                )
-
+                await self.inform_customer(customer_id=customer_id, status=TRANSPORT_MOVING_TO_CUSTOMER)
+                distance, _osrm_duration, _speed_based_duration = await self.agent.move_to(content["origin"])
+                self.agent.decrease_autonomy_km(self.agent.calculate_service_km(content["origin"], content["dest"]))
+                if not self.set_pending_movement("approach", distance):
+                    raise RuntimeError("Unable to register Electric Taxi approach movement.")
                 self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
                 self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
                 return
-
             except AlreadyInDestination:
-
-                self.agent.set_busy()
-
-                self.agent.events_store.emit(
-                    event_type="transport_offer_acceptance",
-                    details={}
+                self.agent.decrease_autonomy_km(
+                    self.agent.calculate_service_km(
+                        content["origin"],
+                        content["dest"]
+                    )
                 )
+
+                self.set_pending_movement("approach", 0)
+                self.complete_pending_movement()
 
                 await self.inform_customer(
                     customer_id=customer_id,
@@ -1659,1113 +1875,440 @@ class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
                 self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
                 self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
                 return
-
             except PathRequestException:
-
-                logger.error(
-                    "Agent[{}]: Could not get a path to customer [{}].".format(
-                        self.agent.name,
-                        customer_id
-                    )
-                )
-
-                await self.cancel_proposal(customer_id)
-
-                self.agent.remove_assigned_customer()
-
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-
+                self.fail_service("approach_route_failed")
+                self.discard_pending_movement()
+                await self.cancel_proposal(customer_id, {"terminal_status":"failed","failure_reason":"approach_route_failed"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if self.agent.get("assigned_customer"):
+                    self.agent.remove_assigned_customer()
+                self.agent.status = TRANSPORT_WAITING; self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING); return
             except Exception as e:
-
-                logger.error(
-                    "Unexpected error in transport [{}]: {}".format(
-                        self.agent.name,
-                        e
-                    )
-                )
-
-                await self.cancel_proposal(customer_id)
-
-                self.agent.remove_assigned_customer()
-
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-
+                logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name, e))
+                self.fail_service("approach_unexpected_error")
+                self.discard_pending_movement()
+                await self.cancel_proposal(customer_id, {"terminal_status":"failed","failure_reason":"approach_unexpected_error"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if self.agent.get("assigned_customer"):
+                    self.agent.remove_assigned_customer()
+                self.agent.status = TRANSPORT_WAITING; self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING); return
         elif performative == REFUSE_PERFORMATIVE:
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
+            if not self.message_matches_pending_offer(content):
+                self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL); return
+            self.clear_pending_offer(); self.agent.set_available()
+            self.set_next_state(TRANSPORT_WAITING); return
         self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
 
-
-
 class NPRElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
+        await super().on_start(); self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
 
     async def run(self):
-
         customers = self.get("assigned_customer")
-
         if not customers:
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
+            self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         customer_id = next(iter(customers.items()))[0]
-
         try:
-
             if not self.agent.is_in_destination():
-
                 msg = await self.receive(timeout=2)
-
-                if msg:
-                    performative = msg.get_metadata("performative")
-
-                    if performative == REQUEST_PERFORMATIVE:
-                        self.set_next_state(
-                            TRANSPORT_MOVING_TO_CUSTOMER
-                        )
-                        return
-
-                    elif performative == REFUSE_PERFORMATIVE:
-
-                        await self.cancel_proposal(customer_id)
-
-                        self.agent.remove_assigned_customer()
-
-                        self.agent.status = TRANSPORT_WAITING
-                        self.agent.set_available()
-
-                        self.set_next_state(
-                            TRANSPORT_WAITING
-                        )
-                        return
-
-                self.set_next_state(
-                    TRANSPORT_MOVING_TO_CUSTOMER
-                )
-                return
-
-            logger.info(
-                "Agent[{}]: The agent has arrived to customer [{}].".format(
-                    self.agent.name,
-                    customer_id
-                )
-            )
-
-            await self.inform_customer(
-                customer_id=customer_id,
-                status=TRANSPORT_IN_CUSTOMER_PLACE
-            )
-
-            self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_CUSTOMER
-            )
-            return
-
+                if msg and msg.get_metadata("performative") == REFUSE_PERFORMATIVE:
+                    try: content=json.loads(msg.body)
+                    except (json.JSONDecodeError,TypeError):
+                        self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER); return
+                    if not self.message_matches_active_service(content):
+                        self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER); return
+                    self.fail_service("customer_cancelled_before_pickup")
+                    self.discard_pending_movement()
+                    await self.cancel_proposal(customer_id,{"terminal_status":"failed","failure_reason":"customer_cancelled_before_pickup"})
+                    self.clear_service_context(); self.clear_active_message_context(); self.agent.remove_assigned_customer()
+                    self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+                self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER); return
+            self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=TRANSPORT_IN_CUSTOMER_PLACE)
+            self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER; self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
         except AlreadyInDestination:
-
-            await self.inform_customer(
-                customer_id=customer_id,
-                status=TRANSPORT_IN_CUSTOMER_PLACE
-            )
-
-            self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_CUSTOMER
-            )
-            return
-
+            if not self.complete_pending_movement():
+                self.set_pending_movement("approach",0); self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=TRANSPORT_IN_CUSTOMER_PLACE)
+            self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER; self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
         except PathRequestException:
-
-            logger.error(
-                "Agent[{}]: Could not get a path to customer [{}].".format(
-                    self.agent.name,
-                    customer_id
-                )
-            )
-
-            await self.cancel_proposal(customer_id)
-
-            self.agent.remove_assigned_customer()
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
+            self.fail_service("approach_route_failed"); self.discard_pending_movement()
+            await self.cancel_proposal(customer_id,{"terminal_status":"failed","failure_reason":"approach_route_failed"})
+            self.clear_service_context(); self.clear_active_message_context(); self.agent.remove_assigned_customer()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         except Exception as e:
-
-            logger.error(
-                "Unexpected error in transport [{}]: {}".format(
-                    self.agent.name,
-                    e
-                )
-            )
-
-            await self.cancel_proposal(customer_id)
-
-            self.agent.remove_assigned_customer()
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
+            logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
+            self.fail_service("approach_unexpected_error"); self.discard_pending_movement()
+            await self.cancel_proposal(customer_id,{"terminal_status":"failed","failure_reason":"approach_unexpected_error"})
+            self.clear_service_context(); self.clear_active_message_context(); self.agent.remove_assigned_customer()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class NPRElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
+        await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER
 
     async def run(self):
-
-        msg = await self.receive(timeout=60)
-
-        if not msg:
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_CUSTOMER
-            )
-            return
-
-        try:
-            content = json.loads(msg.body)
-
-        except (json.JSONDecodeError, TypeError):
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_CUSTOMER
-            )
-            return
-
-        performative = msg.get_metadata("performative")
-
-        if performative == INFORM_PERFORMATIVE:
-
-            if content.get("status") != CUSTOMER_IN_TRANSPORT:
-                self.set_next_state(
-                    TRANSPORT_ARRIVED_AT_CUSTOMER
-                )
-                return
-
-            customers = self.get("assigned_customer")
-
-            if not customers:
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-                self.set_next_state(TRANSPORT_WAITING)
-                return
-
-            customer_id = next(iter(customers.items()))[0]
-            dest = next(iter(customers.items()))[1]["destination"]
-
+        msg=await self.receive(timeout=60)
+        if not msg: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        try: content=json.loads(msg.body)
+        except (json.JSONDecodeError,TypeError): self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        performative=msg.get_metadata("performative")
+        if performative in (INFORM_PERFORMATIVE,CANCEL_PERFORMATIVE) and not self.message_matches_active_service(content):
+            self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+        if performative==INFORM_PERFORMATIVE and content.get("status")==CUSTOMER_IN_TRANSPORT:
+            customers=self.get("assigned_customer")
+            if not customers: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
+            customer_id=next(iter(customers.items()))[0]; dest=next(iter(customers.items()))[1]["destination"]
             try:
-
-                logger.debug(
-                    "Agent[{}]: Customer [{}] in transport.".format(
-                        self.agent.name,
-                        customer_id
-                    )
-                )
-
-                self.agent.add_customer_in_transport(
-                    customer_id=customer_id,
-                    dest=dest
-                )
-
+                self.agent.add_customer_in_transport(customer_id=customer_id,dest=dest)
+                if not self.start_service(self.agent.jid): raise RuntimeError("Unable to emit Electric Taxi service start.")
                 self.agent.remove_assigned_customer()
-
-                self.agent.events_store.emit(
-                    event_type="customer_pickup",
-                    details={}
-                )
-
-                (
-                    distance,
-                    osrm_duration,
-                    _speed_based_duration,
-                ) = await self.agent.move_to(dest)
-
-                self.agent.events_store.emit(
-                    event_type="travel_to_destination",
-                    details={
-                        "distance": distance,
-                        "duration": _speed_based_duration,
-                    },
-                )
-
-                self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
-
-                self.set_next_state(
-                    TRANSPORT_MOVING_TO_DESTINATION
-                )
-                return
-
+                distance,_osrm_duration,_speed_based_duration=await self.agent.move_to(dest)
+                if not self.set_pending_movement("service",distance): raise RuntimeError("Unable to register Electric Taxi service movement.")
+                self.agent.status=TRANSPORT_MOVING_TO_DESTINATION; self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION); return
             except AlreadyInDestination:
-
-                self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-
-                self.set_next_state(
-                    TRANSPORT_ARRIVED_AT_DESTINATION
-                )
-                return
-
+                self.set_pending_movement("service",0); self.complete_pending_movement()
+                await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
+                self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
             except PathRequestException:
-
-                logger.error(
-                    "Agent[{}]: Could not get a path to destination "
-                    "for customer [{}].".format(
-                        self.agent.name,
-                        customer_id
-                    )
-                )
-
-                await self.cancel_customer(
-                    customer_id=customer_id
-                )
-
-                self.agent.remove_customer_in_transport(
-                    customer_id
-                )
-
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-
-                self.set_next_state(
-                    TRANSPORT_WAITING
-                )
-                return
-
+                self.fail_service("service_route_failed"); self.discard_pending_movement()
+                await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_route_failed"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+                self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
             except Exception as e:
-
-                logger.error(
-                    "Unexpected error in transport [{}]: {}".format(
-                        self.agent.name,
-                        e
-                    )
-                )
-
-                await self.cancel_customer(
-                    customer_id=customer_id
-                )
-
-                self.agent.remove_customer_in_transport(
-                    customer_id
-                )
-
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-
-                self.set_next_state(
-                    TRANSPORT_WAITING
-                )
-                return
-
-        elif performative == CANCEL_PERFORMATIVE:
-
-            customers = self.get("assigned_customer")
-
-            if customers:
-                self.agent.remove_assigned_customer()
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
-        self.set_next_state(
-            TRANSPORT_ARRIVED_AT_CUSTOMER
-        )
-
+                logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
+                self.fail_service("service_unexpected_error"); self.discard_pending_movement()
+                await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_unexpected_error"})
+                self.clear_service_context(); self.clear_active_message_context()
+                if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+                self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        elif performative==CANCEL_PERFORMATIVE:
+            self.fail_service("customer_cancelled_at_pickup"); self.discard_pending_movement()
+            self.clear_service_context(); self.clear_active_message_context()
+            if self.agent.get("assigned_customer"): self.agent.remove_assigned_customer()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
 
 class NPRElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+        await super().on_start(); self.agent.status=TRANSPORT_MOVING_TO_DESTINATION
 
     async def run(self):
-
-        customers = self.get("current_customer")
-
-        if not customers:
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
-        customer_id = next(iter(customers.items()))[0]
-
+        customers=self.get("current_customer")
+        if not customers: self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        customer_id=next(iter(customers.items()))[0]
         try:
-
             if not self.agent.is_in_destination():
-
-                await self.agent.sleep(1)
-
-                self.set_next_state(
-                    TRANSPORT_MOVING_TO_DESTINATION
-                )
-                return
-
-            logger.info(
-                "Agent[{}]: The agent has arrived to destination "
-                "with customer [{}].".format(
-                    self.agent.name,
-                    customer_id
-                )
-            )
-
-            self.agent.events_store.emit(
-                event_type="trip_completion",
-                details={}
-            )
-
-            await self.inform_customer(
-                customer_id=customer_id,
-                status=CUSTOMER_IN_DEST
-            )
-
-            self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_DESTINATION
-            )
-            return
-
+                await self.agent.sleep(1); self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION); return
+            self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
+            self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
         except AlreadyInDestination:
-
-            self.agent.events_store.emit(
-                event_type="trip_completion",
-                details={}
-            )
-
-            await self.inform_customer(
-                customer_id=customer_id,
-                status=CUSTOMER_IN_DEST
-            )
-
-            self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_DESTINATION
-            )
-            return
-
+            if not self.complete_pending_movement(): self.set_pending_movement("service",0); self.complete_pending_movement()
+            await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
+            self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
         except PathRequestException:
-
-            logger.error(
-                "Agent[{}]: Could not complete the route "
-                "for customer [{}].".format(
-                    self.agent.name,
-                    customer_id
-                )
-            )
-
-            await self.cancel_customer(
-                customer_id=customer_id
-            )
-
-            self.agent.remove_customer_in_transport(
-                customer_id
-            )
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
+            self.fail_service("service_route_failed"); self.discard_pending_movement()
+            await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_route_failed"})
+            self.clear_service_context(); self.clear_active_message_context()
+            if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         except Exception as e:
-
-            logger.error(
-                "Unexpected error in transport [{}]: {}".format(
-                    self.agent.name,
-                    e
-                )
-            )
-
-            await self.cancel_customer(
-                customer_id=customer_id
-            )
-
-            self.agent.remove_customer_in_transport(
-                customer_id
-            )
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
+            logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
+            self.fail_service("service_unexpected_error"); self.discard_pending_movement()
+            await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_unexpected_error"})
+            self.clear_service_context(); self.clear_active_message_context()
+            if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class NPRElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-        self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+        await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION
 
     async def run(self):
-
-        customers = self.get("current_customer")
-
-        if not customers:
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-            self.set_next_state(TRANSPORT_WAITING)
-            return
-
-        customer_id = next(iter(customers.items()))[0]
-
-        msg = await self.receive(timeout=60)
-
-        if not msg:
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_DESTINATION
-            )
-            return
-
-        try:
-            content = json.loads(msg.body)
-
-        except (json.JSONDecodeError, TypeError):
-            self.set_next_state(
-                TRANSPORT_ARRIVED_AT_DESTINATION
-            )
-            return
-
-        performative = msg.get_metadata("performative")
-
-        if performative == INFORM_PERFORMATIVE:
-
-            if content.get("status") != CUSTOMER_IN_DEST:
-                self.set_next_state(
-                    TRANSPORT_ARRIVED_AT_DESTINATION
-                )
-                return
-
-            self.agent.remove_customer_in_transport(
-                customer_id
-            )
-
-            self.agent.increment_completed_assignments()
-
-            logger.info(
-                "Agent[{}]: Service for customer [{}] completed.".format(
-                    self.agent.name,
-                    customer_id
-                )
-            )
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
-        elif performative == CANCEL_PERFORMATIVE:
-
-            self.agent.remove_customer_in_transport(
-                customer_id
-            )
-
-            self.agent.status = TRANSPORT_WAITING
-            self.agent.set_available()
-
-            self.set_next_state(
-                TRANSPORT_WAITING
-            )
-            return
-
-        self.set_next_state(
-            TRANSPORT_ARRIVED_AT_DESTINATION
-        )
-
+        customers=self.get("current_customer")
+        if not customers: self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        customer_id=next(iter(customers.items()))[0]
+        msg=await self.receive(timeout=60)
+        if not msg: self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        try: content=json.loads(msg.body)
+        except (json.JSONDecodeError,TypeError): self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        performative=msg.get_metadata("performative")
+        if performative in (INFORM_PERFORMATIVE,CANCEL_PERFORMATIVE) and not self.message_matches_active_service(content):
+            self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+        if performative==INFORM_PERFORMATIVE and content.get("status")==CUSTOMER_IN_DEST:
+            if not self.mark_service_completed(): logger.warning("Agent[{}]: Could not mirror completed NRP Electric Taxi service.".format(self.agent.name))
+            self.agent.remove_customer_in_transport(customer_id); self.clear_active_message_context(); self.agent.increment_completed_assignments(); self.clear_service_context()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        if performative==CANCEL_PERFORMATIVE:
+            self.fail_service("customer_cancelled_at_destination"); self.discard_pending_movement(); self.clear_service_context(); self.clear_active_message_context()
+            if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
 
 class NPRElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
         await super().on_start()
-
         self.agent.status = TRANSPORT_NEEDS_CHARGING
         self.agent.set_busy()
 
     async def run(self):
-
-        if (
-            self.agent.get_stations() is None
-            or self.agent.get_number_stations() < 1
-        ):
-
+        if self.agent.get_stations() is None or self.agent.get_number_stations() < 1:
             logger.info(
-                "Agent[{}]: Looking for a charging station.".format(
+                "Agent[{}]: The agent looking for a station.".format(
                     self.agent.name
                 )
             )
-
             stations = await self.agent.get_list_agent_position(
                 self.agent.service_type,
                 self.agent.get_stations()
             )
-
             self.agent.set_stations(stations)
 
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
+            if not stations:
+                await self.agent.sleep(1)
+
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
 
-        nearby_station = self.agent.nearst_agent(
+        nearby_station_dest = self.agent.nearst_agent(
             self.agent.get_stations(),
             self.agent.get_position()
         )
 
-        if nearby_station is None:
+        if nearby_station_dest is None:
             logger.warning(
                 "Agent[{}]: No charging station available.".format(
                     self.agent.name
                 )
             )
 
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
+            await self.agent.sleep(1)
+
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
 
-        self.agent.set_nearby_station(
-            nearby_station
-        )
-
+        self.agent.set_nearby_station(nearby_station_dest)
         station_id = self.agent.get_nearby_station_id()
         station_position = self.agent.get_nearby_station_position()
+        logger.info("Agent[{}]: The agent selected station [{}].".format(self.agent.name, station_id))
 
-        logger.info(
-            "Agent[{}]: Selected charging station [{}].".format(
-                self.agent.name,
-                station_id
-            )
-        )
-
-        try:
-
-            await self.go_to_the_station(
-                station_id,
-                station_position
-            )
-
-            travel_km = self.agent.calculate_distance_km(
-                self.agent.get_position(),
-                station_position
-            )
-
-            (
-                distance,
-                osrm_duration,
-                _speed_based_duration,
-            ) = await self.agent.move_to(
-                station_position
-            )
-
-            self.agent.decrease_autonomy_km(
-                travel_km
-            )
-
-            self.agent.events_store.emit(
-                event_type="travel_to_station",
-                details={
-                    "distance": distance,
-                    "duration": _speed_based_duration,
-                },
-            )
-
-            self.agent.status = TRANSPORT_MOVING_TO_STATION
-
-            self.set_next_state(
-                TRANSPORT_MOVING_TO_STATION
-            )
-            return
-
-        except AlreadyInDestination:
-
-            logger.info(
-                "Agent[{}]: Already at charging station [{}].".format(
-                    self.agent.name,
-                    station_id
-                )
-            )
-
-            arguments = {
-                "transport_need":
-                    self.agent.max_autonomy_km
-                    - self.agent.current_autonomy_km
-            }
-
-            content = {
-                "service_name": self.agent.service_type,
-                "object_type": "transport",
-                "args": arguments
-            }
-
-            await self.request_access_station(
-                self.agent.get_current_station(),
-                content
-            )
-
-            self.agent.events_store.emit(
-                event_type="arrival_at_station",
-                details={}
-            )
-
-            self.agent.status = TRANSPORT_IN_STATION_PLACE
-
-            self.set_next_state(
-                TRANSPORT_IN_STATION_PLACE
-            )
-            return
-
-        except PathRequestException:
-
-            logger.error(
-                "Agent[{}]: Could not get a path to charging "
-                "station [{}].".format(
-                    self.agent.name,
-                    station_id
-                )
-            )
-
-            await self.drop_station()
-
-            self.agent.status = TRANSPORT_NEEDS_CHARGING
-
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
-            return
-
-        except Exception as e:
-
-            logger.error(
-                "Unexpected error in electric taxi [{}]: {}".format(
-                    self.agent.name,
-                    e
-                )
-            )
-
-            await self.drop_station()
-
-            self.agent.status = TRANSPORT_NEEDS_CHARGING
-
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
-            return
-
-
-class NPRElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
-
-    async def on_start(self):
-        await super().on_start()
-
-        self.agent.status = TRANSPORT_MOVING_TO_STATION
-
-    async def run(self):
-
-        station_id = self.agent.get_current_station()
-
-        try:
-
-            if not self.agent.is_in_destination():
-
-                await self.agent.sleep(1)
-
-                self.set_next_state(
-                    TRANSPORT_MOVING_TO_STATION
-                )
+        # A charging_id is independent from service_id. It is created before travel
+        # so the same session is used for physical arrival/start/completion.
+        if self.get_charging_context() is None:
+            if self.create_charging_context(station_id) is None:
+                self.set_next_state(TRANSPORT_NEEDS_CHARGING)
                 return
 
-            logger.info(
-                "Agent[{}]: Arrived at charging station [{}].".format(
-                    self.agent.name,
-                    station_id
+        try:
+            await self.go_to_the_station(station_id, station_position)
+            travel_km = self.agent.calculate_distance_km(
+                self.agent.get_position(), station_position
+            )
+            try:
+                distance, _osrm_duration, _speed_based_duration = await self.agent.move_to(
+                    station_position
                 )
-            )
-
-            arguments = {
-                "transport_need":
-                    self.agent.max_autonomy_km
-                    - self.agent.current_autonomy_km
-            }
-
-            content = {
-                "service_name": self.agent.service_type,
-                "object_type": "transport",
-                "args": arguments
-            }
-
-            await self.request_access_station(
-                station_id,
-                content
-            )
-
-            self.agent.events_store.emit(
-                event_type="arrival_at_station",
-                details={}
-            )
-
-            self.agent.status = TRANSPORT_IN_STATION_PLACE
-
-            self.set_next_state(
-                TRANSPORT_IN_STATION_PLACE
-            )
-            return
-
-        except AlreadyInDestination:
-
-            logger.info(
-                "Agent[{}]: Already at charging station [{}].".format(
-                    self.agent.name,
-                    station_id
+                if not self.set_pending_movement(
+                    "auxiliary", distance, require_service=False
+                ):
+                    raise RuntimeError("Unable to register charging-station movement.")
+                self.agent.decrease_autonomy_km(travel_km)
+                self.agent.status = TRANSPORT_MOVING_TO_STATION
+                self.set_next_state(TRANSPORT_MOVING_TO_STATION)
+                return
+            except AlreadyInDestination:
+                self.set_pending_movement("auxiliary", 0, require_service=False)
+                self.complete_pending_movement()
+                self.charging_arrived()
+                arguments = {
+                    "transport_need": self.agent.max_autonomy_km - self.agent.current_autonomy_km
+                }
+                await self.request_access_station(
+                    station_id,
+                    {"service_name": self.agent.service_type, "object_type": "transport", "args": arguments},
                 )
-            )
-
-            arguments = {
-                "transport_need":
-                    self.agent.max_autonomy_km
-                    - self.agent.current_autonomy_km
-            }
-
-            content = {
-                "service_name": self.agent.service_type,
-                "object_type": "transport",
-                "args": arguments
-            }
-
-            await self.request_access_station(
-                station_id,
-                content
-            )
-
-            self.agent.events_store.emit(
-                event_type="arrival_at_station",
-                details={}
-            )
-
-            self.agent.status = TRANSPORT_IN_STATION_PLACE
-
-            self.set_next_state(
-                TRANSPORT_IN_STATION_PLACE
-            )
-            return
-
+                self.agent.status = TRANSPORT_IN_STATION_PLACE
+                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+                return
         except PathRequestException:
-
-            logger.error(
-                "Agent[{}]: Could not complete route "
-                "to charging station [{}].".format(
-                    self.agent.name,
-                    station_id
-                )
-            )
-
+            logger.error("Agent[{}]: The agent could not get a path to station [{}].".format(self.agent.name, station_id))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
             await self.drop_station()
-
             self.agent.status = TRANSPORT_NEEDS_CHARGING
-
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
-
         except Exception as e:
-
-            logger.error(
-                "Unexpected error in electric taxi [{}]: {}".format(
-                    self.agent.name,
-                    e
-                )
-            )
-
+            logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name, e))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
             await self.drop_station()
-
             self.agent.status = TRANSPORT_NEEDS_CHARGING
-
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
 
-
-class NPRElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
-
+class NPRElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
+        self.agent.status = TRANSPORT_MOVING_TO_STATION
 
+    async def _arrive_and_request(self):
+        station_id = self.agent.get_current_station()
+        self.complete_pending_movement()
+        if self.get_charging_context() is None:
+            if self.create_charging_context(station_id) is None:
+                return False
+        self.charging_arrived()
+        arguments = {
+            "transport_need": self.agent.max_autonomy_km - self.agent.current_autonomy_km
+        }
+        await self.request_access_station(
+            station_id,
+            {"service_name": self.agent.service_type, "object_type": "transport", "args": arguments},
+        )
+        self.agent.status = TRANSPORT_IN_STATION_PLACE
+        self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+        return True
+
+    async def run(self):
+        try:
+            if not self.agent.is_in_destination():
+                await self.agent.sleep(1)
+                self.set_next_state(TRANSPORT_MOVING_TO_STATION)
+                return
+            await self._arrive_and_request()
+            return
+        except AlreadyInDestination:
+            if not self.complete_pending_movement():
+                self.set_pending_movement("auxiliary", 0, require_service=False)
+            await self._arrive_and_request()
+            return
+        except PathRequestException:
+            logger.error("Agent[{}]: The agent could not complete the path to charging station.".format(self.agent.name))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
+            await self.drop_station()
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
+        except Exception as e:
+            logger.error("Unexpected charging-route error in [{}]: {}".format(self.agent.name, e))
+            self.discard_pending_movement()
+            self.abandon_charging_context()
+            await self.drop_station()
+            self.agent.status = TRANSPORT_NEEDS_CHARGING
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
+            return
+
+class NPRElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
+    async def on_start(self):
+        await super().on_start()
         self.agent.status = TRANSPORT_IN_STATION_PLACE
 
     async def run(self):
-
         msg = await self.receive(timeout=60)
-
         if not msg:
-            self.set_next_state(
-                TRANSPORT_IN_STATION_PLACE
-            )
+            self.set_next_state(TRANSPORT_IN_STATION_PLACE)
             return
-
         try:
             content = json.loads(msg.body)
-
         except (json.JSONDecodeError, TypeError):
-            self.set_next_state(
-                TRANSPORT_IN_STATION_PLACE
-            )
+            self.set_next_state(TRANSPORT_IN_STATION_PLACE)
             return
-
-        performative = msg.get_metadata(
-            "performative"
-        )
-
+        performative = msg.get_metadata("performative")
         if performative == ACCEPT_PERFORMATIVE:
-
-            if content.get("station_id") is None:
-                self.set_next_state(
-                    TRANSPORT_IN_STATION_PLACE
-                )
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                logger.warning("Agent[{}]: Ignoring charging-station ACCEPT with mismatched station.".format(self.agent.name))
+                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
                 return
-
-            logger.debug(
-                "Agent[{}]: ACCEPT received from station [{}].".format(
-                    self.agent.name,
-                    content["station_id"]
-                )
-            )
-
-            self.agent.events_store.emit(
-                event_type="wait_for_service",
-                details={}
-            )
-
             self.agent.status = TRANSPORT_IN_WAITING_LIST
-
-            self.set_next_state(
-                TRANSPORT_IN_WAITING_LIST
-            )
+            self.set_next_state(TRANSPORT_IN_WAITING_LIST)
             return
-
-        elif performative == REFUSE_PERFORMATIVE:
-
-            logger.info(
-                "Agent[{}]: Charging station [{}] refused the request.".format(
-                    self.agent.name,
-                    self.agent.get_current_station()
-                )
-            )
-
+        if performative == REFUSE_PERFORMATIVE:
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_IN_STATION_PLACE)
+                return
+            # The already-emitted arrival remains an unfinished charging session.
+            self.abandon_charging_context()
             await self.drop_station()
-
             self.agent.status = TRANSPORT_NEEDS_CHARGING
-
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
-
-        self.set_next_state(
-            TRANSPORT_IN_STATION_PLACE
-        )
-
+        self.set_next_state(TRANSPORT_IN_STATION_PLACE)
 
 class NPRElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
         await super().on_start()
-
         self.agent.status = TRANSPORT_IN_WAITING_LIST
 
     async def run(self):
-
         msg = await self.receive(timeout=5)
-
         if not msg:
-            self.set_next_state(
-                TRANSPORT_IN_WAITING_LIST
-            )
+            self.set_next_state(TRANSPORT_IN_WAITING_LIST)
             return
-
         try:
             content = json.loads(msg.body)
-
         except (json.JSONDecodeError, TypeError):
-            self.set_next_state(
-                TRANSPORT_IN_WAITING_LIST
-            )
+            self.set_next_state(TRANSPORT_IN_WAITING_LIST)
             return
-
-        performative = msg.get_metadata(
-            "performative"
-        )
-
+        performative = msg.get_metadata("performative")
         if performative == INFORM_PERFORMATIVE:
-
-            if content.get("station_id") is None:
-                self.set_next_state(
-                    TRANSPORT_IN_WAITING_LIST
-                )
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_IN_WAITING_LIST)
                 return
-
             if content.get("serving"):
-
-                logger.debug(
-                    "Agent[{}]: Charging service started at station [{}].".format(
-                        self.agent.name,
-                        content["station_id"]
-                    )
-                )
-
-                self.agent.events_store.emit(
-                    event_type="service_start",
-                    details={}
-                )
-
+                if not self.charging_started():
+                    logger.warning("Agent[{}]: Charging start milestone could not be emitted.".format(self.agent.name))
+                    self.set_next_state(TRANSPORT_IN_WAITING_LIST)
+                    return
                 self.agent.status = TRANSPORT_CHARGING
-
-                self.set_next_state(
-                    TRANSPORT_CHARGING
-                )
+                self.set_next_state(TRANSPORT_CHARGING)
                 return
-
-            self.set_next_state(
-                TRANSPORT_IN_WAITING_LIST
-            )
-            return
-
         elif performative == REFUSE_PERFORMATIVE:
-
-            logger.info(
-                "Agent[{}]: Charging service refused by station [{}].".format(
-                    self.agent.name,
-                    self.agent.get_current_station()
-                )
-            )
-
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ):
+                self.set_next_state(TRANSPORT_IN_WAITING_LIST)
+                return
+            self.abandon_charging_context()
             await self.drop_station()
-
             self.agent.status = TRANSPORT_NEEDS_CHARGING
-
-            self.set_next_state(
-                TRANSPORT_NEEDS_CHARGING
-            )
+            self.set_next_state(TRANSPORT_NEEDS_CHARGING)
             return
-
-        self.set_next_state(
-            TRANSPORT_IN_WAITING_LIST
-        )
-
+        self.set_next_state(TRANSPORT_IN_WAITING_LIST)
 
 class NPRElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
-
     async def on_start(self):
-        await super().on_start()
-
-        self.agent.status = TRANSPORT_CHARGING
+        await super().on_start(); self.agent.status=TRANSPORT_CHARGING
 
     async def run(self):
-
-        msg = await self.receive(timeout=60)
-
-        if not msg:
-            self.set_next_state(
-                TRANSPORT_CHARGING
-            )
-            return
-
-        try:
-            content = json.loads(msg.body)
-
-        except (json.JSONDecodeError, TypeError):
-            self.set_next_state(
-                TRANSPORT_CHARGING
-            )
-            return
-
-        protocol = msg.get_metadata(
-            "protocol"
-        )
-
-        performative = msg.get_metadata(
-            "performative"
-        )
-
-        if (
-            protocol == REQUEST_PROTOCOL
-            and performative == INFORM_PERFORMATIVE
-        ):
-
-            if content.get("charged"):
-
-                self.agent.increase_full_autonomy_km()
-
-                await self.drop_station()
-
-                self.agent.events_store.emit(
-                    event_type="service_completion",
-                    details={}
-                )
-
-                logger.info(
-                    "Agent[{}]: Charging completed. "
-                    "Current autonomy: {} km.".format(
-                        self.agent.name,
-                        self.agent.get_autonomy()
-                    )
-                )
-
-                self.agent.status = TRANSPORT_WAITING
-                self.agent.set_available()
-
-                self.set_next_state(
-                    TRANSPORT_WAITING
-                )
-                return
-
-        self.set_next_state(
-            TRANSPORT_CHARGING
-        )
-
+        msg=await self.receive(timeout=60)
+        if not msg: self.set_next_state(TRANSPORT_CHARGING); return
+        try: content=json.loads(msg.body)
+        except (json.JSONDecodeError,TypeError): self.set_next_state(TRANSPORT_CHARGING); return
+        if msg.get_metadata("protocol")==REQUEST_PROTOCOL and msg.get_metadata("performative")==INFORM_PERFORMATIVE and content.get("charged"):
+            if not self.charging_message_matches_context(
+                content,
+                msg.sender
+            ): self.set_next_state(TRANSPORT_CHARGING); return
+            if not self.charging_completed(): self.set_next_state(TRANSPORT_CHARGING); return
+            self.agent.increase_full_autonomy_km(); await self.drop_station(); self.clear_charging_context()
+            self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+        self.set_next_state(TRANSPORT_CHARGING)
 
 class FSMNPRElectricTaxiBehaviour(FSMSimfleetBehaviour):
 

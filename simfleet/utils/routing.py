@@ -67,6 +67,7 @@ class RequestRouteBehaviour(OneShotBehaviour):
                     response_time, e
                 )
             )
+            self.kill({"type": "error", "error": str(e)})
 
 
 async def request_path(agent, origin, destination, route_host, route_profile="driving"):
@@ -105,17 +106,17 @@ async def request_path(agent, origin, destination, route_host, route_profile="dr
     while not behav.is_killed():
         await asyncio.sleep(0.01)
 
+    exit_code = behav.exit_code
     if (
-        behav.exit_code is {}
-        or "type" in behav.exit_code
-        and behav.exit_code["type"] == "error"
+        not isinstance(exit_code, dict)
+        or exit_code.get("type") == "error"
     ):
         return None, None, None
     else:
         return (
-            behav.exit_code["path"],
-            behav.exit_code["distance"],
-            behav.exit_code["duration"],
+            exit_code["path"],
+            exit_code["distance"],
+            exit_code["duration"],
         )
 
 

@@ -146,7 +146,8 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
     # New implementation v1
     def get_presence_status(self):
         return {
-            "p": self.get_position()
+            "p": self.get_position(),
+            "st": self.status,
         }
 
     def publish_presence(
@@ -238,12 +239,6 @@ class RegistrationBehaviour(CyclicBehaviour):
         # ---------------------
 
     async def run(self):
-
-        logger.warning(
-            "Agent[{}]: DEBBUG - Registe: [{}].".format(
-                self.agent.name, self.agent.registration
-            )
-        )
 
         try:
             #OLD
