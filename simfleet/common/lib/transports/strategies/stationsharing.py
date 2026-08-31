@@ -702,10 +702,23 @@ class StationSharingWaitingState(
                     "station": destination_station,
                 },
             )
-            self.agent.remove_customer_in_transport(customer_id)
-            self.clear_service_context()
-            self.agent.status = TRANSPORT_IN_DEST
-            self.set_next_state(TRANSPORT_IN_DEST)
+            #self.agent.remove_customer_in_transport(customer_id)
+            #self.clear_service_context()
+            #self.agent.status = TRANSPORT_IN_DEST
+            #self.set_next_state(TRANSPORT_IN_DEST)
+
+            origin_station = self.agent.get_origin_station()
+            if origin_station is not None:
+                # The bike never started the physical service movement.
+                # Restore it to the station from which it was picked.
+                self.agent.set_destination_station(origin_station)
+
+                await self.send_station_registration(origin_station)
+
+                self.agent.status = TRANSPORT_WAITING_FOR_STATION_APPROVAL
+                self.set_next_state(TRANSPORT_WAITING_FOR_STATION_APPROVAL)
+                return
+
             return
 
         except Exception as exc:
@@ -812,6 +825,13 @@ class StationSharingWaitingForStationApprovalState(
         logger.debug("{} waiting for destination station approval".format(self.agent.jid))
 
     async def run(self):
+
+        context = self.get_service_context()
+        recovering_failed_service = (
+            context is not None
+            and context.get("terminal_status") == "failed"
+        )
+
         destination_station = self.agent.get_destination_station()
         if destination_station is None:
             self.agent.status = TRANSPORT_IN_DEST
@@ -845,6 +865,27 @@ class StationSharingWaitingForStationApprovalState(
 
             self.agent.configure_registration(destination_station, False)
             self.agent.set_registration(True, content)
+
+            if recovering_failed_service:
+                self.agent.remove_customer_in_transport(customer_id)
+
+                self.agent.clear_origin_station()
+                self.agent.clear_destination_station()
+
+                self.clear_service_context()
+
+                self.agent.status = TRANSPORT_WAITING
+                self.set_next_state(TRANSPORT_WAITING)
+
+                logger.info(
+                    "Agent[{}]: Restored to origin station [{}] "
+                    "after failed service route.".format(
+                        self.agent.name,
+                        destination_station,
+                    )
+                )
+                return
+
             await self.inform_customer(
                 customer_id,
                 INFORM_PERFORMATIVE,

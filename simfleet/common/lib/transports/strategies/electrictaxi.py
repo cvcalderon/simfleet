@@ -1379,9 +1379,13 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
                 return
             active = self.activate_pending_offer(content)
             customer_id = content["customer_id"]
-            if not self.check_and_decrease_autonomy(content["origin"], content["dest"]):
-                # Acceptance is not yet a canonical assignment: the electric taxi
-                # rejects it operationally so the same user service may retry.
+
+            travel_km = self.agent.calculate_service_km(
+                content["origin"],
+                content["dest"],
+            )
+
+            if not self.agent.has_enough_autonomy_km(travel_km):
                 await self.cancel_proposal(customer_id)
                 self.clear_active_message_context()
                 self.agent.set_busy()
@@ -1400,16 +1404,31 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
                 )
                 self.agent.set_busy()
                 await self.inform_customer(customer_id=customer_id, status=TRANSPORT_MOVING_TO_CUSTOMER)
-                distance, _osrm_duration, _speed_based_duration = await self.agent.move_to(content["origin"])
+                distance, _osrm_duration, _speed_based_duration = (
+                    await self.agent.move_to(content["origin"])
+                )
+
+                self.agent.decrease_autonomy_km(travel_km)
+
                 if not self.set_pending_movement("approach", distance):
-                    raise RuntimeError("Unable to register Electric Taxi approach movement.")
+                    raise RuntimeError(
+                        "Unable to register Electric Taxi approach movement."
+                    )
+
                 self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
                 self.set_next_state(TRANSPORT_MOVING_TO_CUSTOMER)
                 return
             except AlreadyInDestination:
+                self.agent.decrease_autonomy_km(travel_km)
+
                 self.set_pending_movement("approach", 0)
                 self.complete_pending_movement()
-                await self.inform_customer(customer_id=customer_id, status=TRANSPORT_IN_CUSTOMER_PLACE)
+
+                await self.inform_customer(
+                    customer_id=customer_id,
+                    status=TRANSPORT_IN_CUSTOMER_PLACE,
+                )
+
                 self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
                 self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
                 return
@@ -1498,24 +1517,79 @@ class ElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
         if performative==INFORM_PERFORMATIVE and content.get("status")==CUSTOMER_IN_TRANSPORT:
             customers=self.get("assigned_customer")
             if not customers: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
-            customer_id=next(iter(customers.items()))[0]; dest=next(iter(customers.items()))[1]["destination"]
+            customer_id = next(iter(customers.items()))[0]
+            dest = next(iter(customers.items()))[1]["destination"]
+
+            service_km = self.agent.calculate_distance_km(
+                self.agent.get_position(),
+                dest,
+            )
+
             try:
-                self.agent.add_customer_in_transport(customer_id=customer_id,dest=dest)
-                if not self.start_service(self.agent.jid): raise RuntimeError("Unable to emit Electric Taxi service start.")
+                self.agent.add_customer_in_transport(
+                    customer_id=customer_id,
+                    dest=dest,
+                )
+
+                if not self.start_service(self.agent.jid):
+                    raise RuntimeError(
+                        "Unable to emit Electric Taxi service start."
+                    )
+
                 self.agent.remove_assigned_customer()
-                distance,_osrm_duration,_speed_based_duration=await self.agent.move_to(dest)
-                if not self.set_pending_movement("service",distance): raise RuntimeError("Unable to register Electric Taxi service movement.")
-                self.agent.status=TRANSPORT_MOVING_TO_DESTINATION; self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION); return
+
+                distance, _osrm_duration, _speed_based_duration = (
+                    await self.agent.move_to(dest)
+                )
+
+                if not self.set_pending_movement("service", distance):
+                    raise RuntimeError(
+                        "Unable to register Electric Taxi service movement."
+                    )
+
+                self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+                self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
+                return
+
             except AlreadyInDestination:
-                self.set_pending_movement("service",0); self.complete_pending_movement()
-                await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
-                self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+                self.set_pending_movement("service", 0)
+                self.complete_pending_movement()
+
+                await self.inform_customer(
+                    customer_id=customer_id,
+                    status=CUSTOMER_IN_DEST,
+                )
+
+                self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+                self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
+                return
+
             except PathRequestException:
-                self.fail_service("service_route_failed"); self.discard_pending_movement()
-                await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_route_failed"})
-                self.clear_service_context(); self.clear_active_message_context()
-                if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
-                self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+                # The service leg never started physically. Restore the
+                # autonomy that had been reserved for that unexecuted leg.
+                self.agent.increase_autonomy_km(service_km)
+
+                self.fail_service("service_route_failed")
+                self.discard_pending_movement()
+
+                await self.cancel_customer(
+                    customer_id,
+                    {
+                        "terminal_status": "failed",
+                        "failure_reason": "service_route_failed",
+                    },
+                )
+
+                self.clear_service_context()
+                self.clear_active_message_context()
+
+                if customer_id in self.agent.get("current_customer"):
+                    self.agent.remove_customer_in_transport(customer_id)
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING)
+                return
             except Exception as e:
                 logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
                 self.fail_service("service_unexpected_error"); self.discard_pending_movement()
@@ -1960,24 +2034,79 @@ class NPRElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
         if performative==INFORM_PERFORMATIVE and content.get("status")==CUSTOMER_IN_TRANSPORT:
             customers=self.get("assigned_customer")
             if not customers: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
-            customer_id=next(iter(customers.items()))[0]; dest=next(iter(customers.items()))[1]["destination"]
+            customer_id = next(iter(customers.items()))[0]
+            dest = next(iter(customers.items()))[1]["destination"]
+
+            service_km = self.agent.calculate_distance_km(
+                self.agent.get_position(),
+                dest,
+            )
+
             try:
-                self.agent.add_customer_in_transport(customer_id=customer_id,dest=dest)
-                if not self.start_service(self.agent.jid): raise RuntimeError("Unable to emit Electric Taxi service start.")
+                self.agent.add_customer_in_transport(
+                    customer_id=customer_id,
+                    dest=dest,
+                )
+
+                if not self.start_service(self.agent.jid):
+                    raise RuntimeError(
+                        "Unable to emit Electric Taxi service start."
+                    )
+
                 self.agent.remove_assigned_customer()
-                distance,_osrm_duration,_speed_based_duration=await self.agent.move_to(dest)
-                if not self.set_pending_movement("service",distance): raise RuntimeError("Unable to register Electric Taxi service movement.")
-                self.agent.status=TRANSPORT_MOVING_TO_DESTINATION; self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION); return
+
+                distance, _osrm_duration, _speed_based_duration = (
+                    await self.agent.move_to(dest)
+                )
+
+                if not self.set_pending_movement("service", distance):
+                    raise RuntimeError(
+                        "Unable to register Electric Taxi service movement."
+                    )
+
+                self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
+                self.set_next_state(TRANSPORT_MOVING_TO_DESTINATION)
+                return
+
             except AlreadyInDestination:
-                self.set_pending_movement("service",0); self.complete_pending_movement()
-                await self.inform_customer(customer_id=customer_id,status=CUSTOMER_IN_DEST)
-                self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION; self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
+                self.set_pending_movement("service", 0)
+                self.complete_pending_movement()
+
+                await self.inform_customer(
+                    customer_id=customer_id,
+                    status=CUSTOMER_IN_DEST,
+                )
+
+                self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
+                self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
+                return
+
             except PathRequestException:
-                self.fail_service("service_route_failed"); self.discard_pending_movement()
-                await self.cancel_customer(customer_id,{"terminal_status":"failed","failure_reason":"service_route_failed"})
-                self.clear_service_context(); self.clear_active_message_context()
-                if customer_id in self.agent.get("current_customer"): self.agent.remove_customer_in_transport(customer_id)
-                self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
+                # The service leg never started physically. Restore the
+                # autonomy that had been reserved for that unexecuted leg.
+                self.agent.increase_autonomy_km(service_km)
+
+                self.fail_service("service_route_failed")
+                self.discard_pending_movement()
+
+                await self.cancel_customer(
+                    customer_id,
+                    {
+                        "terminal_status": "failed",
+                        "failure_reason": "service_route_failed",
+                    },
+                )
+
+                self.clear_service_context()
+                self.clear_active_message_context()
+
+                if customer_id in self.agent.get("current_customer"):
+                    self.agent.remove_customer_in_transport(customer_id)
+
+                self.agent.status = TRANSPORT_WAITING
+                self.agent.set_available()
+                self.set_next_state(TRANSPORT_WAITING)
+                return
             except Exception as e:
                 logger.error("Unexpected error in transport [{}]: {}".format(self.agent.name,e))
                 self.fail_service("service_unexpected_error"); self.discard_pending_movement()
