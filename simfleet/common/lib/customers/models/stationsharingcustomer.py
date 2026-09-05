@@ -11,14 +11,17 @@ class StationSharingCustomerAgent(PedestrianAgent):
 
     def __init__(self, agentjid, password):
         super().__init__(agentjid, password)
+        self._init_station_sharing_state()
 
+    def _init_station_sharing_state(self):
+        """Initialize state owned by the station-sharing customer capability."""
         self.origin_station_candidates = []
         self.destination_station_candidates = []
 
         self.origin_station = None
         self.destination_station = None
 
-        self.current_transport = None
+        self.station_sharing_transport_id = None
 
         self.trip_failed = False
         self.failure_operation = None
@@ -123,14 +126,14 @@ class StationSharingCustomerAgent(PedestrianAgent):
     def clear_destination_station(self):
         self.destination_station = None
 
-    def set_current_transport(self, transport_id):
-        self.current_transport = transport_id
+    def set_station_sharing_transport_id(self, transport_id):
+        self.station_sharing_transport_id = transport_id
 
-    def get_current_transport(self):
-        return self.current_transport
+    def get_station_sharing_transport_id(self):
+        return self.station_sharing_transport_id
 
-    def clear_current_transport(self):
-        self.current_transport = None
+    def clear_station_sharing_transport_id(self):
+        self.station_sharing_transport_id = None
 
     def set_trip_failure(
         self,
@@ -155,3 +158,11 @@ class StationSharingCustomerAgent(PedestrianAgent):
         self.failure_operation = None
         self.failure_reason = None
         self.failure_station_id = None
+
+    def reset_station_sharing_context(self):
+        """Reset transient state from the current station-sharing service."""
+        self.clear_station_candidates()
+        self.clear_origin_station()
+        self.clear_destination_station()
+        self.clear_station_sharing_transport_id()
+        self.clear_trip_failure()

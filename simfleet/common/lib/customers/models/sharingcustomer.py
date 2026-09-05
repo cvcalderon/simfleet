@@ -22,10 +22,13 @@ class SharingCustomerAgent(PedestrianAgent):
 
     def __init__(self, agentjid, password):
         super().__init__(agentjid, password)
+        self._init_sharing_state()
 
+    def _init_sharing_state(self):
+        """Initialize state owned by the sharing customer capability."""
         self.transport_candidates = []
-        self.current_transport = None
-        self.current_transport = None
+        self.pending_transport = None
+        self.sharing_transport = None
 
     def set_transport_candidates(self, candidates):
         if candidates is None:
@@ -50,30 +53,30 @@ class SharingCustomerAgent(PedestrianAgent):
             if str(candidate.get("jid")) != str(transport_jid)
         ]
 
-    def set_current_transport(self, transport):
+    def set_sharing_transport(self, transport):
         if transport is None:
-            self.current_transport = None
+            self.sharing_transport = None
             return
 
-        self.current_transport = dict(transport)
+        self.sharing_transport = dict(transport)
 
-    def get_current_transport(self):
-        return self.current_transport
+    def get_sharing_transport(self):
+        return self.sharing_transport
 
-    def get_current_transport_id(self):
-        if self.current_transport is None:
+    def get_sharing_transport_id(self):
+        if self.sharing_transport is None:
             return None
 
-        return self.current_transport.get("jid")
+        return self.sharing_transport.get("jid")
 
-    def get_current_transport_position(self):
-        if self.current_transport is None:
+    def get_sharing_transport_position(self):
+        if self.sharing_transport is None:
             return None
 
-        return self.current_transport.get("position")
+        return self.sharing_transport.get("position")
 
-    def clear_current_transport(self):
-        self.current_transport = None
+    def clear_sharing_transport(self):
+        self.sharing_transport = None
 
     def can_walk(self, coords):
         if self.max_walking_dist is None:
@@ -114,4 +117,8 @@ class SharingCustomerAgent(PedestrianAgent):
     def clear_pending_transport(self):
         self.pending_transport = None
 
-
+    def reset_sharing_context(self):
+        """Reset transient state from the current sharing service."""
+        self.clear_transport_candidates()
+        self.clear_pending_transport()
+        self.clear_sharing_transport()

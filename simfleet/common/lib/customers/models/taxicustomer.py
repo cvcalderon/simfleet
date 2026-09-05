@@ -40,10 +40,13 @@ class TaxiCustomerAgent(CustomerAgent):
         run_strategy():
             Adds the behavior for handling requests and executes the customer's strategy.
     """
+
     def __init__(self, agentjid, password):
         CustomerAgent.__init__(self, agentjid, password)
+        self._init_taxi_state()
 
-        #self.fleetmanagers = None      #CustomerAgent
+    def _init_taxi_state(self):
+        """Initialize state owned by the taxi customer capability."""
         self.transport_assigned = None
 
 
@@ -79,6 +82,10 @@ class TaxiCustomerAgent(CustomerAgent):
                 Clears the assigned transport agent.
                 """
         self.transport_assigned = None
+
+    def reset_taxi_context(self):
+        """Reset transient state from the current taxi service."""
+        self.clear_transport_assigned()
 
 
     def run_strategy(self):

@@ -23,22 +23,14 @@ class PublicTransportCustomerAgent(
     selected journey leg by leg.
     """
 
-    def __init__(
-        self,
-        agentjid,
-        password,
-        **kwargs
-    ):
+    def __init__(self, agentjid, password, **kwargs):
+        super().__init__(agentjid, password)
+        self._init_public_transport_state(**kwargs)
 
-        super().__init__(
-            agentjid,
-            password
-        )
+    def _init_public_transport_state(self, **kwargs):
+        """Initialize state owned by the public-transport customer capability."""
 
-        #
-        # Journey-planning constraints.
-        #
-
+        # Permanent journey-planning constraints.
         self.max_access_walking_distance = 600
         self.max_transfer_walking_distance = 300
         self.max_transfers = 2
@@ -46,41 +38,32 @@ class PublicTransportCustomerAgent(
         self.set_max_access_walking_distance(
             kwargs.get(
                 "max_access_walking_distance",
-                600
+                600,
             )
         )
 
         self.set_max_transfer_walking_distance(
             kwargs.get(
                 "max_transfer_walking_distance",
-                300
+                300,
             )
         )
 
         self.set_max_transfers(
             kwargs.get(
                 "max_transfers",
-                2
+                2,
             )
         )
 
-        #
-        # Journey planning state.
-        #
-
+        # Transient journey-planning state.
         self.journey_candidates = []
         self.journey = None
 
-        #
-        # Journey execution state.
-        #
-
+        # Transient journey-execution state.
         self.current_leg_index = 0
-
         self.current_vehicle = None
-
         self.current_stop = None
-
         self.waiting_pattern_id = None
 
     def set_max_access_walking_distance(
@@ -221,6 +204,11 @@ class PublicTransportCustomerAgent(
         self.current_stop = None
 
         self.waiting_pattern_id = None
+
+    def reset_public_transport_context(self):
+        """Reset transient state from the current public-transport journey."""
+        self.clear_journey_candidates()
+        self.clear_journey()
 
     def get_journey(
         self
