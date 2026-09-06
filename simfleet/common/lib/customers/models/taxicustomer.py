@@ -127,6 +127,21 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
             )
         )
 
+    async def on_end(self):
+        """
+        Finalize the Taxi strategy and notify customer orchestration.
+        """
+        await super().on_end()
+
+        logger.debug(
+            "Agent[{}]: Strategy {} finished.".format(
+                self.agent.name,
+                type(self).__name__,
+            )
+        )
+
+        self.agent.notify_modal_completion()
+
     async def send_request(self, content=None):
         """
         Sends a transport request to the fleet manager(s).

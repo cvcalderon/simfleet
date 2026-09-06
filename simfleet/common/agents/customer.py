@@ -128,6 +128,22 @@ class CustomerAgent(GeoLocatedAgent):
                 """
         return self.fleetmanagers
 
+    def notify_modal_completion(self):
+        """
+        Notify that the active modal customer strategy has finished.
+
+        Traditional customers do not require orchestration, so the
+        default implementation intentionally does nothing.
+        """
+        return
+
+    def should_stop_completed_modal_strategy(self):
+        """
+        Return whether a completed modal strategy should terminate
+        its Behaviour after finishing the current service.
+        """
+        return False
+
 
 class TravelBehaviour(CyclicBehaviour):
     """
