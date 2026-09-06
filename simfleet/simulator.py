@@ -331,11 +331,12 @@ class SimulatorAgent(Agent):
             )
 
             class_ = customer["class"]
-            fleet_type = customer["fleet_type"]
+            fleet_type = customer.get("fleet_type")
             position = customer.get("position")
             speed = customer.get("speed")
             route_profile = customer.get("route_profile")
             target = customer.get("destination")
+            destinations = customer.get("destinations")
             strategy = customer.get("strategy")
             line = customer.get("line")
             # New parameter to determine the maximum walking distance a customer finds reasonable
@@ -363,6 +364,7 @@ class SimulatorAgent(Agent):
                 max_walking_dist=max_walking_dist,
                 optional=optional,
                 route_profile = route_profile,
+                destinations=destinations,
             )
 
             self.set_icon(agent, icon, default="customer")
@@ -1238,6 +1240,7 @@ class SimulatorAgent(Agent):
         max_walking_dist=None,
         optional=None,
         route_profile=None,
+        destinations=None,
     ):
         agent = CustomerFactory.create_agent(
             domain=self.jid.domain,
@@ -1257,6 +1260,7 @@ class SimulatorAgent(Agent):
             max_walking_dist=max_walking_dist,
             optional=optional,
             route_profile = route_profile,
+            destinations=destinations,
         )
 
         if self.simulation_running:

@@ -7,6 +7,14 @@ from simfleet.common.lib.vehicles.models.vehicle import VehicleAgent
 
 from simfleet.utils.reflection import load_class
 
+from simfleet.common.lib.customers.models.multimodalcustomer import (
+    DestinationStep,
+    MultiModalCustomerAgent,
+)
+
+from simfleet.common.lib.customers.strategies.multimodal.strategyprofiles import (
+    resolve_strategy_profile,
+)
 
 class Factory(ABC):
     """
@@ -356,6 +364,7 @@ class CustomerFactory(Factory):
         lines=None,
         max_walking_dist=None,
         route_profile=None,
+        destinations=None,
     ):
         """
         Create a Customer agent.
@@ -377,6 +386,7 @@ class CustomerFactory(Factory):
             speed (float, optional): Agent movement speed.
             line (str, optional): Public transport line.
             max_walking_dist (float, optional): Maximum walking distance.
+            destinations (list, optional): Multimodal destination plan configuration.
 
         Returns:
             CustomerAgent: An instance of the specified customer agent class.
@@ -397,6 +407,105 @@ class CustomerFactory(Factory):
             agent_class = load_class(
                 class_
             )
+
+            is_multimodal_customer = issubclass(
+                agent_class,
+                MultiModalCustomerAgent,
+            )
+
+            destination_plan = None
+
+            if is_multimodal_customer:
+
+                if not isinstance(
+                    strategy,
+                    str,
+                ):
+                    raise ValueError(
+                        "MultiModalCustomerAgent requires a multimodal "
+                        "orchestrator strategy."
+                    )
+
+                if not destinations:
+                    raise ValueError(
+                        "MultiModalCustomerAgent requires at least one destination."
+                    )
+
+                destination_plan = []
+
+                for index, step in enumerate(
+                    destinations
+                ):
+                    if not isinstance(
+                        step,
+                        dict,
+                    ):
+                        raise ValueError(
+                            "Multimodal destination {} must be a dictionary.".format(
+                                index + 1
+                            )
+                        )
+
+                    destination = step.get(
+                        "destination"
+                    )
+
+                    step_fleet_type = step.get(
+                        "fleet_type"
+                    )
+
+                    strategy_path = step.get(
+                        "strategy"
+                    )
+
+                    if destination is None:
+                        raise ValueError(
+                            "Multimodal destination {} has no destination.".format(
+                                index + 1
+                            )
+                        )
+
+                    if not step_fleet_type:
+                        raise ValueError(
+                            "Multimodal destination {} has no fleet_type.".format(
+                                index + 1
+                            )
+                        )
+
+                    if not strategy_path:
+                        raise ValueError(
+                            "Multimodal destination {} has no strategy.".format(
+                                index + 1
+                            )
+                        )
+
+                    strategy_class = load_class(
+                        strategy_path
+                    )
+
+                    strategy_profile = resolve_strategy_profile(
+                        strategy_class
+                    )
+
+                    destination_plan.append(
+                        DestinationStep(
+                            id=step.get(
+                                "id",
+                                "destination_{}".format(
+                                    index + 1
+                                ),
+                            ),
+                            destination=destination,
+                            fleet_type=step_fleet_type,
+                            strategy_path=strategy_path,
+                            strategy_class=strategy_class,
+                            strategy_profile=strategy_profile,
+                            dwell_time=step.get(
+                                "dwell_time",
+                                0,
+                            ),
+                        )
+                    )
 
             if optional:
 
@@ -431,16 +540,41 @@ class CustomerFactory(Factory):
         if line:
             agent.set_line(line)
 
-        # Set fleet type, route host, and additional attributes
-        agent.set_fleet_type(fleet_type)
+        # Set fleet type for traditional customers.
+        # MultiModalCustomerAgent activates fleet_type per destination.
+        if not is_multimodal_customer:
+            agent.set_fleet_type(
+                fleet_type
+            )
+
         agent.set_route_host(route_host)
         if route_profile is not None:
             agent.set_route_profile(route_profile)
         agent.set_boundingbox(bbox)
 
-        agent.set_initial_position(position)
+        agent.set_initial_position(
+            position
+        )
 
-        agent.set_target_position(target)
+        if is_multimodal_customer:
+
+            agent.set_destination_plan(
+                destination_plan
+            )
+
+            first_step = (
+                agent.get_current_destination_step()
+            )
+
+            agent.set_target_position(
+                first_step.destination
+            )
+
+        else:
+
+            agent.set_target_position(
+                target
+            )
 
         # NEW set maximum walking distance if defined
         if max_walking_dist:
