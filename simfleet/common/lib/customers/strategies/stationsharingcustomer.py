@@ -1031,7 +1031,7 @@ class StationSharingCustomerInStationState(
             self.set_next_state(CUSTOMER_IN_DEST)
             return
 
-        self.agent.set_current_transport(transport_id)
+        self.agent.set_station_sharing_transport_id(transport_id)
         started = await self.start_transport_trip(transport_id)
         if not started:
             self._set_generic_trip_failure("transport_trip_not_started")
@@ -1053,7 +1053,7 @@ class StationSharingCustomerInTransportState(
         logger.debug("{} in station-sharing transport".format(self.agent.jid))
 
     async def run(self):
-        transport_id = self.agent.get_current_transport()
+        transport_id = self.agent.get_station_sharing_transport_id()
         if transport_id is None:
             self._set_generic_trip_failure("transport_missing")
             self.set_next_state(CUSTOMER_IN_DEST)
@@ -1107,7 +1107,7 @@ class StationSharingCustomerInTransportState(
             else:
                 self._set_generic_trip_failure(reason or "transport_failure")
 
-            self.agent.clear_current_transport()
+            self.agent.clear_station_sharing_transport_id()
             self.set_next_state(CUSTOMER_IN_DEST)
             return
 
@@ -1129,11 +1129,11 @@ class StationSharingCustomerInTransportState(
         # CUSTOMER_IN_TRANSPORT notification, so mirror the start here too.
         if not self.mark_service_started(transport_id):
             self._set_generic_trip_failure("service_start_state_error")
-            self.agent.clear_current_transport()
+            self.agent.clear_station_sharing_transport_id()
             self.set_next_state(CUSTOMER_IN_DEST)
             return
 
-        self.agent.clear_current_transport()
+        self.agent.clear_station_sharing_transport_id()
         logger.info(
             "Agent[{}]: Vehicle successfully registered in destination station [{}].".format(
                 self.agent.name,
@@ -1209,7 +1209,7 @@ class StationSharingCustomerInDestState(
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_IN_DEST
-        self.agent.clear_current_transport()
+        self.agent.clear_station_sharing_transport_id()
         self.agent.clear_station_candidates()
 
         context = self.get_service_context()
@@ -1265,6 +1265,13 @@ class StationSharingCustomerInDestState(
 class FSMStationSharingCustomerStrategyBehaviour(
     FSMSimfleetBehaviour
 ):
+
+    async def on_end(self):
+        """
+        Finalize the StationSharing strategy and notify customer orchestration.
+        """
+        await super().on_end()
+        self.agent.notify_modal_completion()
 
     def setup(self):
 

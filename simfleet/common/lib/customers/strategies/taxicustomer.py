@@ -742,6 +742,9 @@ class AcceptFirstRequestBehaviour(TaxiCustomerStrategyBehaviour):
                     )
                 )
                 self.clear_service_context()
+                if self.agent.should_stop_completed_modal_strategy():
+                    self.kill()
+
                 return
 
         except CancelledError:

@@ -2998,6 +2998,13 @@ class FSMPublicTransportCustomerStrategyBehaviour(
     customers.
     """
 
+    async def on_end(self):
+        """
+        Finalize the PublicTransport strategy and notify customer orchestration.
+        """
+        await super().on_end()
+        self.agent.notify_modal_completion()
+
     def setup(
         self
     ):

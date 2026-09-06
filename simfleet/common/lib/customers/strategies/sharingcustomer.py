@@ -491,7 +491,7 @@ class SharingCustomerStrategyBehaviour(State):
         self.fail_service(failure_reason)
         self.clear_service_context()
         self.agent.clear_pending_transport()
-        self.agent.clear_current_transport()
+        self.agent.clear_sharing_transport()
         self.agent.clear_transport_candidates()
         await self.agent.stop()
 
@@ -503,11 +503,11 @@ class SharingCustomerStrategyBehaviour(State):
 
     async def go_to_transport(self):
         transport_id = (
-            self.agent.get_current_transport_id()
+            self.agent.get_sharing_transport_id()
         )
 
         transport_position = (
-            self.agent.get_current_transport_position()
+            self.agent.get_sharing_transport_position()
         )
 
         if (
@@ -694,7 +694,7 @@ class SharingCustomerStrategyBehaviour(State):
 
     async def inform_transport_arrival(self):
         transport_id = (
-            self.agent.get_current_transport_id()
+            self.agent.get_sharing_transport_id()
         )
 
         if transport_id is None:
@@ -1017,7 +1017,7 @@ class SharingCustomerWaitingForApprovalState(
         position = content.get("position")
         if position is not None:
             transport["position"] = position
-        self.agent.set_current_transport(transport)
+        self.agent.set_sharing_transport(transport)
         self.agent.clear_pending_transport()
 
         try:
@@ -1048,7 +1048,7 @@ class SharingCustomerWaitingForApprovalState(
             await self.cancel_transport_booking(pending_transport_id)
             self.discard_pending_movement()
             self.clear_service_context()
-            self.agent.clear_current_transport()
+            self.agent.clear_sharing_transport()
             self.agent.clear_transport_candidates()
             await self.agent.stop()
             return
@@ -1065,7 +1065,7 @@ class SharingCustomerWaitingForApprovalState(
             await self.cancel_transport_booking(pending_transport_id)
             self.discard_pending_movement()
             self.clear_service_context()
-            self.agent.clear_current_transport()
+            self.agent.clear_sharing_transport()
             self.agent.clear_transport_candidates()
             await self.agent.stop()
             return
@@ -1091,7 +1091,7 @@ class SharingCustomerMovingToTransportState(
         )
 
     async def run(self):
-        transport_id = self.agent.get_current_transport_id()
+        transport_id = self.agent.get_sharing_transport_id()
         if transport_id is None:
             await self._fail_and_stop("missing_assigned_transport")
             return
@@ -1110,7 +1110,7 @@ class SharingCustomerMovingToTransportState(
             self.fail_service("approach_movement_missing")
             await self.cancel_transport_booking(transport_id)
             self.clear_service_context()
-            self.agent.clear_current_transport()
+            self.agent.clear_sharing_transport()
             await self.agent.stop()
             return
 
@@ -1141,7 +1141,7 @@ class SharingCustomerInTransportState(
         )
 
     async def run(self):
-        transport_id = self.agent.get_current_transport_id()
+        transport_id = self.agent.get_sharing_transport_id()
         if transport_id is None:
             await self._fail_and_stop("missing_assigned_transport")
             return
@@ -1188,7 +1188,7 @@ class SharingCustomerInTransportState(
             reason = content.get("failure_reason") or "transport_cancelled_service"
             self.fail_service(reason)
             self.clear_service_context()
-            self.agent.clear_current_transport()
+            self.agent.clear_sharing_transport()
             self.agent.clear_transport_candidates()
             await self.agent.stop()
             return
@@ -1216,7 +1216,7 @@ class SharingCustomerInTransportState(
                     transport_id,
                 )
             )
-            self.agent.clear_current_transport()
+            self.agent.clear_sharing_transport()
             self.clear_service_context()
             self.agent.status = CUSTOMER_IN_DEST
             self.set_next_state(CUSTOMER_IN_DEST)
@@ -1235,7 +1235,7 @@ class SharingCustomerInDestState(
         await super().on_start()
         self.agent.status = CUSTOMER_IN_DEST
         self.agent.clear_pending_transport()
-        self.agent.clear_current_transport()
+        self.agent.clear_sharing_transport()
         self.agent.clear_transport_candidates()
         logger.debug(
             "Agent[{}]: The sharing customer is at the destination.".format(
@@ -1259,6 +1259,13 @@ class FSMSharingCustomerStrategyBehaviour(
     Finite State Machine behaviour for a free-floating
     sharing customer.
     """
+
+    async def on_end(self):
+        """
+        Finalize the Sharing strategy and notify customer orchestration.
+        """
+        await super().on_end()
+        self.agent.notify_modal_completion()
 
     def setup(self):
 
