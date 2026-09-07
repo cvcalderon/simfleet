@@ -1201,7 +1201,8 @@ class SimulatorAgent(Agent):
         self.add_transport(agent)
 
         if not delayed:
-            agent.is_launched = True  # TODO
+            # Non-delayed agents participate immediately in readiness checks.
+            agent.is_launched = True
 
         return agent
 
@@ -1247,7 +1248,8 @@ class SimulatorAgent(Agent):
         self.add_customer(agent)
 
         if not delayed:
-            agent.is_launched = True  # TODO
+            # Non-delayed agents participate immediately in readiness checks.
+            agent.is_launched = True
 
         return agent
 
@@ -1275,7 +1277,8 @@ class SimulatorAgent(Agent):
 
         self.add_station(agent)
 
-        agent.is_launched = True  # TODO
+        # Stations are launched during bootstrap and participate in readiness checks.
+        agent.is_launched = True
 
         return agent
 

@@ -37,9 +37,6 @@ class MovableMixin:
         self.set("speed_in_kmh", None)
         self.dest = None
 
-        # self.distances = []
-        # self.durations = []
-
         self.last_route_distance = 0.0
         self.last_osrm_duration = 0.0
         self.last_speed_based_duration = 0.0
@@ -67,16 +64,12 @@ class MovableMixin:
             raise AlreadyInDestination
         counter = 5
         path = None
-        #distance, duration = 0, 0
         distance = 0.0
         osrm_duration = 0.0
         while counter > 0 and path is None:
             logger.debug(
                 "Requesting path from {} to {}".format(self.get("current_pos"), dest)
             )
-           # path, distance, duration = await self.request_path(
-           #     self.get("current_pos"), dest
-           # )
             path, distance, osrm_duration = await self.request_path(
                 self.get("current_pos"),
                 dest,
@@ -88,7 +81,6 @@ class MovableMixin:
 
         self.set("path", path)
         try:
-           # self.chunked_path = chunk_path(path, self.get("speed_in_kmh"))
 
            self.chunked_path = deque( chunk_path(path, self.get("speed_in_kmh")) )
 
@@ -100,8 +92,6 @@ class MovableMixin:
         speed_based_duration = (distance / speed_in_ms)
 
         self.dest = dest
-        # self.distances.append(distance)
-        # self.durations.append(duration)
 
         self.last_route_distance = distance
         self.last_osrm_duration = osrm_duration
@@ -151,8 +141,6 @@ class MovableMixin:
         """
         Advances one step in the simulation
         """
-       # if self.chunked_path:
-       #     _next = self.chunked_path.pop(0)
         if self.chunked_path:
             _next = self.chunked_path.popleft()
             distance = distance_in_meters(self.get_position(), _next)

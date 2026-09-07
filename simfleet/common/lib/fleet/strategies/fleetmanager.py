@@ -20,8 +20,6 @@ class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
     """
 
     async def run(self):
-        #if not self.agent.registration:
-        #    await self.send_registration()
 
         msg = await self.receive(timeout=5)
 

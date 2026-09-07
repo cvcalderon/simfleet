@@ -498,22 +498,6 @@ class FleetManagerStrategyBehaviour(StrategyBehaviour):
         """
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
-    # async def send_registration(self):
-    #     """
-    #     Sends a registration request to the directory service to register the FleetManager.
-    #     """
-    #     logger.info(
-    #         "Manager {} sent proposal to register to directory {}".format(
-    #             self.agent.name, self.agent.directory_id
-    #         )
-    #     )
-    #     content = {"jid": str(self.agent.jid), "type": self.agent.fleet_type}
-    #     msg = Message()
-    #     msg.to = str(self.agent.directory_id)
-    #     msg.set_metadata("protocol", REGISTER_PROTOCOL)
-    #     msg.set_metadata("performative", REQUEST_PERFORMATIVE)
-    #     msg.body = json.dumps(content)
-    #     await self.send(msg)
 
     async def run(self):
         """

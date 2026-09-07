@@ -2,7 +2,6 @@ from loguru import logger
 from abc import ABC, abstractmethod
 
 from simfleet.common.agents.directory import DirectoryAgent
-from simfleet.common.agents.fleetmanager import FleetManagerAgent
 from simfleet.common.lib.vehicles.models.vehicle import VehicleAgent
 
 from simfleet.utils.reflection import load_class
@@ -23,8 +22,6 @@ class Factory(ABC):
 
     """
 
-    # New implementation v1
-
     @classmethod
     def configure_registration(cls, agent, registration, domain):
         if registration:
@@ -39,7 +36,6 @@ class Factory(ABC):
 
                 agent.configure_registration(fleet_jid, presence)
 
-    # ---------------------
 
     @classmethod
     @abstractmethod
@@ -175,12 +171,6 @@ class FleetManagerFactory(Factory):
         jid = f"{name}@{domain}"
         logger.debug("Creating FleetManager agent: {}".format(jid))
 
-        # Load and instantiate agent class
-        # if type(class_) is str:
-        #     agent_class = load_class(class_)
-        #     agent = agent_class(jid, password)
-        # else:
-        #     raise Exception("The agent needs a class in path format.")
 
         if type(class_) is str:
             agent_class = load_class(class_)
@@ -193,7 +183,6 @@ class FleetManagerFactory(Factory):
         else:
             raise Exception("The agent needs a class in path format.")
 
-        #agent = FleetManagerAgent(jid, password)
         agent.set_id(name)
         agent.set_directory(jid_directory)
 
@@ -280,13 +269,11 @@ class TransportFactory(Factory):
         agent.set_id(name)
         agent.set_directory(jid_directory)
 
-        # New implementation v1
         cls.configure_registration(
             agent,
             registration,
             domain
         )
-        # ---------------------
 
         # Load strategy if provided
         if type(strategy) is str:
@@ -378,13 +365,6 @@ class CustomerFactory(Factory):
 
         jid = f"{name}@{domain}"
         logger.debug("Creating Customer agent: {}".format(jid))
-
-        # Load and instantiate agent class
-        #if type(class_) is str:
-        #    agent_class = load_class(class_)
-        #    agent = agent_class(jid, password)
-        #else:
-        #    raise Exception ("The agent needs a class in path format.")
 
         if type(class_) is str:
 
@@ -632,13 +612,11 @@ class StationFactory(Factory):
         agent.set_id(name)
         agent.set_directory(jid_directory)
 
-        # New implementation v1
         cls.configure_registration(
             agent,
             registration,
             domain
         )
-        # ---------------------
 
         # Set route host, and additional attributes
         agent.set_route_host(route_host)
@@ -668,9 +646,7 @@ class StationFactory(Factory):
             elif mode == "agent":
 
                 type_ = service["type"]
-                #type_ = "sharing-station"
                 slots = service["slots"]
-                #args = service["args"]
                 args = service.get("args")
                 args = args or {}
 
@@ -735,13 +711,6 @@ class TransportStopFactory(Factory):
 
         jid = f"{name[0]}@{domain}"
         logger.debug("Creating Station agent: {}".format(jid))
-
-        # Load and instantiate agent class
-        # if type(class_) is str:
-        #     agent_class = load_class(class_)
-        #     agent = agent_class(jid, password)
-        # else:
-        #     raise Exception ("The agent needs a class in path format.")
 
         if type(class_) is str:
             agent_class = load_class(class_)

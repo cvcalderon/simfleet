@@ -401,14 +401,6 @@ class SimfleetAgent(Agent):
         return self.stopped
 
 
-    # def is_ready(self):
-    #     """
-    #         Checks if the agent is ready for operation.
-    #
-    #         Returns:
-    #             bool: True if the agent is ready, False otherwise.
-    #     """
-    #     return not self.is_launched or (self.is_launched and self.ready)
 
     def is_ready(self):
         """
@@ -447,13 +439,12 @@ class SimfleetAgent(Agent):
 
     async def sleep(self, seconds):
         """
-            Pauses the agent’s operation for a specified duration.
+        Pauses the agent asynchronously for the specified duration.
 
-            Args:
-                seconds (int): The duration in seconds for which the agent should pause.
+        Args:
+            seconds (float): Number of seconds to suspend execution.
         """
         await asyncio.sleep(seconds)
-        #time.sleep(seconds)
 
 
     def set(self, key, value):

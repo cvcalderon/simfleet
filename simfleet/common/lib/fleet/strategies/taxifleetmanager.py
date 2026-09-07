@@ -248,8 +248,6 @@ class TaxiFleetManagerStrategy(FleetManagerStrategyBehaviour):
         await self.send(msg)
 
     async def run(self):
-        #if not self.agent.registration:
-        #    await self.send_registration()
 
         self.update_initial_taxi_positions()
 

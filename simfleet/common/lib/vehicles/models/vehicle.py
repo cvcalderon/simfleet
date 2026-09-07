@@ -1,7 +1,7 @@
 import json
 
 from loguru import logger
-from asyncio import CancelledError, sleep
+from asyncio import CancelledError
 
 from spade.message import Message
 from spade.template import Template
@@ -41,7 +41,6 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         GeoLocatedAgent.__init__(self, agentjid, password)
         MovableMixin.__init__(self)
 
-        #self.fleetmanager_id = None    #OLD
         self.vehicle_dest = None
 
     async def setup(self):
@@ -68,7 +67,7 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
                     )
                 )
                 self.add_behaviour(register_behaviour, template)
-            #self.ready = True
+
         except Exception as e:
             logger.error(
                 "EXCEPTION creating RegisterBehaviour in agent [{}]: {}".format(
@@ -89,20 +88,6 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
                 self.fleet_type,
         }
 
-    #OLD
-    # def set_fleetmanager(self, fleetmanager_id):
-    #     """
-    #     Sets the fleet manager's JID for the vehicle.
-    #
-    #     Args:
-    #         fleetmanager_id (str): The JID of the fleet manager to be set for this vehicle.
-    #     """
-    #     logger.info(
-    #         "Agent[{}]: Setting fleet {} for agent {}".format(
-    #             self.name, fleetmanager_id.split("@")[0], self.name
-    #         )
-    #     )
-    #     self.fleetmanager_id = fleetmanager_id
 
     def set_target_position(self, coords=None):
         """
@@ -143,7 +128,6 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         super().set_position(coords)
         self.set("current_pos", coords)
 
-    # New implementation v1
     def get_presence_status(self):
         return {
             "p": self.get_position(),
@@ -183,7 +167,6 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
             show=PresenceShow.DND
         )
 
-    # ---------------------
 
     def to_json(self):
         data = super().to_json()
@@ -191,7 +174,6 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
             "dest": [float("{0:.6f}".format(coord)) for coord in self.dest]
             if self.dest
             else None,
-            #"distance": "{0:.2f}".format(sum(self.distances)),
             "distance": "{0:.2f}".format(self.total_route_distance),
             "speed": float("{0:.2f}".format(self.animation_speed)) if self.animation_speed else None,
             "path": self.get("path"),
@@ -207,7 +189,6 @@ class RegistrationBehaviour(CyclicBehaviour):
         """
         Send a ``spade.message.Message`` with a proposal to manager to register.
         """
-        # New implementation v1
 
         registration_fleet = self.agent.get_registration_fleet()
 
@@ -218,37 +199,26 @@ class RegistrationBehaviour(CyclicBehaviour):
                 registration_fleet
             )
         )
-        # content = {
-        #     "name": self.agent.name,
-        #     "jid": str(self.agent.jid),
-        #     "fleet_type": self.agent.fleet_type,
-        # }
 
         content = (
             self.agent.get_registration_content()
         )
 
         msg = Message()
-        #msg.to = str(self.agent.fleetmanager_id)
         msg.to = str(registration_fleet)
         msg.set_metadata("protocol", REGISTER_PROTOCOL)
         msg.set_metadata("performative", REQUEST_PERFORMATIVE)
         msg.body = json.dumps(content)
         await self.send(msg)
 
-        # ---------------------
 
     async def run(self):
 
         try:
-            #OLD
-            #if not self.agent.registration and self.agent.fleetmanager_id != None:
-            #    await self.send_registration()
 
-            # New implementation v1
             if not self.agent.registration and self.agent.get_registration_fleet():
                 await self.send_registration()
-            # ---------------------
+
 
             msg = await self.receive(timeout=10)
             if msg:
@@ -260,7 +230,7 @@ class RegistrationBehaviour(CyclicBehaviour):
                     self.agent.set_available()
                     logger.info(
                         "Agent[{}]: Registration in agent [{}] accepted.".format(
-                            self.agent.name, self.agent.get_registration_fleet() #self.agent.fleetmanager_id
+                            self.agent.name, self.agent.get_registration_fleet()
                         )
                     )
                     self.kill(exit_code="Fleet Registration Accepted")
