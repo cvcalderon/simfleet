@@ -1,19 +1,9 @@
-import asyncio
-import json
-
 from loguru import logger
-from spade.behaviour import State
-from spade.template import Template
-from spade.message import Message
 
 from simfleet.common.lib.customers.models.pedestrian import PedestrianAgent
-from simfleet.communications.protocol import REQUEST_PROTOCOL, QUERY_PROTOCOL, REQUEST_PERFORMATIVE, INFORM_PERFORMATIVE, PROPOSE_PERFORMATIVE, CANCEL_PERFORMATIVE
 
 from simfleet.utils.helpers import distance_in_meters
-from simfleet.utils.helpers import (
-    PathRequestException,
-    AlreadyInDestination
-)
+
 
 class SharingCustomerAgent(PedestrianAgent):
     """

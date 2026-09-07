@@ -36,7 +36,6 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
 
         self.stations = None
         self.nearby_station = None
-        #self.set("current_station", None)
         self.current_station = None
 
         self.arguments = {}
@@ -66,7 +65,6 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
                 Returns:
                     int: The number of charging stations in the list.
         """
-        #return len(self.stations)
         if self.stations is None:
             return 0
 

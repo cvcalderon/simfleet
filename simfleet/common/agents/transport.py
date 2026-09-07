@@ -1,22 +1,12 @@
 import asyncio
 import json
-import time
-from asyncio import CancelledError
-
-from loguru import logger
-from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
 
 from simfleet.communications.protocol import (
     REQUEST_PROTOCOL,
     TRAVEL_PROTOCOL,
-    CANCEL_PERFORMATIVE,
     INFORM_PERFORMATIVE,
-    REGISTER_PROTOCOL,
-    REQUEST_PERFORMATIVE,
-    ACCEPT_PERFORMATIVE,
-    REFUSE_PERFORMATIVE,
     QUERY_PROTOCOL,
 )
 from simfleet.utils.status import CUSTOMER_LOCATION
@@ -92,8 +82,6 @@ class TransportAgent(VehicleAgent):
         msg.body = json.dumps(data)
         await self.send(msg)
 
-    # New implementation v1
-
     def increment_completed_assignments(self):
         self.completed_assignments += 1
 
@@ -107,7 +95,6 @@ class TransportAgent(VehicleAgent):
 
         return status
 
-    # ---------------------
 
     def add_customer_in_transport(self, customer_id, origin=None, dest=None):
         """

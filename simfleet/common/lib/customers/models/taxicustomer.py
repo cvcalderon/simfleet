@@ -50,24 +50,6 @@ class TaxiCustomerAgent(CustomerAgent):
         self.transport_assigned = None
 
 
-    # def set_fleetmanagers(self, fleetmanagers):
-    #     """
-    #     Sets the fleet manager's JID list for the customer agent.
-    #
-    #     Args:
-    #         fleetmanagers (dict): The JID list of the fleet manager(s).
-    #     """
-    #     self.fleetmanagers = fleetmanagers
-    #
-    # def get_fleetmanagers(self):
-    #     """
-    #             Retrieves the fleet managers' JIDs.
-    #
-    #             Returns:
-    #                 dict: The dictionary of fleet managers' JIDs.
-    #             """
-    #     return self.fleetmanagers
-
     def set_transport_assigned(self, transport_id):
         """
                 Sets the currently assigned transport agent.

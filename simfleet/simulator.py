@@ -6,7 +6,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List
-from asyncio import Queue
 
 import faker
 from aiohttp import web as aioweb
@@ -271,9 +270,7 @@ class SimulatorAgent(Agent):
             speed = transport.get("speed")
             route_profile = transport.get("route_profile")
             optional = transport.get("optional")
-            # New implementation v1
             registration = transport.get("registration")
-            # ---------------------
             capacity = transport.get("capacity")
             icon = transport.get("icon")
             delay = transport["delay"] if "delay" in transport else None
@@ -379,9 +376,8 @@ class SimulatorAgent(Agent):
             position = station.get("position")
             services = station.get("services")
             icon = station.get("icon")
-            # New implementation v1
             registration = station.get("registration")
-            # ---------------------
+
             agent = self.create_station_agent(
                 name=station["name"],
                 password=password,
@@ -407,7 +403,6 @@ class SimulatorAgent(Agent):
             icon = stop.get("icon")
             position = stop.get("position")
             class_ = stop["class"]
-            #lines = stop["lines"]
             lines = stop.get(
                 "lines",
                 []
@@ -457,9 +452,7 @@ class SimulatorAgent(Agent):
             route_profile = transport.get("route_profile")
             target = transport.get("destination")
             strategy = transport.get("strategy")
-            # New implementation v1
             registration = transport.get("registration")
-            # ---------------------
             icon = transport.get("icon")
             delay = transport["delay"] if "delay" in transport else None
 
@@ -1349,7 +1342,6 @@ class SimulatorAgent(Agent):
             domain=self.jid.domain,
             name=name,
             password=password,
-            # default_strategy=self.default_strategies['stop'],
             class_=class_,
             simulatorjid=self.simulatorjid,
             strategy=strategy,

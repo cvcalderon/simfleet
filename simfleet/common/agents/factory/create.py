@@ -822,13 +822,11 @@ class VehicleFactory(Factory):
         agent.set_id(name)
         agent.set_directory(jid_directory)
 
-        # New implementation v1
         cls.configure_registration(
             agent,
             registration,
             domain
         )
-        # ---------------------
 
         # Load strategy if provided
         if type(strategy) is str:

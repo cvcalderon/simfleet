@@ -1,5 +1,4 @@
 from abc import ABCMeta
-from loguru import logger
 from spade.behaviour import CyclicBehaviour, FSMBehaviour
 
 

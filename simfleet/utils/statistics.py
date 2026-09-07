@@ -1,7 +1,6 @@
 import pandas as pd
 from datetime import datetime
 from typing import Optional, List, Dict, Callable
-import time
 
 
 class Event:
@@ -55,7 +54,6 @@ class StatisticsStore:
         """
         return self.store[:limit]
 
-    # Alternative - Erase
     def all_events(self) -> List[Dict]:
         """
         Returns all events in the store, formatted as dictionaries.

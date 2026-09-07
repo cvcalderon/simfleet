@@ -200,12 +200,6 @@ async def request_route_to_server(
     """
     try:
 
-        # url = (
-        #     route_host
-        #     + "route/v1/car/{src1},{src2};{dest1},{dest2}?geometries=geojson&overview=full"
-        # )
-        # src1, src2, dest1, dest2 = origin[1], origin[0], destination[1], destination[0]
-
         route_base = route_host.rstrip("/")
 
         src1 = origin[1]

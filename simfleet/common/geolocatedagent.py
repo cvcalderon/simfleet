@@ -1,5 +1,4 @@
 import json
-import geopy.distance
 from loguru import logger
 
 from spade.message import Message

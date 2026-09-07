@@ -19,7 +19,7 @@ def get_bbox_from_location(location_str, zoom):
     Return:
         Tupla: (central_point, bbox)
     """
-    # Obtener las coordenadas de la ubicación (ciudad, calle, avenida, etc.)
+
     geolocator = Nominatim(user_agent="zoom_bbox_simfleet")
     location = geolocator.geocode(location_str, addressdetails=True, timeout=10)
 
@@ -29,9 +29,8 @@ def get_bbox_from_location(location_str, zoom):
 
     lat, lon = location.latitude, location.longitude
 
-    # Calcular el Bounding Box en función del zoom
     bbox_width = 360 / (2 ** zoom)
-    bbox_height = bbox_width / 2  # Proporción arbitraria para ajustar el Bounding Box
+    bbox_height = bbox_width / 2
 
     min_lon = lon - bbox_width / 2
     max_lon = lon + bbox_width / 2
@@ -86,18 +85,12 @@ def new_random_position(
 
     min_lat, min_lon, max_lat, max_lon = bbox
 
-    # Generar ubicación aleatoria dentro del Bounding Box -- Vrs 1
-    #random_lon = random.uniform(min_lon, max_lon)
-    #random_lat = random.uniform(min_lat, max_lat)
-
-    # Generar ubicación aleatoria dentro del Bounding Box -- Vrs 2
+    # Bias random sampling toward the central area of the bounding box.
     zoom = random.uniform(1, 3)     # Rango 1 (Sin zoom) - 5 (Zoom en el centro del bbox)
     zoom_factor = 1 / zoom
     random_lon = random.uniform(min_lon + (max_lon - min_lon) * (1 - zoom_factor) / 2, max_lon - (max_lon - min_lon) * (1 - zoom_factor) / 2)
     random_lat = random.uniform(min_lat + (max_lat - min_lat) * (1 - zoom_factor) / 2, max_lat - (max_lat - min_lat) * (1 - zoom_factor) / 2)
 
-    # URL del servicio OSRM
-    #osrm_url = f'{route_host}/nearest/v1/driving/{random_lon},{random_lat}'
     route_base = route_host.rstrip("/")
 
     osrm_url = (

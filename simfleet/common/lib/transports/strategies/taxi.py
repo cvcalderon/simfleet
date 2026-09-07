@@ -9,11 +9,7 @@ from simfleet.utils.abstractstrategies import FSMSimfleetBehaviour
 from spade.behaviour import State
 from spade.message import Message
 
-# from simfleet.common.lib.transports.models.taxi import TaxiStrategyBehaviour
 from simfleet.communications.protocol import (
-    REQUEST_PERFORMATIVE,
-    INFORM_PERFORMATIVE,
-    CANCEL_PERFORMATIVE,
     ACCEPT_PERFORMATIVE,
     REFUSE_PERFORMATIVE
 )
@@ -33,8 +29,6 @@ from simfleet.communications.protocol import (
     CANCEL_PERFORMATIVE,
     INFORM_PERFORMATIVE,
     REQUEST_PERFORMATIVE,
-#    ACCEPT_PERFORMATIVE,
-#    QUERY_PROTOCOL,
 )
 
 # ==================================================================
@@ -605,7 +599,7 @@ class TaxiStrategyBehaviour(State):
         return True
 
     async def on_start(self):
-        # await super().on_start()
+
         logger.debug(
             "Agent[{}]: Strategy {} started.".format(
                 self.agent.name, type(self).__name__
@@ -613,7 +607,7 @@ class TaxiStrategyBehaviour(State):
         )
 
     async def on_end(self):
-        # await super().on_start()
+
         logger.debug(
             "Agent[{}]: Strategy {} finished.".format(
                 self.agent.name, type(self).__name__
@@ -798,7 +792,6 @@ class TaxiWaitingState(TaxiStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING
-        #logger.debug("Agent[{}]: in Transport Waiting State".format(self.agent.jid))
 
     async def run(self):
         msg = await self.receive(timeout=60)
@@ -844,9 +837,6 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
-        #logger.debug(
-        #    "{} in Transport Waiting For Approval State".format(self.agent.jid)
-        #)
 
     async def run(self):
         msg = await self.receive(timeout=60)
@@ -889,11 +879,6 @@ class TaxiWaitingForApprovalState(TaxiStrategyBehaviour):
                 await self.inform_customer(
                     customer_id=content["customer_id"], status=TRANSPORT_MOVING_TO_CUSTOMER
                 )
-
-               # await self.agent.add_assigned_taxicustomer(
-               #     customer_id=content["customer_id"],
-               #     origin=content["origin"], dest=content["dest"]
-               # )
 
                 await self.assigned_taxicustomer(
                     customer_id=content["customer_id"],
@@ -1152,7 +1137,6 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-        #logger.debug("{} in Transport Arrived At Customer State".format(self.agent.jid))
 
     async def run(self):
 
@@ -1193,7 +1177,7 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
                         )
                         if not self.start_service(self.agent.jid):
                             raise RuntimeError("Unable to emit Taxi service start.")
-                        #await self.agent.remove_assigned_taxicustomer()
+
 
                         await self.unassigned_taxicustomer()
 
@@ -1302,7 +1286,7 @@ class TaxiArrivedAtCustomerState(TaxiStrategyBehaviour):
             self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
             return
 
-# MOD-STRATEGY-04 - New status
+
 class TaxiMovingToCustomerDestState(TaxiStrategyBehaviour):
     """
         Represents the state where the taxi is transporting the customer to their destination.
@@ -1314,7 +1298,7 @@ class TaxiMovingToCustomerDestState(TaxiStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
-        #logger.debug("{} in Transport Moving To Customer Dest State".format(self.agent.jid))
+
 
     async def run(self):
 
@@ -1417,7 +1401,6 @@ class TaxiArrivedAtCustomerDestState(TaxiStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-        #logger.debug("{} in Transport Arrived at Customer Dest State".format(self.agent.jid))
 
     async def run(self):
 
@@ -1458,7 +1441,6 @@ class TaxiArrivedAtCustomerDestState(TaxiStrategyBehaviour):
                         self.clear_active_message_context()
 
                         self.agent.increment_completed_assignments()
-                        #self.agent.set_available()
                         self.agent.status = TRANSPORT_WAITING_FOR_RETURN
                         self.agent.set_busy()
 

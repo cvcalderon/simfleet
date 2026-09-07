@@ -702,10 +702,6 @@ class StationSharingWaitingState(
                     "station": destination_station,
                 },
             )
-            #self.agent.remove_customer_in_transport(customer_id)
-            #self.clear_service_context()
-            #self.agent.status = TRANSPORT_IN_DEST
-            #self.set_next_state(TRANSPORT_IN_DEST)
 
             origin_station = self.agent.get_origin_station()
             if origin_station is not None:

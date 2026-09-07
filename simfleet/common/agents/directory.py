@@ -1,6 +1,4 @@
 import json
-import asyncio #Solucion S1 - S2
-from asyncio import Queue #Solucion S1
 from asyncio import CancelledError
 
 from loguru import logger
@@ -17,8 +15,6 @@ from simfleet.communications.protocol import (
     REQUEST_PERFORMATIVE,
     QUERY_PROTOCOL,
 )
-
-from simfleet.utils.abstractstrategies import StrategyBehaviour
 
 class DirectoryAgent(Agent):
     """

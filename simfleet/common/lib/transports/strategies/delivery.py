@@ -733,7 +733,6 @@ class DeliveryWaitingState(DeliveryStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING
-        #logger.debug("Agent[{}]: in Transport Waiting State".format(self.agent.jid))
 
     async def run(self):
         msg = await self.receive(timeout=60)
@@ -779,9 +778,6 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
-        #logger.debug(
-        #    "{} in Transport Waiting For Approval State".format(self.agent.jid)
-        #)
 
     async def run(self):
         msg = await self.receive(timeout=60)
@@ -825,10 +821,6 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
                     customer_id=content["customer_id"], status=TRANSPORT_MOVING_TO_CUSTOMER
                 )
 
-               # await self.agent.add_assigned_taxicustomer(
-               #     customer_id=content["customer_id"],
-               #     origin=content["origin"], dest=content["dest"]
-               # )
 
                 await self.assigned_customer(
                     customer_id=content["customer_id"],
@@ -1088,7 +1080,7 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
-        #logger.debug("{} in Transport Arrived At Customer State".format(self.agent.jid))
+
 
     async def run(self):
 
@@ -1129,7 +1121,7 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
                         )
                         if not self.start_service(self.agent.jid):
                             raise RuntimeError("Unable to emit Delivery service start.")
-                        #await self.agent.remove_assigned_taxicustomer()
+
 
                         await self.unassigned_customer()
 
@@ -1239,7 +1231,7 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
             self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
             return
 
-# MOD-STRATEGY-04 - New status
+
 class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
     """
         Represents the state where the delivery is transporting the customer to their destination.
@@ -1251,7 +1243,7 @@ class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
-        #logger.debug("{} in Transport Moving To Customer Dest State".format(self.agent.jid))
+
 
     async def run(self):
 
@@ -1354,7 +1346,7 @@ class DeliveryArrivedAtCustomerDestState(DeliveryStrategyBehaviour):
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
-        #logger.debug("{} in Transport Arrived at Customer Dest State".format(self.agent.jid))
+
 
     async def run(self):
 
