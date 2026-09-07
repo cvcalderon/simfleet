@@ -36,10 +36,8 @@ class SimfleetConfig(object):
         self.__config["transports"] = []
         self.__config["customers"] = []
         self.__config["stations"] = []
-        self.__config["vehicles"] = []  # New vehicle
-        # Bus line
+        self.__config["vehicles"] = []
         self.__config["stops"] = []
-        self.__config["lines"] = []
 
         if filename:
             self.load_config(filename)
@@ -98,10 +96,6 @@ class SimfleetConfig(object):
             "mobility_metrics", "simfleet.metrics.lib.mobilitystatistics.MobilityStatisticsClass"
         )
 
-        # Bus line
-        #self.__config["bus_stop_strategy"] = self.__config.get(
-        #    "bus_stop_strategy", "simfleet.common.lib.stations.models.busstop.BusStopStrategyBehaviour")
-
         self.__config["fleetmanager_name"] = self.__config.get(
             "fleetmanager_name", "fleetmanager"
         )
@@ -109,8 +103,7 @@ class SimfleetConfig(object):
             "fleetmanager_passwd", "fleetmanager_passwd"
         )
         self.__config["route_host"] = self.__config.get(
-            #"route_host", "http://router.project-osrm.org/"
-            "route_host", "http://osrm.gti-ia.upv.es/"
+            "route_host", "http://router.project-osrm.org/"
         )
         self.__config["route_name"] = self.__config.get("route_name", "route")
         self.__config["route_password"] = self.__config.get(
@@ -179,13 +172,6 @@ class SimfleetConfig(object):
         except KeyError:
             return 0
 
-    @property
-    def num_lines(self):
-        try:
-            return len(self.__config["lines"])
-        except KeyError:
-            return 0
-
     def __getitem__(self, item):
         return self.__config[item]
 
@@ -206,10 +192,10 @@ class SimfleetConfig(object):
         return json.dumps(d, indent=4)
 
 
-def set_default_metrics(mobility_metrics):      #Renombrar
+def set_default_metrics(mobility_metrics):
     class_dict = {}
 
-    class_dict['mobility_metrics'] = load_class(mobility_metrics)     #Crear lista de metricas
+    class_dict['mobility_metrics'] = load_class(mobility_metrics)
 
     return class_dict
 
@@ -219,8 +205,7 @@ def set_default_strategies(
         transport_strategy,
         customer_strategy,
         station_strategy,
-        vehicle_strategy,   #New vehicle
-        #bus_stop_strategy,  #Bus line
+        vehicle_strategy,
 ):
     """
     Gets the strategy strings and loads their classes. This strategies are prepared to be injected into any
@@ -240,8 +225,7 @@ def set_default_strategies(
     class_dict['transport'] = load_class(transport_strategy)
     class_dict['customer'] = load_class(customer_strategy)
     class_dict['station'] = load_class(station_strategy)
-    class_dict['vehicle'] = load_class(vehicle_strategy)  #New vehicle
-    #class_dict['stop'] = load_class(bus_stop_strategy)  # Bus line
+    class_dict['vehicle'] = load_class(vehicle_strategy)
 
     logger.debug(
         "Loaded default strategy classes: {}, {}, {}, {} and {}".format(
@@ -250,8 +234,7 @@ def set_default_strategies(
             class_dict['transport'],
             class_dict['customer'],
             class_dict['station'],
-            class_dict['vehicle'],  #New vehicle
-            #class_dict['stop'],  # Bus line
+            class_dict['vehicle'],
         )
     )
 

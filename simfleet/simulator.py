@@ -96,7 +96,6 @@ class SimulatorAgent(Agent):
             config.customer_strategy,
             config.station_strategy,
             config.vehicle_strategy,
-            # config.bus_stop_strategy
         )
 
         self.metrics_class = {}
@@ -196,13 +195,6 @@ class SimulatorAgent(Agent):
         while len(self.manager_agents) < self.config.num_managers:
             time.sleep(0.1)
 
-        # Bus line
-        logger.info("Loading lines...")
-        for line in self.config["lines"]:
-            line_id = line["id"]
-            stop_list = line["stops"]
-            line_type = line["line_type"]
-            self.add_line(line_id, stop_list, line_type)
 
         all_agents = []
         try:
@@ -282,7 +274,6 @@ class SimulatorAgent(Agent):
             # New implementation v1
             registration = transport.get("registration")
             # ---------------------
-            line = transport.get("line")
             capacity = transport.get("capacity")
             icon = transport.get("icon")
             delay = transport["delay"] if "delay" in transport else None
@@ -305,7 +296,6 @@ class SimulatorAgent(Agent):
                 optional=optional,
                 delayed=delayed,
                 capacity=capacity,
-                line=line,
                 registration=registration,
                 route_profile=route_profile,
             )
@@ -338,7 +328,6 @@ class SimulatorAgent(Agent):
             target = customer.get("destination")
             destinations = customer.get("destinations")
             strategy = customer.get("strategy")
-            line = customer.get("line")
             # New parameter to determine the maximum walking distance a customer finds reasonable
             # to walk to get their car
             max_walking_dist = customer.get("max_walking_dist") if "max_walking_dist" in customer else None
@@ -360,7 +349,6 @@ class SimulatorAgent(Agent):
                 strategy=strategy,
                 delayed=delayed,
                 speed=speed,
-                line=line,
                 max_walking_dist=max_walking_dist,
                 optional=optional,
                 route_profile = route_profile,
@@ -822,10 +810,6 @@ class SimulatorAgent(Agent):
     def bus_stop_agents(self):
         return self.get("bus_stop_agents")
 
-    @property
-    def bus_lines(self):
-        return self.get("bus_lines")
-
     async def index_controller(self, request):
         """
         Web controller that returns the index page of the simulator.
@@ -1068,7 +1052,6 @@ class SimulatorAgent(Agent):
         self.set("station_agents", {})
         self.set("vehicle_agents", {})
         self.set("bus_stop_agents", {})
-        self.set("bus_lines", {})
         self.simulation_time = None
         self.simulation_init_time = None
 
@@ -1186,7 +1169,6 @@ class SimulatorAgent(Agent):
         optional=None,
         delayed=False,
         capacity=None,
-        line=None,
         registration=None,
         route_profile=None,
     ):
@@ -1209,8 +1191,6 @@ class SimulatorAgent(Agent):
             speed=speed,
             optional=optional,
             capacity=capacity,
-            line=line,
-            lines=self.bus_lines,
             registration=registration,
             route_profile=route_profile,
         )
@@ -1236,7 +1216,6 @@ class SimulatorAgent(Agent):
         target=None,
         delayed=False,
         speed=None,
-        line=None,
         max_walking_dist=None,
         optional=None,
         route_profile=None,
@@ -1256,7 +1235,6 @@ class SimulatorAgent(Agent):
             position=position,
             speed=speed,
             target=target,
-            line=line,
             max_walking_dist=max_walking_dist,
             optional=optional,
             route_profile = route_profile,
@@ -1358,15 +1336,10 @@ class SimulatorAgent(Agent):
         registration=None,
     ):
         """
-        Create a customer agent.
+        Create a transport stop agent from the configured stop class.
 
-        Args:
-            name (str): name of the agent
-            password (str): password of the agent
-            position (list): initial coordinates of the agent
-            power (int): power of the station agent in kW
-            places (int): destination coordinates of the agent
-            strategy (class, optional): strategy class of the agent
+        The legacy method name is retained because current PublicTransport
+        stop creation still uses this path.
         """
         name = (id, name)
         agent = TransportStopFactory.create_agent(
@@ -1450,20 +1423,14 @@ class SimulatorAgent(Agent):
     # Bus line
     def add_bus_stop(self, agent):
         """
-        Adds a new :class:`BusStopAgent` to the store.
+        Add a transport stop agent to the simulator stop store.
 
-        Args:
-            agent (``BusStopAgent``): the instance of the BusStopAgent to be added
+        The legacy method/store name is retained because current
+        PublicTransport stop creation still uses it.
         """
         with self.simulation_mutex:
             self.get("bus_stop_agents")[agent.name] = agent
 
-    def add_line(self, line_id, stop_list, line_type):
-        with self.simulation_mutex:
-            self.get("bus_lines")[line_id] = {
-                "stop_list": stop_list,
-                "line_type": line_type,
-            }
 
     def get_simulation_time(self):
         """
