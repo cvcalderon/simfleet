@@ -235,8 +235,6 @@ class TransportFactory(Factory):
                      target=None,
                      services=None,
                      capacity=None,
-                     line=None,
-                     lines=None,
                      max_walking_dist=None,
                      registration=None,
                      route_profile=None,
@@ -261,8 +259,6 @@ class TransportFactory(Factory):
             speed (str): Speed of the agent.
             services (list): List of services the agent provides.
             capacity (int): Capacity of the agent.
-            line (str, optional): Bus line assigned to the agent.
-            lines (dict, optional): Dictionary containing line details.
 
         Returns:
             TransportAgent: An instance of the specified transport agent class.
@@ -311,15 +307,6 @@ class TransportFactory(Factory):
         if services:
             agent.set_service_type(services)
 
-        # Bus line management
-        if line:
-            agent.set_line(line)
-            stop_list = lines.get(line).get("stop_list")
-            line_type = lines.get(line).get("line_type")
-            agent.set_stop_list(stop_list)
-            agent.set_line_type(line_type)
-            agent.set_initial_position(stop_list[0])
-
         # Additional attributes
         agent.set_initial_position(position)
 
@@ -360,8 +347,6 @@ class CustomerFactory(Factory):
         target=None,
         services=None,
         capacity=None,
-        line=None,
-        lines=None,
         max_walking_dist=None,
         route_profile=None,
         destinations=None,
@@ -384,7 +369,6 @@ class CustomerFactory(Factory):
             position (list): Initial coordinates of the agent.
             target (list, optional): Destination coordinates of the agent.
             speed (float, optional): Agent movement speed.
-            line (str, optional): Public transport line.
             max_walking_dist (float, optional): Maximum walking distance.
             destinations (list, optional): Multimodal destination plan configuration.
 
@@ -536,9 +520,6 @@ class CustomerFactory(Factory):
             agent.strategy = load_class(strategy)
         else:
             agent.strategy = default_strategy
-
-        if line:
-            agent.set_line(line)
 
         # Set fleet type for traditional customers.
         # MultiModalCustomerAgent activates fleet_type per destination.

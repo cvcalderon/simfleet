@@ -45,13 +45,12 @@ Transports, Fleet Managers, and Stations.
     * **Customer Agents**: People or goods that require transportation.
     * **Transport Agents**: Vehicles that provide displacement services to Customers.
     * **FleetManager Agents**: Service provider that manages a fleet of Transports.
-    * **Station Agents**: Locations representing transportation infrastructure, such as bus stops or charging stations.
+    * **Station Agents**: Locations representing transportation infrastructure, such as public transport stops, charging stations, or sharing stations.
 
-These agents can be extended and customized to represent a specific transportation mode. Currently, the platform
-provides two predefined transportation services: Taxi/Electric Taxi service, and Urban Bus. These systems count with
-their own implementation of Transport and Customer agents, as well as the necessary infrastructure: Electric Charging
-Stations and Bus Stops. Using the predefined agents, SimFleet users may easily create and execute their own simulation
-scenarios.
+These agents can be extended and customized to represent specific transportation modes.
+SimFleet provides predefined agent implementations for several mobility services, while
+its modular architecture allows users to define additional Transport, Customer, Station,
+and FleetManager behaviours for their own simulation scenarios.
 
 As for advanced users, however, the extension of predefined agents is encouraged to develop new agent types.
 SimFleet's architecture, based on modularity, simplifies the implementation of custom agents and agent behaviours
