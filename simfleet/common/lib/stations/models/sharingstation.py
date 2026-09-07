@@ -369,18 +369,6 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
             reply
         )
 
-    # def publish_station_presence(self):
-    #     if not self.agent.get_registration_presence():
-    #         return
-    #
-    #     self.agent.set_agent_presence(
-    #         status=json.dumps(
-    #             self.agent.get_presence_status()
-    #         ),
-    #         presence_type=PresenceType.AVAILABLE,
-    #         show=PresenceShow.CHAT,
-    #     )
-
     async def process_bike_registration(self, msg):
         try:
             content = json.loads(

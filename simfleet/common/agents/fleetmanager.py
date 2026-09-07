@@ -78,9 +78,22 @@ class FleetManagerAgent(SimfleetAgent):
             )
 
     def can_accept_presence_subscription(self, peer_jid):
+        """
+        Accept Presence subscriptions only from registered fleet resources.
+        """
         return self.is_registered_resource(peer_jid)
 
     def is_registered_resource(self, resource_jid):
+        """
+        Check whether a JID belongs to a resource registered in this fleet.
+
+        Args:
+            resource_jid: Resource XMPP identifier.
+
+        Returns:
+            bool: True when the resource belongs to the fleet.
+        """
+
         for resource in self.get_fleet_resources().values():
             if self.is_same_jid(resource.get("jid"), resource_jid):
                 return True
@@ -88,9 +101,25 @@ class FleetManagerAgent(SimfleetAgent):
         return False
 
     def should_subscribe_back(self, peer_jid):
+        """
+        Request reciprocal Presence for registered fleet resources.
+        """
         return self.is_registered_resource(peer_jid)
 
     def get_resource_presence(self, resource_jid):
+        """
+        Return the live XMPP Presence for a registered resource.
+
+        Missing contacts or resources without a Presence entry are treated as
+        normal conditions and return None.
+
+        Args:
+            resource_jid: Resource XMPP identifier.
+
+        Returns:
+            PresenceInfo | None: Live Presence when available.
+        """
+
         try:
             return self.presence.get_contact_presence(resource_jid)
 
@@ -103,6 +132,16 @@ class FleetManagerAgent(SimfleetAgent):
             return None
 
     def get_resource_presence_data(self, presence):
+        """
+        Decode the JSON application payload stored in a live Presence status.
+
+        Args:
+            presence: XMPP Presence information.
+
+        Returns:
+            dict | None: Decoded payload when valid.
+        """
+
         if presence is None or not presence.status:
             return None
 
@@ -123,6 +162,10 @@ class FleetManagerAgent(SimfleetAgent):
         return data
 
     def is_resource_presence_mirror_available(self, presence):
+        """
+        Return whether a message-based Presence mirror represents an available resource.
+        """
+
         if not presence:
             return False
 
@@ -132,6 +175,13 @@ class FleetManagerAgent(SimfleetAgent):
         )
 
     def get_resource_presence_mirror_data(self, presence):
+        """
+        Decode the JSON payload stored in a message-based Presence mirror.
+
+        Returns:
+            dict | None: Decoded Presence payload when valid.
+        """
+
         if not presence or not presence.get("status"):
             return None
 
@@ -152,6 +202,10 @@ class FleetManagerAgent(SimfleetAgent):
         return data
 
     def is_resource_available(self, presence):
+        """
+        Return whether live XMPP Presence represents an available resource.
+        """
+
         if presence is None:
             return False
 
@@ -161,6 +215,20 @@ class FleetManagerAgent(SimfleetAgent):
         )
 
     def get_available_resources(self):
+        """
+        Return fleet resources currently advertised as available.
+
+        Live XMPP Presence is the primary source of truth. When live Presence
+        is missing or unavailable, the FleetManager falls back to the
+        message-based Presence mirror stored with the resource registration.
+
+        Only resources with valid Presence payloads are returned.
+
+        Returns:
+            list[dict]: Available resources together with their Presence
+            representation and decoded application data.
+        """
+
         available_resources = []
 
         for resource in self.get_fleet_resources().values():
@@ -283,6 +351,16 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
             )
 
     def update_resource_presence(self, content):
+        """
+        Update the stored message-based Presence mirror for a fleet resource.
+
+        Args:
+            content: Presence update containing at least the resource JID.
+
+        Returns:
+            bool: True when a matching registered resource was updated.
+        """
+
         resource_jid = content.get("jid")
 
         for resource in self.get("fleet_resources").values():

@@ -620,11 +620,6 @@ class TaxiStrategyBehaviour(State):
             )
         )
 
-#    async def assigned_taxicustomer(self, customer_id, origin=None, dest=None):
-
-#        await self.agent.add_assigned_taxicustomer(customer_id, origin, dest)
-
-#        await self.agent.update_presence_info(type="busy", status=str(self.agent.status_info))
 
     async def assigned_taxicustomer(
         self,
@@ -642,23 +637,6 @@ class TaxiStrategyBehaviour(State):
 
     async def unassigned_taxicustomer(self):
         self.agent.remove_assigned_customer()
-
-    # async def unassigned_taxicustomer(self):
-    #
-    #     await self.agent.remove_assigned_taxicustomer()
-    #
-    #     self.prepare_status_info()
-    #
-    #     await self.agent.update_presence_info(type="available", status=str(self.agent.status_info))
-    #
-    # def prepare_status_info(self):
-    #
-    #     position, value = self.agent.status_info
-    #     value += 1
-    #
-    #     new_info = (self.agent.get("current_pos"), value)
-    #
-    #     self.agent.status_info = new_info
 
 
     async def send_proposal(self, customer_id, content=None):

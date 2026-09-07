@@ -55,30 +55,38 @@ class SimfleetAgent(Agent):
         self.init_time = None   #Change
         self.end_time = None    #Change
 
-        # New - Implementation v1
         self.registration = False
 
         self.registration_fleet = None
         self.registration_presence = False
         self.registration_presence_ready = False
-        # --------------------------
 
         self.events_store = StatisticsStore(agent_name=str(agentjid), class_type=type(self))
 
     async def setup(self):
         await super().setup()
 
-        # New - Implementation v1
         self.presence.on_subscribe = self.on_subscribe
         self.presence.on_subscribed = self.on_subscribed
         self.presence.on_available = self.on_available
         self.presence.on_unavailable = self.on_unavailable
-        # --------------------------
 
-    # New - Implementation v1
     # Presence callbacks
     @staticmethod
     def bare_jid(jid):
+        """
+        Return the bare JID associated with an XMPP identifier.
+
+        Resource components are removed so Presence subscriptions and
+        registration checks compare agents by their stable account JID.
+
+        Args:
+            jid: JID instance or string representation of an XMPP identifier.
+
+        Returns:
+            str | None: Bare JID, or None when no identifier is provided.
+        """
+
         if jid is None:
             return None
 
@@ -88,9 +96,32 @@ class SimfleetAgent(Agent):
             return str(jid).split("/")[0]
 
     def is_same_jid(self, jid_a, jid_b):
+        """
+        Compare two XMPP identifiers using their bare JIDs.
+
+        Args:
+            jid_a: First JID.
+            jid_b: Second JID.
+
+        Returns:
+            bool: True when both identifiers refer to the same XMPP account.
+        """
+
         return self.bare_jid(jid_a) == self.bare_jid(jid_b)
 
     def on_subscribe(self, peer_jid):
+        """
+        Handle an incoming XMPP Presence subscription request.
+
+        The request is approved only when
+        ``can_accept_presence_subscription()`` authorizes the peer. Agents
+        may optionally subscribe back and mark their registration Presence
+        as ready once the expected fleet relationship is established.
+
+        Args:
+            peer_jid: JID requesting the Presence subscription.
+        """
+
         logger.debug(
             "Agent[{}]: Agent {} requested presence subscription".format(
                 self.name,
@@ -138,6 +169,17 @@ class SimfleetAgent(Agent):
             )
 
     def on_subscribed(self, peer_jid):
+        """
+        Handle confirmation that a Presence subscription was accepted.
+
+        When the peer is the configured registration fleet, the agent marks
+        its Presence registration as ready and publishes availability when
+        the concrete agent supports ``set_available()``.
+
+        Args:
+            peer_jid: JID that accepted the subscription.
+        """
+
         logger.debug(
             "Agent[{}]: Agent {} accepted presence subscription".format(
                 self.name,
@@ -156,6 +198,7 @@ class SimfleetAgent(Agent):
                 self.set_available()
 
     def on_available(self, peer_jid, presence_info, last_presence):
+        """Handle notification that a subscribed peer became available."""
         logger.debug(
             "Agent[{}]: Agent {} is available".format(
                 self.name,
@@ -164,6 +207,7 @@ class SimfleetAgent(Agent):
         )
 
     def on_unavailable(self, peer_jid, presence_info, last_presence):
+        """Handle notification that a subscribed peer became unavailable."""
         logger.debug(
             "Agent[{}]: Agent {} is unavailable".format(
                 self.name,
@@ -173,22 +217,55 @@ class SimfleetAgent(Agent):
 
     #Authorization
     def can_accept_presence_subscription(self, peer_jid):
+        """
+        Decide whether an incoming Presence subscription may be accepted.
+
+        The base policy only accepts the configured registration fleet.
+        Specialized agents such as FleetManagerAgent may override this
+        policy.
+
+        Args:
+            peer_jid: JID requesting the subscription.
+
+        Returns:
+            bool: True when the peer is authorized.
+        """
+
         if self.registration_presence and self.registration_fleet:
             return self.is_same_jid(peer_jid, self.registration_fleet)
 
         return False
 
     def should_subscribe_back(self, peer_jid):
+        """
+        Decide whether the agent should establish a reciprocal subscription.
+
+        The base implementation returns False. Fleet managers override this
+        behaviour for registered resources.
+        """
         return False
 
     # Presence operations
     def subscribe_to_presence(self, agent_id):
+        """
+        Subscribe to the Presence of another agent using its bare JID.
+
+        Args:
+            agent_id: Target XMPP identifier.
+        """
         self.presence.subscribe(self.bare_jid(agent_id))
 
     def approve_presence_subscription(self, agent_id):
+        """
+        Approve an incoming Presence subscription for the specified agent.
+
+        Args:
+            agent_id: XMPP identifier whose subscription is approved.
+        """
         self.presence.approve_subscription(self.bare_jid(agent_id))
 
     def get_presence_contacts(self):
+        """Return the Presence contacts known by the underlying XMPP client."""
         return self.presence.get_contacts()
 
     def set_agent_presence(
@@ -198,6 +275,21 @@ class SimfleetAgent(Agent):
         show=PresenceShow.CHAT,
         priority=0
     ):
+        """
+        Publish the current XMPP Presence state of the agent.
+
+        When Presence-based registration is enabled, the update is directed
+        to the configured fleet manager. The same state may also be mirrored
+        through the registration protocol so consumers can fall back to
+        message-based Presence information when live XMPP Presence is not
+        available.
+
+        Args:
+            status: Application payload carried in the Presence status field.
+            presence_type: XMPP Presence availability type.
+            show: XMPP Presence show value.
+            priority: XMPP Presence priority.
+        """
         self.presence.current_presence = PresenceInfo(
             presence_type,
             show,
@@ -254,6 +346,20 @@ class SimfleetAgent(Agent):
         show=PresenceShow.CHAT,
         priority=0,
     ):
+        """
+        Send a message-based mirror of the agent Presence state.
+
+        The mirror uses ``REGISTER_PROTOCOL`` with ``INFORM_PERFORMATIVE``.
+        Fleet managers use it as a fallback when live XMPP Presence
+        information cannot be obtained.
+
+        Args:
+            agent_id: Destination agent JID.
+            status: Application Presence payload.
+            presence_type: Presence availability type.
+            show: Presence show value.
+            priority: Presence priority.
+        """
         msg = Message()
         msg.to = str(agent_id)
         msg.set_metadata("protocol", REGISTER_PROTOCOL)
@@ -276,7 +382,6 @@ class SimfleetAgent(Agent):
     def get_registration_presence_ready(self):
         return self.registration_presence_ready
 
-    # --------------------------
 
     async def stop(self):
         """
@@ -384,21 +489,14 @@ class SimfleetAgent(Agent):
             self.start_registration_presence()
 
 
-    # New - Implementation v1
-    #Registration
-    # def configure_registration(self, fleet, presence=False):
-    #     """
-    #     Configures the agent registration information.
-    #
-    #     Args:
-    #         fleet (str): JID of the agent responsible for the registration.
-    #         presence (bool): Indicates whether presence should be enabled
-    #             after registration.
-    #     """
-    #     self.registration_fleet = fleet
-    #     self.registration_presence = presence
-
     def configure_registration(self, fleet, presence=False):
+        """
+        Configure the fleet registration relationship for the agent.
+
+        Args:
+            fleet: JID of the FleetManager responsible for registration.
+            presence: Enable Presence subscription after registration.
+        """
         self.registration_fleet = fleet
         self.registration_presence = presence
 
@@ -412,10 +510,15 @@ class SimfleetAgent(Agent):
         return self.registration_presence
 
     def start_registration_presence(self):
+        """
+        Start the Presence relationship with the configured FleetManager.
+
+        No subscription is created when Presence registration is disabled or
+        when no registration fleet has been configured.
+        """
+
         if self.registration_presence and self.registration_fleet:
             self.subscribe_to_presence(self.registration_fleet)
-
-    # --------------------------
 
     def watch_value(self, key, callback):
         """

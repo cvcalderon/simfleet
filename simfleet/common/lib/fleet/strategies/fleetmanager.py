@@ -1,8 +1,4 @@
-import asyncio
 import json
-import time
-from asyncio import Queue
-from spade.presence import PresenceManager
 from spade.message import Message
 from loguru import logger
 
