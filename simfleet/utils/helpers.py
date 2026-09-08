@@ -1,7 +1,12 @@
 """
-Helpers module
+General geospatial and numeric helpers used across SimFleet.
 
-These functions are useful for the develop of new strategies.
+The module provides scenario geocoding, random routable-position generation,
+geographic distance comparisons, speed conversion, and movement-related
+exceptions.
+
+Coordinates used by SimFleet helpers follow ``[latitude, longitude]`` order
+unless an external service explicitly requires another representation.
 """
 
 import json
@@ -14,10 +19,22 @@ from geopy.geocoders import Nominatim
 
 def get_bbox_from_location(location_str, zoom):
     """
-    Get BoundingBox from str location
+    Geocode a textual location and derive an approximate bounding box.
 
-    Return:
-        Tupla: (central_point, bbox)
+    Nominatim resolves the location centre. The configured zoom value is then
+    converted into a simple angular bounding box around that point.
+
+    Args:
+        location_str (str): Human-readable place description.
+        zoom (float): Zoom-like value controlling bounding-box dimensions.
+
+    Returns:
+        tuple: ``(central_point, bbox)`` where ``central_point`` is
+        ``[lat, lon]`` and ``bbox`` is
+        ``(min_lat, min_lon, max_lat, max_lon)``.
+
+    Raises:
+        Exception: If Nominatim cannot resolve the requested location.
     """
 
     geolocator = Nominatim(user_agent="zoom_bbox_simfleet")
@@ -45,10 +62,14 @@ def get_bbox_from_location(location_str, zoom):
 
 def random_position():
     """
-    Returns a random position inside the map.
+    Return a random predefined position from the bundled taxi-stations data.
+
+    One feature is selected from ``templates/data/taxi_stations.json`` and
+    its GeoJSON coordinate order is converted to SimFleet ``[lat, lon]``
+    order.
 
     Returns:
-        list: a point (longitude and latitude)
+        list: Random ``[lat, lon]`` coordinate rounded to six decimal places.
     """
     base_dir_utils = os.path.dirname(__file__)
     base_dir = os.path.dirname(base_dir_utils)
@@ -77,10 +98,22 @@ def new_random_position(
     route_profile="driving",
 ):
     """
-        Returns a random position inside the map.
+    Generate a random routable position inside a simulation bounding box.
 
-        Returns:
-            list: a point (longitude and latitude)
+    A random coordinate is sampled from a central subregion of the supplied
+    bounding box. The OSRM ``nearest`` endpoint then snaps that coordinate to
+    the nearest routable point for the configured route profile.
+
+    Args:
+        bbox (tuple): ``(min_lat, min_lon, max_lat, max_lon)``.
+        route_host (str): Base URL of an OSRM-compatible routing server.
+        route_profile (str): Routing profile used by the nearest lookup.
+
+    Returns:
+        list: Snapped route-network coordinate in ``[lat, lon]`` order.
+
+    Raises:
+        Exception: If the OSRM nearest request does not return HTTP 200.
     """
 
     min_lat, min_lon, max_lat, max_lon = bbox
@@ -112,46 +145,46 @@ def new_random_position(
         return None
 
 
-
-
 def are_close(coord1, coord2, tolerance=10):
     """
-    Checks wheter two points are close or not. The tolerance is expressed in meters.
+    Return whether two coordinates are closer than a distance tolerance.
+
+    Geographic distance is calculated with geopy's geodesic implementation.
 
     Args:
-        coord1 (list): a coordinate (longitude, latitude)
-        coord2 (list): another coordinate (longitude, latitude)
-        tolerance (int): tolerance in meters
+        coord1: First coordinate in ``[lat, lon]`` order.
+        coord2: Second coordinate in ``[lat, lon]`` order.
+        tolerance (float): Maximum exclusive distance in metres.
 
     Returns:
-        bool: whether the two coordinates are closer than tolerance or not
+        bool: True when distance is strictly less than ``tolerance``.
     """
     return vincenty(coord1, coord2).meters < tolerance
 
 
 def distance_in_meters(coord1, coord2):
     """
-    Returns the distance between two coordinates in meters.
+    Calculate geodesic distance between two SimFleet coordinates.
 
     Args:
-        coord1 (list): a coordinate (longitude, latitude)
-        coord2: another coordinate (longitude, latitude)
+        coord1: First ``[lat, lon]`` coordinate.
+        coord2: Second ``[lat, lon]`` coordinate.
 
     Returns:
-        float: distance meters between the two coordinates
+        float: Geodesic distance in metres.
     """
     return vincenty(coord1, coord2).meters
 
 
 def kmh_to_ms(speed_in_kmh):
     """
-    Convert kilometers/hour to meters/second.
+    Convert kilometres per hour to metres per second.
 
     Args:
-        speed_in_kmh (float): speed in kilometers/hour
+        speed_in_kmh (float): Speed in kilometres per hour.
 
     Returns:
-        float: the speed in meters/second
+        float: Equivalent speed in metres per second.
     """
     meters_per_second = speed_in_kmh * 1000 / 3600
     return meters_per_second
@@ -167,7 +200,7 @@ class PathRequestException(Exception):
 
 class AlreadyInDestination(Exception):
     """
-    This exception is raised when an agent wants to move to a destination where it is already there.
+    Raised when route-based movement is requested to the current position.
     """
 
     pass

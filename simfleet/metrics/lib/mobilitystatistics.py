@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 
 
 class MobilityStatisticsClass(BaseStatisticsClass):
+    """
+    Build canonical mobility metrics from completed SimFleet event logs.
+
+    The processor implements public metrics schema 1.0 for the supported
+    mobility modalities. It consumes canonical strategy events, validates
+    their minimum contract, reconstructs service and charging lifecycles, and
+    exports one deterministic JSON document per modality.
+
+    Processing is deliberately tolerant of incomplete or inconsistent input.
+    Invalid records are ignored or exported with nullable metrics where
+    possible, while data-quality issues are accumulated in
+    ``data_quality_warnings``.
+
+    The processor does not modify the source Log or agent runtime state.
+    """
+
     SCHEMA_VERSION = "1.0"
 
     MODALITIES = (
@@ -76,6 +92,14 @@ class MobilityStatisticsClass(BaseStatisticsClass):
     }
 
     def __init__(self, simulation_id: Optional[str] = None, output_dir: str = "."):
+        """
+        Initialize one mobility-statistics processor.
+
+        Args:
+            simulation_id (str | None): Optional simulation identifier overriding
+                values found in canonical events.
+            output_dir (str): Directory in which modality JSON files are written.
+        """
         self.simulation_id = None if simulation_id is None else str(simulation_id)
         self.output_dir = Path(output_dir)
         self.data_quality_warnings: List[str] = []
@@ -86,7 +110,19 @@ class MobilityStatisticsClass(BaseStatisticsClass):
     # ------------------------------------------------------------------
 
     def run(self, events_log: Log) -> None:
-        """Generate one schema-1.0 JSON file for every supported modality."""
+        """
+        Process a completed event Log and export schema-1.0 mobility metrics.
+
+        Canonical events are filtered and ordered first. The resulting collection is
+        then processed independently for every supported modality so malformed data
+        in one modality does not prevent the others from being exported.
+
+        One JSON document is generated for every supported modality, including
+        modalities with no valid events.
+
+        Args:
+            events_log (Log): Completed global SimFleet event Log.
+        """
         self.data_quality_warnings = []
         canonical_events = self._canonical_events(events_log)
         simulation_id = self._resolve_simulation_id(canonical_events)
@@ -132,7 +168,20 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         self.print_stats()
 
     def export_to_json(self, json_data: dict, file_path: str) -> None:
-        """Write JSON-native deterministic output and reject NaN/Infinity."""
+        """
+        Export one metrics document as deterministic JSON.
+
+        Non-ASCII characters are preserved and NaN/Infinity are explicitly
+        rejected so the output remains valid JSON.
+
+        Args:
+            json_data (dict): JSON-native metrics document.
+            file_path (str): Destination file path.
+
+        Raises:
+            ValueError: If non-finite floating-point values reach json.dump().
+            OSError: If the output file cannot be created or written.
+        """
         with open(file_path, "w", encoding="utf-8") as file_handle:
             json.dump(
                 json_data,
@@ -144,7 +193,11 @@ class MobilityStatisticsClass(BaseStatisticsClass):
             file_handle.write("\n")
 
     def print_stats(self) -> None:
-        """Print a compact schema-1.0 summary for interactive simulator runs."""
+        """
+        Print a compact service-lifecycle summary for every modality.
+
+        No output is produced before ``run()`` has populated ``results``.
+        """
         if not self.results:
             return
         print("Simulation Results:")
@@ -165,21 +218,63 @@ class MobilityStatisticsClass(BaseStatisticsClass):
     # ------------------------------------------------------------------
 
     def _warn(self, message: str) -> None:
+        """
+        Record and log one non-fatal data-quality warning.
+
+        Args:
+            message (str): Warning description.
+        """
         self.data_quality_warnings.append(message)
         logger.warning(message)
 
     @staticmethod
     def _details(event) -> Dict[str, Any]:
+        """
+        Return an event details mapping when it is structurally valid.
+
+        Args:
+            event: Event-like object.
+
+        Returns:
+            dict: Event details, or an empty mapping when details is absent or
+            is not a dictionary.
+        """
         return event.details if isinstance(getattr(event, "details", None), dict) else {}
 
     @staticmethod
     def _bare_jid(value: Any) -> Optional[str]:
+        """
+        Normalize an XMPP identifier by removing its resource component.
+
+        Args:
+            value: JID-like value.
+
+        Returns:
+            str | None: Bare identifier, or None when no value is supplied.
+        """
         if value is None:
             return None
         text = str(value)
         return text.split("/", 1)[0]
 
     def _timestamp_seconds(self, value: Any, context: str) -> Optional[float]:
+        """
+        Normalize one event timestamp to finite seconds.
+
+        Numeric values are converted directly to float. ``datetime`` values are
+        converted using their Unix timestamp. Other values are accepted only when
+        they can be converted to float.
+
+        Boolean, unsupported, and non-finite values produce a data-quality warning
+        and return None.
+
+        Args:
+            value: Timestamp value to normalize.
+            context (str): Human-readable context used in warnings.
+
+        Returns:
+            float | None: Finite timestamp in seconds.
+        """
         if isinstance(value, bool):
             self._warn("{} has a boolean timestamp; event ignored for time metrics.".format(context))
             return None
@@ -199,6 +294,19 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         return number
 
     def _event_sort_key(self, indexed_event: Tuple[int, Any]) -> Tuple[float, int]:
+        """
+        Build a stable chronological sorting key for a canonical event.
+
+        Invalid timestamps are placed after events with valid timestamps. The
+        original event index is used as a secondary key to preserve deterministic
+        ordering between equal timestamps.
+
+        Args:
+            indexed_event: Pair containing original index and event.
+
+        Returns:
+            tuple[float, int]: Timestamp-based stable sort key.
+        """
         index, event = indexed_event
         timestamp = self._timestamp_seconds(
             getattr(event, "timestamp", None),
@@ -209,6 +317,38 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         return timestamp, index
 
     def _canonical_events(self, events_log: Log) -> List[Any]:
+        """
+        Filter, minimally validate, and chronologically order canonical events.
+
+        Events whose ``event_type`` is not part of ``CANONICAL_EVENTS`` are
+        silently excluded.
+
+        Canonical events are retained only when their minimum schema requirements
+        are satisfied:
+
+        Service lifecycle events
+            Require a supported modality, ``service_id`` and ``user_id``.
+            ``service_requested`` additionally requires origin and destination.
+            ``service_assigned`` and ``service_started`` require
+            ``transport_id``.
+
+        Movement events
+            Require a valid movement phase and a finite non-negative
+            ``distance_m``.
+
+        Charging events
+            Are accepted only for ``electric_taxi`` and require
+            ``charging_id``, ``transport_id``, and ``station_id``.
+
+        Accepted events are sorted chronologically. The method also reports when
+        one ``service_id`` appears in more than one modality.
+
+        Args:
+            events_log (Log): Source event collection.
+
+        Returns:
+            list: Ordered canonical events satisfying the minimum contract.
+        """
         raw_events = list(getattr(events_log, "events", []) or [])
         canonical: List[Tuple[int, Any]] = []
 
@@ -310,6 +450,21 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         return ordered
 
     def _resolve_simulation_id(self, events: Iterable[Any]) -> Optional[str]:
+        """
+        Resolve the simulation identifier used in exported metrics.
+
+        An identifier explicitly supplied to the processor has priority. Otherwise
+        the first ``simulation_id`` found in canonical event details is used.
+
+        Conflicting event values generate a data-quality warning but do not abort
+        processing.
+
+        Args:
+            events: Canonical events.
+
+        Returns:
+            str | None: Selected simulation identifier.
+        """
         if self.simulation_id is not None:
             return self.simulation_id
 
@@ -333,6 +488,18 @@ class MobilityStatisticsClass(BaseStatisticsClass):
 
     @staticmethod
     def _non_negative_number(value: Any) -> Optional[float]:
+        """
+        Validate and normalize a finite non-negative numeric value.
+
+        Boolean values are deliberately rejected even though bool is a Python
+        integer subtype.
+
+        Args:
+            value: Candidate numeric value.
+
+        Returns:
+            float | None: Normalized value when valid.
+        """
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
         number = float(value)
@@ -341,6 +508,24 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         return number
 
     def _safe_json_value(self, value: Any, context: str) -> Any:
+        """
+        Convert an arbitrary value into a JSON-safe representation.
+
+        Native JSON scalars are preserved. Finite floats are accepted, datetimes
+        are converted to seconds, sequences and dictionaries are processed
+        recursively, and array-like scalar objects may be converted through their
+        ``item()`` method.
+
+        Non-finite numbers become None with a warning. Unsupported objects are
+        converted to strings with a warning.
+
+        Args:
+            value: Value to normalize.
+            context (str): Human-readable field context used in warnings.
+
+        Returns:
+            Any: JSON-compatible representation.
+        """
         if value is None or isinstance(value, (str, bool, int)):
             return value
         if isinstance(value, float):
@@ -377,6 +562,20 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         end: Optional[float],
         context: str,
     ) -> Optional[float]:
+        """
+        Calculate a non-negative elapsed duration.
+
+        Missing bounds return None. Negative durations are treated as invalid,
+        generate a data-quality warning, and are exported as None.
+
+        Args:
+            start (float | None): Start timestamp.
+            end (float | None): End timestamp.
+            context (str): Human-readable metric context.
+
+        Returns:
+            float | None: Non-negative elapsed seconds.
+        """
         if start is None or end is None:
             return None
         value = end - start
@@ -387,6 +586,17 @@ class MobilityStatisticsClass(BaseStatisticsClass):
 
     @staticmethod
     def _mean(values: Iterable[Optional[float]]) -> Optional[float]:
+        """
+        Calculate the arithmetic mean of available numeric values.
+
+        None entries are excluded.
+
+        Args:
+            values: Optional numeric values.
+
+        Returns:
+            float | None: Arithmetic mean, or None when no valid values exist.
+        """
         valid = [float(value) for value in values if value is not None]
         if not valid:
             return None
@@ -402,6 +612,27 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         events: List[Any],
         simulation_id: Optional[str],
     ) -> Dict[str, Any]:
+        """
+        Build the complete schema-1.0 document for one modality.
+
+        Every modality contains:
+
+        - schema and simulation identifiers;
+        - modality summary;
+        - reconstructed user services;
+        - transport records when the modality has persistent transport resources.
+
+        Electric Taxi additionally includes reconstructed charging sessions and
+        per-transport charging-session counts.
+
+        Args:
+            modality (str): Supported modality identifier.
+            events (list): Canonical events belonging to the modality.
+            simulation_id (str | None): Selected simulation identifier.
+
+        Returns:
+            dict: JSON-native modality metrics document.
+        """
         user_services = self._build_user_services(modality, events)
         service_index = {record["service_id"]: record for record in user_services}
 
@@ -450,6 +681,38 @@ class MobilityStatisticsClass(BaseStatisticsClass):
     # ------------------------------------------------------------------
 
     def _build_user_services(self, modality: str, events: List[Any]) -> List[Dict[str, Any]]:
+        """
+        Reconstruct user service lifecycles from canonical events.
+
+        Events are grouped by ``service_id``. A service is published only when at
+        least one ``service_requested`` event exists; when duplicate requests
+        exist, the first one in canonical chronological order is authoritative.
+
+        Lifecycle status is derived from terminal events:
+
+        ``completed``
+            Earliest terminal event is ``service_completed``.
+
+        ``failed``
+            Earliest terminal event is ``service_failed``.
+
+        ``unfinished``
+            No terminal event exists.
+
+        Request, assignment, start, and terminal timestamps are used to calculate
+        waiting, service, and total durations. Missing or chronologically invalid
+        data results in nullable metrics and data-quality warnings.
+
+        ``movement_completed`` events sharing the same ``service_id`` provide
+        approach, service, auxiliary, and total recorded distances.
+
+        Args:
+            modality (str): Modality being reconstructed.
+            events (list): Canonical modality events.
+
+        Returns:
+            list[dict]: Reconstructed user service records ordered by service ID.
+        """
         service_events: Dict[str, List[Any]] = {}
         movement_events: Dict[str, List[Any]] = {}
 
@@ -651,6 +914,19 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         return records
 
     def _first_timestamp(self, events: List[Any], context: str) -> Optional[float]:
+        """
+        Return the earliest valid timestamp among a collection of events.
+
+        Invalid timestamps are reported by ``_timestamp_seconds()`` and excluded
+        from the result.
+
+        Args:
+            events (list): Events to inspect.
+            context (str): Human-readable warning context.
+
+        Returns:
+            float | None: Earliest valid timestamp.
+        """
         timestamps = [
             self._timestamp_seconds(event.timestamp, context)
             for event in events
@@ -659,6 +935,17 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         return min(valid) if valid else None
 
     def _distance_totals(self, movements: Iterable[Any]) -> Dict[str, float]:
+        """
+        Aggregate canonical movement distance by movement phase.
+
+        Supported phases are ``approach``, ``service``, and ``auxiliary``.
+
+        Args:
+            movements: Canonical movement_completed events.
+
+        Returns:
+            dict: Total, approach, service, and auxiliary distances in metres.
+        """
         totals = {phase: 0.0 for phase in self.MOVEMENT_PHASES}
         for event in movements:
             details = self._details(event)
@@ -679,6 +966,30 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         movements: List[Any],
         terminal_details: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """
+        Derive PublicTransport-specific metrics for one user service.
+
+        ``boardings`` is reconstructed from the number of service-assignment
+        events.
+
+        Walking distance is the sum of movement_completed events whose
+        ``movement_mode`` is ``walking``.
+
+        When valid terminal values are unavailable:
+
+        - transfers fall back to ``max(boardings - 1, 0)``;
+        - public_transport_stops falls back to the number of distinct referenced
+          origin/destination stops;
+        - legs falls back to the number of distinct observed leg indexes.
+
+        Args:
+            lifecycle (list): Canonical service lifecycle events.
+            movements (list): Movement events associated with the service.
+            terminal_details (dict): Details from the selected terminal event.
+
+        Returns:
+            dict: PublicTransport user-service metrics.
+        """
         assignments = [event for event in lifecycle if event.event_type == "service_assigned"]
         boardings = len(assignments)
 
@@ -735,6 +1046,40 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         events: List[Any],
         service_index: Dict[str, Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
+        """
+        Aggregate canonical events into one record per transport.
+
+        Transport identifiers are discovered from canonical event
+        ``transport_id`` fields. For each transport, the processor associates
+        emitted events, related service events, and movement_completed events
+        emitted by that same transport.
+
+        The resulting record contains:
+
+        - transport class type when observable;
+        - number of transport-emitted service assignments;
+        - started, completed, and failed known services;
+        - number of distinct referenced service identifiers;
+        - movement count;
+        - total, approach, service, and auxiliary distances.
+
+        ``unique_services`` counts every distinct service identifier referenced
+        by events related to the transport, even when a corresponding published
+        user-service record is unavailable. Lifecycle counters use only services
+        present in ``service_index``.
+
+        PublicTransport records are additionally enriched with boarding,
+        passenger-distance, and occupancy metrics.
+
+        Args:
+            modality (str): Modality being aggregated.
+            events (list): Canonical events belonging to that modality.
+            service_index (dict): Published user-service records indexed by
+                service ID.
+
+        Returns:
+            list[dict]: Transport records ordered by transport identifier.
+        """
         transport_ids = set()
         for event in events:
             details = self._details(event)
@@ -823,6 +1168,46 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         movements: List[Any],
         assignments: int,
     ) -> Dict[str, Any]:
+        """
+        Derive passenger and occupancy metrics for one PublicTransport vehicle.
+
+        Every valid movement contributes according to its recorded distance and
+        onboard passenger count.
+
+        ``distance_with_users_m``
+            Sum of movement distance when ``onboard > 0``.
+
+        ``distance_without_users_m``
+            Sum of movement distance when ``onboard == 0``.
+
+        ``average_occupancy``
+            Distance-weighted average number of onboard passengers:
+
+            ``sum(onboard * distance) / sum(distance)``
+
+            Only movements with a valid non-negative ``onboard`` value contribute.
+
+        ``occupancy_rate``
+            Distance-weighted utilization of advertised passenger capacity:
+
+            ``sum(onboard * distance) / sum(capacity * distance)``
+
+            Only movements with valid positive capacity and valid non-negative
+            onboard values contribute to its denominator.
+
+        ``boardings``
+            Number of service assignments attributed to the vehicle.
+
+        Invalid onboard or capacity data generates data-quality warnings where
+        applicable instead of aborting processing.
+
+        Args:
+            movements (list): Canonical movement events emitted by the vehicle.
+            assignments (int): Transport-level service-assignment count.
+
+        Returns:
+            dict: PublicTransport passenger and occupancy metrics.
+        """
         distance_with_users = 0.0
         distance_without_users = 0.0
         weighted_onboard = 0.0
@@ -888,6 +1273,40 @@ class MobilityStatisticsClass(BaseStatisticsClass):
     # ------------------------------------------------------------------
 
     def _build_charging_sessions(self, events: List[Any]) -> List[Dict[str, Any]]:
+        """
+        Reconstruct ElectricTaxi charging lifecycles from canonical events.
+
+        Charging events are grouped by ``charging_id``. A session may contain:
+
+        ``charging_arrived``
+            Transport reached the charging station.
+
+        ``charging_started``
+            Charging service began.
+
+        ``charging_completed``
+            Charging service completed.
+
+        Duplicate lifecycle events generate warnings. The first canonical event
+        in the session supplies the reference transport and station identifiers;
+        conflicting identifiers in later events are reported as data-quality
+        warnings.
+
+        Charging timestamps provide waiting, charging, and total durations.
+        Chronologically inconsistent events generate warnings and may produce
+        nullable elapsed-time metrics through ``_safe_delta()``.
+
+        A session is ``completed`` whenever at least one
+        ``charging_completed`` event exists. Otherwise its status is
+        ``unfinished``. There is currently no separate failed charging-session
+        status in schema 1.0.
+
+        Args:
+            events (list): Canonical ElectricTaxi events.
+
+        Returns:
+            list[dict]: Charging sessions ordered by charging identifier.
+        """
         grouped: Dict[str, List[Any]] = {}
         for event in events:
             if event.event_type not in self.CHARGING_EVENTS:
@@ -968,6 +1387,37 @@ class MobilityStatisticsClass(BaseStatisticsClass):
         user_services: List[Dict[str, Any]],
         transports: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """
+        Build aggregate schema-1.0 metrics for one mobility modality.
+
+        Service counts distinguish completed, failed, and unfinished lifecycles.
+
+        Completion and failure rates use every published service as denominator:
+
+        ``completion_rate = completed / total_services``
+
+        ``failure_rate = failed / total_services``
+
+        Unfinished services therefore reduce both rates but are not counted as
+        failures.
+
+        Mean waiting, service, and total times are calculated only from services
+        whose status is ``completed``. Missing timing values inside completed
+        services are ignored by ``_mean()``.
+
+        Distance aggregation depends on the modality. Taxi, ElectricTaxi,
+        Delivery, and PublicTransport use transport records. Sharing and
+        StationSharing use user-service movement totals because persistent
+        transport records are not built for those modalities.
+
+        Args:
+            modality (str): Supported mobility modality.
+            user_services (list[dict]): Reconstructed user-service records.
+            transports (list[dict]): Reconstructed transport records.
+
+        Returns:
+            dict: Aggregate modality metrics.
+        """
         total_services = len(user_services)
         completed = [service for service in user_services if service["status"] == "completed"]
         failed = [service for service in user_services if service["status"] == "failed"]

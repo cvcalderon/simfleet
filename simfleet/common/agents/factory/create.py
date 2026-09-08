@@ -17,13 +17,33 @@ from simfleet.common.lib.customers.strategies.multimodal.strategyprofiles import
 
 class Factory(ABC):
     """
-        Abstract factory class for creating agents. All agent factories must inherit from this class
-        and implement the create_agent method.
+    Abstract base for configuration-driven SimFleet agent factories.
 
+    Concrete factories translate simulator configuration into initialized
+    agent instances. Depending on the agent family, this includes dynamic
+    class loading, strategy resolution, registration configuration,
+    geospatial state, service capabilities, and modality-specific options.
+
+    Factories configure agents but do not start them. Agent lifecycle and
+    behaviour execution remain responsibilities of SimulatorAgent and the
+    created agents themselves.
     """
 
     @classmethod
     def configure_registration(cls, agent, registration, domain):
+        """
+        Apply optional fleet-registration configuration to an agent.
+
+        A configured fleet name without an XMPP domain is expanded using the
+        simulator domain before delegating to the agent's generic registration
+        contract.
+
+        Args:
+            agent: Agent exposing ``configure_registration()``.
+            registration (dict | None): Registration configuration containing
+                optional ``fleet`` and ``presence`` fields.
+            domain (str): XMPP domain used to complete relative fleet names.
+        """
         if registration:
             fleet = registration.get("fleet")
             presence = registration.get("presence", False)
@@ -65,7 +85,13 @@ class Factory(ABC):
                      max_walking_dist
                      ):
         """
-                Abstract method that must be implemented by all subclasses to create a specific agent.
+        Create and configure one agent from simulator configuration.
+
+        Concrete factories interpret only the parameters relevant to their agent
+        family and must return an initialized, but not yet started, agent.
+
+        Returns:
+            SimfleetAgent: Configured agent instance.
         """
 
         raise NotImplementedError
@@ -73,8 +99,11 @@ class Factory(ABC):
 
 class DirectoryFactory(Factory):
     """
-        Factory class for creating DirectoryAgent instances.
+    Factory for the central DirectoryAgent.
 
+    Directory creation does not require dynamic model loading. The factory
+    creates the standard DirectoryAgent, assigns its simulator identifier, and
+    installs the configured default strategy.
     """
     @classmethod
     def create_agent(cls,
@@ -103,17 +132,17 @@ class DirectoryFactory(Factory):
                      max_walking_dist=None
                      ):
         """
-                        Create a directory agent.
+        Create and configure the simulator DirectoryAgent.
 
-                        Args:
-                            domain(str): domain of the agent
-                            name (str): name of the agent
-                            password (str): password of the agent
-                            default_strategy (class, optional): strategy class of the agent
+        Args:
+            domain (str): XMPP domain.
+            name (str): Agent identifier.
+            password (str): XMPP authentication password.
+            default_strategy (type): Directory strategy class.
 
-                        Returns:
-                        DirectoryAgent: An instance of DirectoryAgent
-                        """
+        Returns:
+            DirectoryAgent: Configured Directory agent.
+        """
         jid = f"{name}@{domain}"
         logger.debug("Creating Directory agent: {}".format(jid))
         agent = DirectoryAgent(jid, password)
@@ -124,9 +153,14 @@ class DirectoryFactory(Factory):
 
 class FleetManagerFactory(Factory):
     """
-        Factory class for creating FleetManagerAgent instances.
+    Factory for generic and specialized FleetManager agents.
 
-        """
+    The configured model class is resolved dynamically from its import path.
+    Optional constructor arguments are forwarded to specialized managers, such
+    as PublicTransportFleetManagerAgent.
+
+    A configured strategy path overrides the default FleetManager strategy.
+    """
     @classmethod
     def create_agent(cls,
                      domain,
@@ -154,20 +188,31 @@ class FleetManagerFactory(Factory):
                      max_walking_dist=None
                     ):
         """
-                        Create a fleetmanager agent.
+        Create and configure one FleetManager.
 
-                        Args:
-                            domain (str): name of domain xmpp
-                            name (str): name of the agent
-                            password (str): password of the agent
-                            default_strategy (class): default strategy class of the agent
-                            strategy (class, optional): strategy class of the agent
-                            jid_directory (JID): directory JID address
-                            fleet_type (str): type of fleet to be used
+        The configured agent class is loaded dynamically with ``load_class()``.
+        Optional constructor arguments are forwarded unchanged. After
+        instantiation, the factory configures identity, Directory relationship,
+        operational strategy, and fleet type.
 
-                        Returns:
-                        FleetManagerAgent: An instance of FleetManagerAgent.
-                        """
+        Args:
+            domain (str): XMPP domain.
+            name (str): FleetManager identifier.
+            password (str): XMPP authentication password.
+            class_ (str): Fully qualified FleetManager model class path.
+            default_strategy (type): Strategy used when no custom strategy path is
+                supplied.
+            optional (dict | None): Extra constructor arguments.
+            strategy (str | None): Optional fully qualified strategy class path.
+            jid_directory: DirectoryAgent JID.
+            fleet_type (str): Fleet identifier managed by this agent.
+
+        Returns:
+            FleetManagerAgent: Configured FleetManager instance.
+
+        Raises:
+            Exception: If ``class_`` is not supplied as an import path.
+        """
         jid = f"{name}@{domain}"
         logger.debug("Creating FleetManager agent: {}".format(jid))
 
@@ -199,9 +244,13 @@ class FleetManagerFactory(Factory):
 
 class TransportFactory(Factory):
     """
-        Factory class for creating transport-related agent instances.
+    Factory for dynamically configured transport agents.
 
-        """
+    The factory resolves the concrete transport model and optional strategy,
+    configures fleet registration, and applies the common transport runtime
+    configuration such as routing, position, capacity, speed, autonomy, and
+    advertised services.
+    """
     @classmethod
     def create_agent(cls,
                      domain,
@@ -229,29 +278,45 @@ class TransportFactory(Factory):
                      route_profile=None,
                     ):
         """
-        Create a Transport agent.
+        Create and configure a transport agent.
+
+        The transport model is dynamically loaded from ``class_`` and receives
+        optional constructor arguments when configured. The factory then applies
+        common transport configuration without starting the agent.
+
+        Configuration may include:
+
+        - Directory and FleetManager registration relationships;
+        - strategy selection;
+        - fleet type;
+        - routing host and route profile;
+        - simulation bounding box;
+        - autonomy state;
+        - provided services;
+        - initial position;
+        - passenger or service capacity;
+        - movement speed.
 
         Args:
-            domain (str): XMPP domain name.
-            name (str): Agent name.
-            password (str): Password for the agent.
-            class_ (str): Class name for the agent in path format.
-            default_strategy (class): Default strategy class for the agent.
-            strategy (class, optional): Optional specific strategy class.
-            jid_directory (JID): Directory JID address.
-            fleetmanager (str): Fleet manager JID address.
-            fleet_type (str): Type of fleet used by the agent.
-            route_host (str): Route host address.
-            autonomy (str): Autonomy level of the agent.
-            current_autonomy (str): Current autonomy level.
-            position (list): Initial coordinates of the agent.
-            speed (str): Speed of the agent.
-            services (list): List of services the agent provides.
-            capacity (int): Capacity of the agent.
+            domain (str): XMPP domain.
+            name (str): Transport identifier.
+            password (str): XMPP authentication password.
+            class_ (str): Fully qualified transport model class path.
+            default_strategy (type): Fallback transport strategy.
+            optional (dict | None): Extra model-constructor arguments.
+            strategy (str | None): Optional strategy class path.
+            jid_directory: DirectoryAgent JID.
+            fleet_type (str): Fleet identifier.
+            route_host (str): Routing-service base address.
+            position: Initial transport coordinates.
+            services: Optional services exposed by the transport.
+            capacity: Optional transport capacity.
+            registration (dict | None): Fleet registration configuration.
+            route_profile (str | None): Routing profile used by MovableMixin.
 
         Returns:
-            TransportAgent: An instance of the specified transport agent class.
-                                """
+            TransportAgent: Configured concrete transport instance.
+        """
 
         jid = f"{name}@{domain}"
         logger.debug("Creating Transport agent: {}".format(jid))
@@ -308,7 +373,21 @@ class TransportFactory(Factory):
 
 class CustomerFactory(Factory):
     """
-        Factory class for creating CustomerAgent instances.
+    Factory for legacy single-modality and multimodal customers.
+
+    Traditional customers receive one operational strategy and one target
+    destination.
+
+    MultiModalCustomerAgent requires additional preprocessing. Its itinerary
+    configuration is validated before the agent starts, and every modal
+    strategy path is resolved exactly once into:
+
+    - a strategy class;
+    - one compatible StrategyProfile;
+    - a DestinationStep stored in the ordered destination plan.
+
+    This keeps dynamic class loading and strategy-family resolution outside the
+    runtime multimodal orchestration FSM.
     """
 
     @classmethod
@@ -339,28 +418,52 @@ class CustomerFactory(Factory):
         destinations=None,
     ):
         """
-        Create a Customer agent.
+        Create and configure a traditional or multimodal customer.
+
+        The configured customer model is resolved first. When the model derives
+        from MultiModalCustomerAgent, the factory validates the complete
+        destination plan before agent runtime begins.
+
+        For every multimodal destination, the factory:
+
+        1. validates destination, fleet type, and strategy path;
+        2. loads the modal strategy class with ``load_class()``;
+        3. resolves exactly one StrategyProfile from the strategy inheritance
+           hierarchy;
+        4. creates a DestinationStep containing the already resolved runtime
+           objects.
+
+        The resulting plan is installed in the customer after construction. The
+        first DestinationStep becomes the initial customer target.
+
+        Traditional customers instead receive the configured fleet type and
+        single target directly.
 
         Args:
-            domain (str): XMPP domain name.
-            name (str): Agent name.
-            password (str): Password for the agent.
-            class_ (str): Class name for the agent in path format.
-            default_strategy (class): Default strategy class for the agent.
-            optional (dict, optional): Optional arguments forwarded to
-                the specialized customer agent constructor.
-            strategy (class, optional): Optional specific strategy class.
-            jid_directory (JID): Directory JID address.
-            fleet_type (str): Type of fleet used by the agent.
-            route_host (str): Route host address.
-            position (list): Initial coordinates of the agent.
-            target (list, optional): Destination coordinates of the agent.
-            speed (float, optional): Agent movement speed.
-            max_walking_dist (float, optional): Maximum walking distance.
-            destinations (list, optional): Multimodal destination plan configuration.
+            domain (str): XMPP domain.
+            name (str): Customer identifier.
+            password (str): XMPP authentication password.
+            class_ (str): Fully qualified customer model class path.
+            default_strategy (type): Fallback customer strategy.
+            optional (dict | None): Extra constructor arguments.
+            strategy (str | None): Customer strategy class path. For multimodal
+                customers this is the orchestrator strategy.
+            jid_directory: DirectoryAgent JID.
+            fleet_type (str): Fleet used by a traditional customer.
+            route_host (str): Routing-service base address.
+            position: Initial customer coordinates.
+            target: Destination of a traditional customer.
+            speed: Optional pedestrian movement speed.
+            max_walking_dist: Optional generic walking-distance constraint.
+            route_profile (str | None): Routing profile for pedestrian movement.
+            destinations (list | None): Multimodal itinerary configuration.
 
         Returns:
-            CustomerAgent: An instance of the specified customer agent class.
+            CustomerAgent: Configured traditional or multimodal customer.
+
+        Raises:
+            ValueError: If multimodal configuration is incomplete or invalid.
+            Exception: If ``class_`` is not supplied as an import path.
         """
 
         jid = f"{name}@{domain}"
@@ -549,9 +652,21 @@ class CustomerFactory(Factory):
 
 class StationFactory(Factory):
     """
-        Factory class for creating StationAgent instances.
+    Factory for service-station agents.
 
-        """
+    Station configuration combines common geospatial state with one or more
+    service definitions.
+
+    Two service execution models are supported:
+
+    ``mode="behaviour"``
+        Requests consume service slots and execute a configured
+        OneShotBehaviour.
+
+    ``mode="agent"``
+        The station owns a finite inventory of transport-agent JIDs, as used
+        by station-based sharing.
+    """
     @classmethod
     def create_agent(cls,
                     domain,
@@ -581,22 +696,29 @@ class StationFactory(Factory):
                     ):
 
         """
-        Create a Station agent.
+        Create and configure a service station.
+
+        The concrete station class is loaded dynamically, positioned in the
+        simulation, and optionally configured for FleetManager registration.
+
+        Service definitions are then translated into either slot-based Behaviour
+        services or agent-backed inventories.
 
         Args:
-            domain (str): XMPP domain name.
-            name (str): Agent name.
-            password (str): Password for the agent.
-            class_ (str): Class name for the agent in path format.
-            default_strategy (class): Default strategy class for the agent.
-            strategy (class, optional): Optional specific strategy class.
-            jid_directory (JID): Directory JID address.
-            position (list): Initial coordinates of the agent.
-            services (list): List of services provided by the station.
-            capacity (int): Capacity of the station (e.g., slots available for vehicles).
+            domain (str): XMPP domain.
+            name (str): Station identifier.
+            password (str): XMPP authentication password.
+            class_ (str): Fully qualified station model class path.
+            default_strategy (type): Fallback service Behaviour class.
+            jid_directory: DirectoryAgent JID.
+            route_host (str): Routing-service base address.
+            bbox: Simulation bounding box.
+            position: Station coordinates.
+            services (iterable[dict]): Station service definitions.
+            registration (dict | None): Fleet registration configuration.
 
         Returns:
-            StationAgent: An instance of StationAgent.
+            ServiceStationAgent: Configured station instance.
         """
 
         jid = f"{name}@{domain}"
@@ -657,9 +779,15 @@ class StationFactory(Factory):
 
 class TransportStopFactory(Factory):
     """
-        Factory class for creating TransportStopAgent instances.
+    Factory for transport-stop agents.
 
-        """
+    Specialized stop models may receive constructor-specific configuration,
+    such as the directional Pattern list of PublicTransportStopAgent.
+
+    The factory also configures identity, registration, operational strategy,
+    geospatial state, Simulator access, fleet type, and any compatibility
+    queue identifiers still supplied by the simulator configuration.
+    """
 
     @classmethod
     def create_agent(
@@ -690,23 +818,31 @@ class TransportStopFactory(Factory):
         registration=None,
     ):
         """
-        Create a Transport Stop agent.
+        Create and configure one transport stop.
+
+        The stop model is dynamically loaded and receives optional constructor
+        arguments before generic station configuration is applied.
+
+        PublicTransportStopAgent uses its constructor options to initialize
+        Pattern-specific queues. Any additional queue identifiers supplied through
+        the generic factory interface are retained for configuration
+        compatibility.
 
         Args:
-            domain (str): XMPP domain name.
-            name (tuple): Tuple containing agent ID and stop name.
-            password (str): Password for the agent.
-            default_strategy (class): Default strategy class for the agent.
-            strategy (class, optional): Optional specific strategy class.
-            jid_directory (JID): Directory JID address.
-            position (list): Initial coordinates of the transport stop.
-            lines (list): List of lines served by the transport stop.
-            optional (dict): Optional arguments forwarded to the specialized agent.
-            fleet_type (str): Fleet type associated with the stop.
-            registration (dict): Registration configuration.
+            domain (str): XMPP domain.
+            name (tuple): Stop identifier and display name.
+            password (str): XMPP authentication password.
+            class_ (str): Fully qualified stop model class path.
+            default_strategy (type | None): Fallback stop strategy.
+            optional (dict | None): Stop-model constructor arguments.
+            strategy (str | None): Optional strategy class path.
+            jid_directory: DirectoryAgent JID.
+            position: Stop coordinates.
+            fleet_type (str | None): Fleet associated with the stop.
+            registration (dict | None): Fleet registration configuration.
 
         Returns:
-            TransportStopAgent: An instance of TransportStopAgent.
+            QueueStationAgent: Configured specialized stop instance.
         """
 
         jid = f"{name[0]}@{domain}"
@@ -766,9 +902,13 @@ class TransportStopFactory(Factory):
 
 class VehicleFactory(Factory):
     """
-        Factory class for creating VehicleAgent instances.
+    Factory for the generic VehicleAgent model.
 
-        """
+    Unlike TransportFactory, this factory currently instantiates VehicleAgent
+    directly rather than dynamically resolving ``class_``. It then applies
+    registration, strategy, routing, target, position, and movement
+    configuration.
+    """
     @classmethod
     def create_agent(cls,
                     domain,
@@ -798,23 +938,26 @@ class VehicleFactory(Factory):
                     route_profile=None,
                     ):
         """
-        Create a Vehicle agent.
+        Create and configure a generic VehicleAgent.
 
         Args:
-            domain (str): XMPP domain name.
-            name (str): Agent name.
-            password (str): Password for the agent.
-            default_strategy (class): Default strategy class for the agent.
-            strategy (class, optional): Optional specific strategy class.
-            jid_directory (JID): Directory JID address.
-            fleet_type (str): Type of fleet used by the vehicle.
-            route_host (str): Route host address.
-            position (list): Initial coordinates of the vehicle.
-            speed (str): Speed of the vehicle.
-            target (list, optional): Target coordinates for the vehicle.
+            domain (str): XMPP domain.
+            name (str): Vehicle identifier.
+            password (str): XMPP authentication password.
+            default_strategy (type): Fallback vehicle strategy.
+            strategy (str | None): Optional strategy class path.
+            jid_directory: DirectoryAgent JID.
+            fleet_type (str): Vehicle fleet type.
+            route_host (str): Routing-service base address.
+            bbox: Simulation bounding box.
+            position: Initial vehicle coordinates.
+            target: Initial target coordinates.
+            speed: Optional movement speed.
+            registration (dict | None): Fleet registration configuration.
+            route_profile (str | None): Routing profile.
 
         Returns:
-            VehicleAgent: An instance of VehicleAgent.
+            VehicleAgent: Configured generic vehicle.
         """
         jid = f"{name}@{domain}"
         logger.debug("Creating Vehicle agent: {}".format(jid))

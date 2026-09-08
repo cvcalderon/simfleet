@@ -15,17 +15,28 @@ from simfleet.utils.helpers import distance_in_meters, kmh_to_ms
 
 class RequestRouteBehaviour(OneShotBehaviour):
     """
-    A one-shot behaviour that is executed to request for a new route to the route agent.
+    Execute one asynchronous request to the configured routing server.
+
+    The behaviour delegates HTTP route resolution to
+    ``request_route_to_server()`` and exposes the result through its SPADE
+    exit code.
+
+    Successful execution returns path geometry, route distance, and routing
+    duration. Routing failures are converted into an error exit code rather
+    than propagated to the requesting MovableMixin.
     """
 
     def __init__(self, msg: Message, origin: list, destination: list, route_host: str, route_profile: str):
         """
-        Behaviour to request a route to a route agent
+        Initialize one routing request.
+
         Args:
-            msg (Message): the message to be sent
-            origin (list): origin of the route
-            destination (list): destination of the route
-            route_host (str): name of the route host server
+            msg (Message): Message object associated with the request.
+            origin (list): Origin coordinates in SimFleet ``[lat, lon]`` order.
+            destination (list): Destination coordinates in SimFleet
+                ``[lat, lon]`` order.
+            route_host (str): Base URL of the routing server.
+            route_profile (str): Routing profile, such as ``"driving"``.
         """
         self.origin = origin
         self.destination = destination
@@ -36,6 +47,15 @@ class RequestRouteBehaviour(OneShotBehaviour):
         super().__init__()
 
     async def run(self):
+        """
+        Resolve the configured route and terminate with a structured exit code.
+
+        A successful request stores ``path``, ``distance``, ``duration``, and
+        ``type="success"`` in the behaviour exit code.
+
+        Missing route data or an exception terminates the behaviour with an error
+        result. Exceptions are logged and are not re-raised.
+        """
         try:
             response_time = time.time()
             path, distance, duration = await request_route_to_server(
@@ -72,26 +92,24 @@ class RequestRouteBehaviour(OneShotBehaviour):
 
 async def request_path(agent, origin, destination, route_host, route_profile="driving"):
     """
-    Sends a message to the RouteAgent to request a path
+    Resolve a route on behalf of a SPADE agent.
+
+    The helper creates a RequestRouteBehaviour, attaches it to the requesting
+    agent, and waits asynchronously until that behaviour terminates.
+
+    When origin and destination are identical, routing-server access is
+    skipped and a zero-distance, zero-duration route is returned directly.
 
     Args:
-        agent: the agent who is requesting the path
-        origin (list): a list with the origin coordinates [longitude, latitude]
-        destination (list): a list with the target coordinates [longitude, latitude]
-        route_host (str): name of the route host server
+        agent: SPADE agent on which the one-shot routing behaviour is started.
+        origin (list): Origin coordinates in ``[lat, lon]`` order.
+        destination (list): Destination coordinates in ``[lat, lon]`` order.
+        route_host (str): Base URL of the routing server.
+        route_profile (str): Routing profile.
 
     Returns:
-        list, float, float: a list of points (longitude and latitude) representing the path,
-                            the distance of the path in meters, a estimation of the duration of the path
-
-    Examples:
-        >>> path, distance, duration = request_path(agent, origin=[0,0], destination=[1,1])
-        >>> print(path)
-        [[0,0], [0,1], [1,1]]
-        >>> print(distance)
-        2.0
-        >>> print(duration)
-        3.24
+        tuple: ``(path, distance_m, duration_s)`` on success, or
+        ``(None, None, None)`` when route resolution fails.
     """
     if origin[0] == destination[0] and origin[1] == destination[1]:
         return [[origin[1], origin[0]]], 0, 0
@@ -121,7 +139,22 @@ async def request_path(agent, origin, destination, route_host, route_profile="dr
 
 
 def unused_port(hostname):
-    """Return a port that is unused on the current host."""
+    """
+    Ask the operating system for an available local TCP port.
+
+    A temporary socket is bound to port zero, allowing the operating system
+    to select a currently unused port. The socket is then closed before the
+    selected port number is returned.
+
+    Args:
+        hostname (str): Local interface or hostname to bind.
+
+    Returns:
+        int: Port number selected by the operating system.
+
+    Note:
+        The port is not reserved after this function returns.
+    """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((hostname, 0))
     port = s.getsockname()[1]
@@ -131,14 +164,22 @@ def unused_port(hostname):
 
 def chunk_path(path, speed_in_kmh):
     """
-    Splits the path into smaller chunks taking into account the speed.
+    Expand route geometry into movement points based on configured speed.
+
+    Each original route segment is subdivided when its geographic length is
+    greater than the distance the agent travels in one second at
+    ``speed_in_kmh``.
+
+    The returned sequence therefore provides approximately one-second
+    geographic movement increments while preserving the final route
+    destination.
 
     Args:
-        path (list): the original path. A list of points (lon, lat)
-        speed_in_kmh (float): the speed in km per hour at which the path is being traveled.
+        path (list): Route coordinates in SimFleet ``[lat, lon]`` order.
+        speed_in_kmh (float): Physical movement speed in kilometres per hour.
 
     Returns:
-        list: a new path equivalent (to the first one), that has at least the same number of points.
+        list: Expanded route geometry used by MovableMixin.
     """
     meters_per_second = kmh_to_ms(speed_in_kmh)
     length = len(path)
@@ -169,12 +210,21 @@ def chunk_path(path, speed_in_kmh):
 
 def avg(array):
     """
-    Makes the average of an array without Nones.
+    Calculate the arithmetic mean of truthy values in an iterable.
+
+    Values considered false by Python, including None and numeric zero, are
+    excluded before averaging.
+
     Args:
-        array (list): a list of floats and Nones
+        array (iterable): Values to aggregate.
 
     Returns:
-        float: the average of the list without the Nones.
+        float: Mean of retained values, or 0.0 when none remain.
+
+    Note:
+        This compatibility helper intentionally reflects its current
+        ``filter(None, ...)`` behaviour. Its treatment of numeric zero requires
+        review before use in statistical calculations.
     """
     array_wo_nones = list(filter(None, array))
     return (
@@ -188,15 +238,28 @@ async def request_route_to_server(
     origin, destination, route_host="http://router.project-osrm.org/", route_profile="driving"
 ):
     """
-    Queries the OSRM for a path.
+    Query an OSRM-compatible routing server for one route.
+
+    SimFleet coordinates are supplied in ``[lat, lon]`` order and converted
+    to OSRM's ``lon,lat`` URL representation. Returned GeoJSON coordinates are
+    converted back to SimFleet order.
+
+    The first route returned by the server is used. Its full geometry,
+    distance in metres, and estimated duration in seconds are returned.
+
+    If the routing response does not end exactly at the requested SimFleet
+    destination, that destination is appended to the path.
 
     Args:
-        origin (list): origin coordinate (longitude, latitude)
-        destination (list): target coordinate (longitude, latitude)
-        route_host (string): route to host server of OSRM service
+        origin (list): Origin coordinates in ``[lat, lon]`` order.
+        destination (list): Destination coordinates in ``[lat, lon]`` order.
+        route_host (str): Base URL of an OSRM-compatible routing service.
+        route_profile (str): OSRM routing profile.
 
     Returns:
-        list, float, float = the path, the distance of the path and the estimated duration
+        tuple: ``(path, distance_m, duration_s)`` on success, or
+        ``(None, None, None)`` when any request or response-processing error
+        occurs.
     """
     try:
 

@@ -1,3 +1,14 @@
+"""
+Scenario configuration loading and default class resolution for SimFleet.
+
+SimfleetConfig combines JSON scenario values with simulator defaults and
+exposes the resulting configuration through mapping-style and attribute-style
+access.
+
+This module also resolves configured default strategy and metrics import paths
+into Python classes before agents are created.
+"""
+
 import json
 from loguru import logger
 
@@ -5,6 +16,19 @@ from simfleet.utils.reflection import load_class
 from simfleet.utils.helpers import get_bbox_from_location
 
 def hide_passwords(item, key=None):
+    """
+    Recursively mask values whose dictionary key contains ``"password"``.
+
+    Dictionaries and lists are copied recursively. Matching scalar values are
+    replaced by a string of asterisks with the same length.
+
+    Args:
+        item: Configuration value to sanitize.
+        key (str | None): Dictionary key associated with the current value.
+
+    Returns:
+        Any: Sanitized copy or scalar value.
+    """
     if isinstance(item, dict):
         d = dict()
         for newk, newv in item.items():
@@ -20,14 +44,34 @@ def hide_passwords(item, key=None):
 
 class SimfleetConfig(object):
     """
-    A scenario object reads a file with a JSON representation of a scenario and is used to create the participant agents.
+    Load and normalize one SimFleet scenario configuration.
+
+    Configuration is initialized with the supported agent collections, then
+    optionally updated from a JSON scenario file. Scenario-provided values
+    take precedence over constructor fallback values.
+
+    The object also establishes defaults for simulation control, geospatial
+    bounds, routing, XMPP/HTTP endpoints, strategy class paths, and the
+    mobility metrics processor.
+
+    Configuration values may be accessed through dictionary syntax or, when
+    present in the internal configuration mapping, through attributes.
     """
 
     def __init__(self, filename=None, name=None, max_time=None, verbose=None):
         """
-        The SimfleetConfig constructor reads the JSON file and sets.
+        Initialize and normalize scenario configuration.
+
         Args:
-            filename (str): the name of the scenario file
+            filename (str | None): Optional JSON scenario file.
+            name (str | None): Fallback simulation name.
+            max_time: Fallback maximum simulation duration.
+            verbose: Fallback verbosity setting.
+
+        Notes:
+            When a scenario file already defines ``simulation_name``,
+            ``max_time`` or ``verbose``, those file values take precedence over
+            the corresponding constructor fallbacks.
         """
 
         self.__config = dict()
@@ -124,12 +168,26 @@ class SimfleetConfig(object):
         logger.debug("Config loaded: {}".format(self))
 
     def load_config(self, filename):
+        """
+        Merge a JSON scenario file into the current configuration.
+
+        Existing keys are overwritten by values from the file.
+
+        Args:
+            filename (str): Path to the scenario JSON file.
+        """
         with open(filename, "r") as f:
             logger.info("Reading config {}".format(filename))
             self.__config.update(json.load(f))
 
     @property
     def num_managers(self):
+        """
+        Return the number of configured fleet managers.
+
+        Returns:
+            int: Number of entries in ``fleets``.
+        """
         try:
             return len(self.__config["fleets"])
         except KeyError:
@@ -137,6 +195,12 @@ class SimfleetConfig(object):
 
     @property
     def num_transport(self):
+        """
+        Return the number of configured transport agents.
+
+        Returns:
+            int: Number of entries in ``transports``.
+        """
         try:
             return len(self.__config["transports"])
         except KeyError:
@@ -144,6 +208,12 @@ class SimfleetConfig(object):
 
     @property
     def num_customers(self):
+        """
+        Return the number of configured customer agents.
+
+        Returns:
+            int: Number of entries in ``customers``.
+        """
         try:
             return len(self.__config["customers"])
         except KeyError:
@@ -151,6 +221,12 @@ class SimfleetConfig(object):
 
     @property
     def num_stations(self):
+        """
+        Return the number of configured service stations.
+
+        Returns:
+            int: Number of entries in ``stations``.
+        """
         try:
             return len(self.__config["stations"])
         except KeyError:
@@ -159,6 +235,12 @@ class SimfleetConfig(object):
     #New vehicle
     @property
     def num_vehicles(self):
+        """
+        Return the number of configured generic vehicles.
+
+        Returns:
+            int: Number of entries in ``vehicles``.
+        """
         try:
             return len(self.__config["vehicles"])
         except KeyError:
@@ -167,32 +249,85 @@ class SimfleetConfig(object):
     # Bus line
     @property
     def num_stops(self):
+        """
+        Return the number of configured transport-stop agents.
+
+        Returns:
+            int: Number of entries in ``stops``.
+        """
         try:
             return len(self.__config["stops"])
         except KeyError:
             return 0
 
     def __getitem__(self, item):
+        """
+        Return one configuration value using mapping syntax.
+
+        Args:
+            item (str): Configuration key.
+
+        Returns:
+            Any: Stored configuration value.
+
+        Raises:
+            KeyError: If the key does not exist.
+        """
         return self.__config[item]
 
     def __getattr__(self, item):
+        """
+        Resolve unknown attributes from the internal configuration mapping.
+
+        Args:
+            item (str): Requested attribute name.
+
+        Returns:
+            Any: Configuration value when the key exists.
+        """
         if item != "__config" and item in self.__config:
             return self.__config[item]
         else:
             return super().__getattribute__(item)
 
     def __setattr__(self, key, value):
+        """
+        Update an existing configuration key through attribute assignment.
+
+        Attributes that do not correspond to an existing configuration key are
+        stored normally on the SimfleetConfig instance.
+
+        Args:
+            key (str): Attribute or configuration key.
+            value: Value to assign.
+        """
         if "__config" in self.__dict__ and key in self.__config:
             self.__config[key] = value
         else:
             super().__setattr__(key, value)
 
     def __str__(self):
+        """
+        Serialize configuration as indented JSON after password masking.
+
+        Returns:
+            str: Human-readable sanitized configuration representation.
+        """
         d = hide_passwords(self.__config)
         return json.dumps(d, indent=4)
 
 
 def set_default_metrics(mobility_metrics):
+    """
+    Resolve the configured mobility metrics processor class.
+
+    Args:
+        mobility_metrics (str): Fully qualified metrics class path.
+
+    Returns:
+        dict: Mapping containing the resolved class under
+        ``"mobility_metrics"``.
+    """
     class_dict = {}
 
     class_dict['mobility_metrics'] = load_class(mobility_metrics)
@@ -208,14 +343,21 @@ def set_default_strategies(
         vehicle_strategy,
 ):
     """
-    Gets the strategy strings and loads their classes. This strategies are prepared to be injected into any
-    new transport or customer agent.
+    Resolve configured default strategy import paths into Python classes.
+
+    The resulting classes are used by agent factories whenever a concrete
+    scenario entry does not provide its own strategy override.
+
     Args:
-        directory_strategy (str): the path to the directory strategy
-        fleetmanager_strategy (str): the path to the fleetmanager strategy
-        transport_strategy (str): the path to the transport strategy
-        customer_strategy (str): the path to the customer strategy
-        station_strategy (str): the path to the station strategy
+        directory_strategy (str): Directory strategy class path.
+        fleetmanager_strategy (str): FleetManager strategy class path.
+        transport_strategy (str): Transport strategy class path.
+        customer_strategy (str): Customer strategy class path.
+        station_strategy (str): Station service/strategy class path.
+        vehicle_strategy (str): Generic vehicle strategy class path.
+
+    Returns:
+        dict: Resolved default strategy classes indexed by agent family.
     """
 
     class_dict = {}

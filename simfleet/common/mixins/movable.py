@@ -9,27 +9,34 @@ ONESECOND_IN_MS = 1000
 
 class MovableMixin:
     """
-        MovableMixin is a mixin class that provides functionality for agents that need to move along a defined path
-        to a specific destination. It manages the movement process, path calculation, and speed handling.
+    Add route-based movement capabilities to a geolocated agent.
 
-        Attributes:
-            path (list): A list of coordinates that represents the path the vehicle should follow.
-            chunked_path (deque): Queue of movement steps generated from the current path.
-            animation_speed (int): The time in milliseconds between steps in the animation or movement process.
-            speed_in_kmh (float): The current speed of the vehicle in kilometers per hour.
-            dest (list): The destination coordinates (longitude, latitude) of the vehicle.
-            last_route_distance: Distance in meters of the last successfully planned route.
-            last_osrm_duration: Duration in seconds estimated by OSRM for the last route.
-            last_speed_based_duration: Theoretical duration in seconds calculated using the agent configured speed.
-            total_route_distance: Accumulated distance of successfully planned routes.
-            total_osrm_duration: Accumulated OSRM estimated duration.
-            total_speed_based_duration: Accumulated duration calculated from agent speed.
-            route_count: Number of successfully planned routes.
-        """
+    The mixin requests a route between the agent's current position and a
+    destination, converts that route into movement steps according to the
+    configured speed, and advances through those steps with a periodic SPADE
+    behaviour.
+
+    Route execution keeps two complementary duration estimates:
+
+    ``last_osrm_duration``
+        Duration estimated by the external routing service.
+
+    ``last_speed_based_duration``
+        Theoretical duration computed from route distance and the agent's
+        configured speed.
+
+    Equivalent accumulated metrics are stored across all successfully planned
+    routes together with ``route_count``.
+
+    The host agent is expected to provide geolocation, routing configuration,
+    SPADE behaviour management, and ``set_position()``.
+    """
 
     def __init__(self):
         """
-            Initializes the MovableMixin with default values for path, speed, and destination.
+        Initialize movement, route, speed, and accumulated route metrics.
+
+        No route is active after initialization.
         """
         self.set("path", None)
         self.chunked_path = None
@@ -50,15 +57,27 @@ class MovableMixin:
 
     async def move_to(self, dest):
         """
-            Moves the transport agent to a new destination by requesting a path from its current position
-            and chunking the path based on the transport's speed.
+        Plan and start route-based movement toward a destination.
 
-            Args:
-                dest (list): The destination coordinates (longitude, latitude).
+        Route calculation is attempted up to five times while no path is
+        returned. Once a path is obtained, it is divided into movement steps
+        according to the configured agent speed and stored as a deque.
 
-            Raises:
-                AlreadyInDestination: If the transport is already at the destination coordinates.
-                PathRequestException: If there is an error in obtaining the path from the current position to the destination.
+        The method updates both last-route and accumulated route metrics before
+        installing a MovingBehaviour that performs the physical movement.
+
+        Args:
+            dest (list): Destination coordinates.
+
+        Returns:
+            tuple[float, float, float]:
+                Route distance in meters, routing-service duration in seconds,
+                and theoretical duration derived from configured agent speed.
+
+        Raises:
+            AlreadyInDestination: If the current position already equals ``dest``.
+            PathRequestException: If no route can be obtained or the returned path
+                cannot be converted into movement steps.
         """
         if self.get("current_pos") == dest:
             raise AlreadyInDestination
@@ -115,31 +134,31 @@ class MovableMixin:
 
     async def request_path(self, origin, destination):
         """
-        Requests a path between two points (origin and destination) using the route server.
+        Request a route from the configured routing service.
+
+        The request delegates to ``simfleet.utils.routing.request_path`` using the
+        agent's ``route_host`` and ``route_profile``.
 
         Args:
-            origin (list): the coordinates of the origin of the requested path
-            destination (list): the coordinates of the end of the requested path
+            origin (list): Origin coordinates.
+            destination (list): Destination coordinates.
 
         Returns:
-            list, float, float: A list of points that represent the path from origin to destination, the distance and
-            the estimated duration
-
-        Examples:
-            >>> path, distance, duration = await self.request_path(origin=[0,0], destination=[1,1])
-            >>> print(path)
-            [[0,0], [0,1], [1,1]]
-            >>> print(distance)
-            2.0
-            >>> print(duration)
-            3.24
+            tuple: Route geometry, route distance, and routing-service duration.
         """
         return await request_path(self, origin, destination, self.route_host, self.route_profile)
 
 
     async def step(self):
         """
-        Advances one step in the simulation
+        Advance one physical movement step along the active chunked route.
+
+        The next coordinate is removed from the left side of ``chunked_path``.
+        The distance to that coordinate is used to recompute
+        ``animation_speed`` so the periodic movement interval reflects the
+        configured agent speed.
+
+        When no chunked route remains, the method performs no movement.
         """
         if self.chunked_path:
             _next = self.chunked_path.popleft()
@@ -152,34 +171,40 @@ class MovableMixin:
 
     def is_in_destination(self):
         """
-        Checks if the transport has arrived to its destination.
+        Return whether the current physical position equals the active destination.
 
         Returns:
-            bool: whether the transport is at its destination or not
+            bool: True when the destination has been reached.
         """
         return self.dest == self.get_position()
 
 
     def set_speed(self, speed_in_kmh):
         """
-        Sets the speed of the transport.
+        Configure the movement speed used for route chunking and step timing.
 
         Args:
-            speed_in_kmh (float): the speed of the transport in km per hour
+            speed_in_kmh (float): Movement speed in kilometres per hour.
         """
         self.set("speed_in_kmh", speed_in_kmh)
 
 
 class MovingBehaviour(PeriodicBehaviour):
     """
-        This is the internal behaviour that manages the movement of the transport.
-        It is triggered when the transport has a new destination and the periodic tick
-        is recomputed at every step to show a fine animation.
-        This moving behaviour includes to update the transport coordinates as it
-        moves along the path at the specified speed.
+    Periodically advance an agent through an active MovableMixin route.
+
+    After each movement step, the behaviour updates its own period from the
+    agent's current ``animation_speed``. This allows variable geographic step
+    distances while preserving the configured physical movement speed.
+
+    Once the destination is reached, the behaviour terminates and clears the
+    active path and chunked-route state.
     """
 
     async def run(self):
+        """
+        Execute one movement tick and stop when the destination is reached.
+        """
         await self.agent.step()
         self.period = self.agent.animation_speed / ONESECOND_IN_MS
         if self.agent.is_in_destination():

@@ -22,18 +22,31 @@ from simfleet.utils.abstractstrategies import StrategyBehaviour
 
 class FleetManagerAgent(SimfleetAgent):
     """
-    The FleetManagerAgent is responsible for managing fleet resources. Resources may be transports,
-    vehicles, stations, or other infrastructure agents depending on the fleet strategy.
+    Base agent responsible for managing resources belonging to one fleet.
 
-    Attributes:
-        resources_in_fleet (int): The number of resources currently registered in the fleet.
-        fleet_icon (str): The icon representing the fleet in visual representations.
+    Fleet resources register through REGISTER_PROTOCOL and are stored in
+    ``fleet_resources``. A resource may represent a transport, vehicle,
+    station, stop, or another fleet-specific infrastructure element.
+
+    The FleetManager also maintains resource availability through two
+    Presence sources:
+
+    - live XMPP Presence, used as the primary runtime source;
+    - a message-based Presence mirror stored with the registered resource,
+      used as fallback when live Presence is unavailable.
+
+    FleetManagerAgent may itself register with a DirectoryAgent. Concrete
+    fleet managers extend this model with modality-specific resource and
+    customer coordination.
     """
 
     def __init__(self, agentjid, password):
         """
-            Initializes the FleetManager agent with the given JID (Jabber ID) and password. It also initializes
-            its internal structures to track the resources within the fleet.
+        Initialize fleet resource storage and common manager state.
+
+        Args:
+            agentjid (str): XMPP JID used by the FleetManager.
+            password (str): XMPP authentication password.
         """
 
         super().__init__(agentjid, password)
@@ -45,15 +58,22 @@ class FleetManagerAgent(SimfleetAgent):
 
     def clear_agents(self):
         """
-        Clears the stored set of resources and resets the simulation clock. This method is useful for
-        resetting the fleet manager state between simulations or sessions.
+        Clear all resources currently registered with this FleetManager.
+
+        This resets the ``fleet_resources`` mapping but does not modify the
+        FleetManager identity, strategy, fleet type, or Directory registration.
         """
         self.set("fleet_resources", {})
 
     async def setup(self):
         """
-            Sets up the FleetManager agent by registering a behavior that handles the registration of resources.
-            This method is called automatically when the agent is started.
+        Initialize fleet-resource registration handling.
+
+        ResourceRegistrationForFleetBehaviour listens to REGISTER_PROTOCOL and
+        manages both resource registration and this FleetManager's registration
+        with an optional DirectoryAgent.
+
+        Local setup is marked ready once that behaviour has been installed.
         """
         await super().setup()
         logger.info("FleetManager agent {} running".format(self.name))
@@ -265,10 +285,10 @@ class FleetManagerAgent(SimfleetAgent):
 
     def get_fleet_resources(self):
         """
-        Returns the resources currently registered with the FleetManager.
+        Return resources currently registered with the FleetManager.
 
         Returns:
-            dict: Registered fleet resources indexed by name.
+            dict: Registered resources indexed by their resource name.
         """
         return self.get("fleet_resources")
 
@@ -283,16 +303,20 @@ class FleetManagerAgent(SimfleetAgent):
 
     def set_icon(self, icon):
         """
-            Sets the fleet icon for visual representation.
+        Configure the icon advertised to registered fleet resources.
 
-            Args:
-                icon (str): The icon identifier for the fleet.
+        Args:
+            icon (str): Fleet icon identifier.
         """
         self.fleet_icon = icon
 
     def run_strategy(self):
         """
-        Runs the fleet management strategy, registering a behavior for handling resource and customer requests.
+        Start the configured fleet-management strategy once.
+
+        The strategy receives REQUEST_PROTOCOL messages used for fleet-specific
+        customer and resource coordination. ``running_strategy`` prevents
+        duplicate strategy instances.
         """
         if not self.running_strategy:
             template = Template()
@@ -301,7 +325,15 @@ class FleetManagerAgent(SimfleetAgent):
             self.running_strategy = True
 
     def dependencies_ready(self):
+        """
+        Return whether external FleetManager dependencies are satisfied.
 
+        In addition to the generic SimfleetAgent dependencies, the FleetManager
+        must have completed its configured Directory registration.
+
+        Returns:
+            bool: True when all required dependencies are ready.
+        """
         if not super().dependencies_ready():
             return False
 
@@ -312,18 +344,31 @@ class FleetManagerAgent(SimfleetAgent):
 
 class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
     """
-        This behavior manages the registration of new resources in the fleet. It receives requests from
-        agents and registers them if their fleet type matches the FleetManager's type.
+    Manage REGISTER_PROTOCOL relationships owned by a FleetManager.
+
+    The behaviour handles three responsibilities:
+
+    - register this FleetManager with its optional DirectoryAgent;
+    - accept or reject resources requesting membership in the fleet;
+    - receive message-based Presence mirrors from registered resources.
+
+    A resource is accepted only when its declared fleet type matches the
+    FleetManager fleet type. Accepted resources are stored in
+    ``fleet_resources`` and subscribed through XMPP Presence.
     """
     async def on_start(self):
+        """Log the start of fleet-resource registration handling."""
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
     def add_resource(self, agent):
         """
-        Adds a new resource agent to the fleet's internal store.
+        Add or update a resource in the FleetManager registry.
+
+        ``resources_in_fleet`` is incremented only for a previously unknown
+        resource name.
 
         Args:
-            agent (dict): The details of the resource agent to be added.
+            agent (dict): Resource registration payload.
         """
         resources = self.get("fleet_resources")
 
@@ -334,10 +379,10 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
 
     def remove_resource(self, key):
         """
-        Removes a resource agent from the fleet's internal store by its key.
+        Remove a registered fleet resource by its registry key.
 
         Args:
-            key (str): The unique key representing the resource agent.
+            key (str): Resource key stored in ``fleet_resources``.
         """
         if key in self.get("fleet_resources"):
             del self.get("fleet_resources")[key]
@@ -352,10 +397,13 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
 
     def update_resource_presence(self, content):
         """
-        Update the stored message-based Presence mirror for a fleet resource.
+        Update the message-based Presence mirror of a registered resource.
+
+        Resource matching uses bare-JID equivalence rather than exact resource
+        components.
 
         Args:
-            content: Presence update containing at least the resource JID.
+            content (dict): Presence mirror containing the resource JID.
 
         Returns:
             bool: True when a matching registered resource was updated.
@@ -372,10 +420,12 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def accept_registration(self, agent_id):
         """
-        Sends an acceptance message to a resource agent, confirming its registration in the fleet.
+        Accept a resource into the fleet.
+
+        The response advertises the FleetManager icon and fleet type.
 
         Args:
-            agent_id (str): The ID of the resource agent to be accepted.
+            agent_id: Resource JID receiving the acceptance.
         """
         reply = Message()
         content = {"icon": self.agent.fleet_icon, "fleet_type": self.agent.fleet_type}
@@ -387,10 +437,10 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def reject_registration(self, agent_id):
         """
-        Sends a rejection message to a resource agent, declining its registration request.
+        Refuse a resource registration request.
 
         Args:
-            agent_id (str): The ID of the resource agent to be rejected.
+            agent_id: Resource JID receiving the refusal.
         """
         reply = Message()
         reply.to = str(agent_id)
@@ -400,6 +450,11 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
         await self.send(reply)
 
     async def send_registration(self):
+        """
+        Request registration of this FleetManager with its DirectoryAgent.
+
+        No message is sent when no DirectoryAgent has been configured.
+        """
 
         if self.agent.directory_id is None:
             return
@@ -427,8 +482,24 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
 
     async def run(self):
         """
-            Listens for registration requests from resources and processes them by accepting or rejecting
-            them based on the fleet type.
+        Execute one FleetManager registration cycle.
+
+        Before processing incoming messages, an unregistered FleetManager may
+        retry registration with its configured DirectoryAgent.
+
+        REGISTER_PROTOCOL messages are then interpreted as follows:
+
+        ``REQUEST_PERFORMATIVE``
+            A fleet resource requests registration. Matching fleet types are
+            stored, subscribed through Presence, and accepted.
+
+        ``ACCEPT_PERFORMATIVE``
+            The DirectoryAgent confirms registration of this FleetManager.
+
+        ``INFORM_PERFORMATIVE``
+            A registered resource supplies a message-based Presence mirror.
+
+        Unexpected errors are logged without terminating the cyclic behaviour.
         """
 
         if (not self.agent.registration
