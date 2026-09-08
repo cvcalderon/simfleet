@@ -21,35 +21,59 @@ from simfleet.communications.protocol import (
 
 class ChargingStationAgent(ServiceStationAgent):
     """
-        Represents a charging station agent that provides services such as electric charging,
-        gasoline refueling, or diesel refueling.
+    Service station providing energy-replenishment operations.
 
-        Methods:
-            setup(): Initializes the charging station and its behaviors.
-            run_strategy(): Configures the behavior strategy for the station.
-            to_json(): Serializes the station's main information to JSON format.
+    ChargingStationAgent extends ServiceStationAgent with registration in the
+    DirectoryAgent and supports slot-based services such as electric charging,
+    gasoline refuelling, and diesel refuelling.
+
+    Individual service executions are represented by OneShotBehaviour
+    implementations. Service capacity, waiting queues, and dispatch remain
+    responsibilities of ServiceStationAgent.
     """
 
     def __init__(self, agentjid, password):
+        """
+        Initialize the common service-station infrastructure.
+
+        Args:
+            agentjid (str): XMPP JID used by the station.
+            password (str): XMPP authentication password.
+        """
         ServiceStationAgent.__init__(self, agentjid, password)
 
         self.arguments = []
 
     def run_strategy(self):
         """
-        Placeholder for setting the strategy behavior for the station.
+        Mark the station operational strategy as started.
+
+        ChargingStationAgent currently relies on its service and registration
+        behaviours rather than installing an additional station strategy here.
         """
         if not self.running_strategy:
             self.running_strategy = True
 
     def to_json(self):
+        """
+        Serialize the station using the common ServiceStation representation.
+
+        Returns:
+            dict: Serializable station state.
+        """
         data = super().to_json()
         return data
 
 
     async def setup(self):
         """
-            Sets up the agent with its behavior templates for registration.
+        Initialize service handling and Directory registration.
+
+        The common ServiceStation lifecycle is initialized first. A dedicated
+        RegistrationBehaviour then registers the station and its available
+        services with the DirectoryAgent.
+
+        Local setup completes by marking the station ready.
         """
         await super().setup()
         logger.info("Agent[{}]: Charging station running".format(self.name))
@@ -77,20 +101,19 @@ class ChargingStationAgent(ServiceStationAgent):
 
 class RegistrationBehaviour(CyclicBehaviour):
     """
-        Manages the registration behavior of the charging station, allowing it to register
-        with the directory agent.
+    Register the charging station with the DirectoryAgent.
 
-        Methods:
-            on_start(): Initializes the behavior and sets up the logger.
-            send_registration(): Sends a registration message to the directory.
-            run(): Manages the registration logic and response handling.
+    Registration advertises the station JID, physical position, and service
+    types. The cyclic behaviour retries until the DirectoryAgent accepts the
+    registration.
     """
     async def on_start(self):
+        """Log the start of charging-station Directory registration."""
         logger.debug("Agent[{}]: Strategy ({}) started".format(self.agent.name, type(self).__name__))
 
     async def send_registration(self):
         """
-        Sends a registration message to the directory agent with the station's information.
+        Send the station service catalogue and position to the DirectoryAgent.
         """
         logger.info(
             "Agent[{}]: The agent sent proposal to register to directory ({})".format(
@@ -111,6 +134,12 @@ class RegistrationBehaviour(CyclicBehaviour):
         await self.send(msg)
 
     async def run(self):
+        """
+        Execute one Directory-registration cycle.
+
+        Registration requests continue while the station is unregistered.
+        ACCEPT_PERFORMATIVE marks Directory registration as complete.
+        """
         try:
             if not self.agent.registration:
                 await self.send_registration()
@@ -132,15 +161,22 @@ class RegistrationBehaviour(CyclicBehaviour):
 
 class ChargingService(OneShotBehaviour):
     """
-        Represents a behavior for charging electric vehicles in the station.
-        It manages the charging process and notifies the vehicle when charging is complete.
+    Execute one electric-charging service.
 
-        Methods:
-            charging_transport(): Performs the charging operation and logs the duration.
-            inform_charging_complete(): Notifies the vehicle when charging is complete.
-            run(): Executes the charging sequence.
-        """
+    Charging duration is derived from the requested transport energy need and
+    the configured charging power. Once the simulated charging interval has
+    elapsed, the transport is informed and the station service slot is
+    released.
+    """
     def __init__(self, agent_id, **kwargs):
+        """
+        Initialize one electric-charging execution.
+
+        Args:
+            agent_id: Transport receiving the service.
+            **kwargs: Service parameters including ``transport_need``,
+                ``service_name``, and ``power``.
+        """
         super().__init__()
         self.agent_id = agent_id
 
@@ -155,7 +191,7 @@ class ChargingService(OneShotBehaviour):
 
     async def charging_transport(self):
         """
-            Simulates the charging process based on the power and transport need, and logs the operation.
+        Simulate the charging duration from transport need and charging power.
         """
         total_time = self.transport_need / self.power
         recarge_time = datetime.timedelta(seconds=total_time)
@@ -170,7 +206,7 @@ class ChargingService(OneShotBehaviour):
 
     async def inform_charging_complete(self):
         """
-            Sends a message to the transport indicating that the charging is complete.
+        Inform the transport that its charging service has completed.
         """
 
         reply = Message()
@@ -183,7 +219,7 @@ class ChargingService(OneShotBehaviour):
 
     async def run(self):
         """
-            Main execution of the charging behavior, performing the charging operation and notifying the transport.
+        Execute charging, notify the transport, and release the occupied slot.
         """
         logger.debug("Agent[{}]: The station start charging.".format(self.agent.name))
 
@@ -202,10 +238,21 @@ class ChargingService(OneShotBehaviour):
 
 class GasolineService(OneShotBehaviour):
     """
-        Represents a behavior for refueling gasoline vehicles at the station.
-        Follows a similar structure to the ChargingService class.
+    Execute one gasoline-refuelling service.
+
+    Refuelling duration is derived from transport need and the configured
+    refuelling rate. Completion is reported to the transport before the
+    service slot is released.
     """
     def __init__(self, agent_id, **kwargs):
+        """
+        Initialize one gasoline-refuelling execution.
+
+        Args:
+            agent_id: Transport receiving the service.
+            **kwargs: Service parameters including ``transport_need``,
+                ``service_name``, and ``refueling_rate``.
+        """
         super().__init__()
         self.agent_id = agent_id
 
@@ -221,7 +268,7 @@ class GasolineService(OneShotBehaviour):
 
     async def charging_transport(self):
         """
-            Simulates the refueling process based on the refueling rate and logs the operation.
+        Simulate gasoline refuelling for the configured service duration.
         """
         total_time = self.transport_need / self.refueling_rate
         recarge_time = datetime.timedelta(seconds=total_time)
@@ -236,7 +283,7 @@ class GasolineService(OneShotBehaviour):
 
     async def inform_charging_complete(self):
         """
-            Sends a message to the transport indicating that the refueling is complete.
+        Inform the transport that gasoline refuelling has completed.
         """
 
         reply = Message()
@@ -248,6 +295,9 @@ class GasolineService(OneShotBehaviour):
         await self.send(reply)
 
     async def run(self):
+        """
+        Execute refuelling, notify the transport, and release the occupied slot.
+        """
         logger.debug("Station {} start charging.".format(self.agent.name))
 
         await self.charging_transport()
@@ -266,10 +316,21 @@ class GasolineService(OneShotBehaviour):
 
 class DieselService(OneShotBehaviour):
     """
-        Represents a behavior for refueling diesel vehicles at the station.
-        Follows a similar structure to the GasolineService class.
-        """
+    Execute one diesel-refuelling service.
+
+    Refuelling duration is derived from transport need and the configured
+    refuelling rate. Completion is reported before the station service slot is
+    released.
+    """
     def __init__(self, agent_id, **kwargs):
+        """
+        Initialize one diesel-refuelling execution.
+
+        Args:
+            agent_id: Transport receiving the service.
+            **kwargs: Service parameters including ``transport_need``,
+                ``service_name``, and ``refueling_rate``.
+        """
         super().__init__()
         self.agent_id = agent_id
 
@@ -284,7 +345,7 @@ class DieselService(OneShotBehaviour):
 
     async def charging_transport(self):
         """
-            Simulates the refueling process for diesel based on the refueling rate and logs the operation.
+        Simulate diesel refuelling for the configured service duration.
         """
         total_time = self.transport_need / self.refueling_rate
         recarge_time = datetime.timedelta(seconds=total_time)
@@ -299,7 +360,7 @@ class DieselService(OneShotBehaviour):
 
     async def inform_charging_complete(self):
         """
-            Sends a message to the transport indicating that the refueling is complete.
+        Inform the transport that diesel refuelling has completed.
         """
         reply = Message()
         reply.to = str(self.agent_id)
@@ -312,7 +373,7 @@ class DieselService(OneShotBehaviour):
 
     async def run(self):
         """
-            Main execution of the diesel refueling behavior.
+        Execute refuelling, notify the transport, and release the occupied slot.
         """
         logger.debug("Station {} start charging.".format(self.agent.name))
 

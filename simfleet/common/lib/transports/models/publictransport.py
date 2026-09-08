@@ -24,6 +24,28 @@ from simfleet.communications.protocol import (
 class PublicTransportAgent(
     TransportAgent
 ):
+    """
+    Transport model for scheduled public transport services.
+
+    A PublicTransportAgent operates over directional Patterns resolved from
+    its FleetManager. A Pattern defines the ordered stop sequence, route
+    metadata, movement mode, optional travel times, and the next directional
+    Pattern to load at a terminal stop.
+
+    The model owns the structural and runtime context required by the
+    PublicTransport FSM:
+
+    - configured Pattern and initial stop;
+    - resolved route, mode, route type, and movement mode;
+    - ordered and resolved stop information;
+    - current and next stop;
+    - passenger capacity;
+    - directional Pattern changes;
+    - public transport Presence data.
+
+    Service decisions, boarding, alighting, movement progression, and FSM
+    transitions remain responsibilities of the configured strategy.
+    """
 
     def __init__(
         self,
@@ -31,6 +53,19 @@ class PublicTransportAgent(
         password,
         **kwargs
     ):
+        """
+        Initialize public transport configuration and unresolved runtime state.
+
+        Args:
+            agentjid (str): XMPP JID used by the vehicle.
+            password (str): XMPP authentication password.
+            **kwargs: Public transport configuration. ``pattern_id`` and
+                ``start_stop`` are required; ``stop_time`` defaults to 1.
+
+        Raises:
+            ValueError: If the Pattern identifier or initial stop is missing,
+                or when ``stop_time`` is negative.
+        """
 
         super().__init__(
             agentjid,
@@ -112,6 +147,17 @@ class PublicTransportAgent(
         self,
         capacity
     ):
+        """
+        Configure the passenger capacity of the vehicle.
+
+        Initial available capacity is reset to the configured total capacity.
+
+        Args:
+            capacity: Maximum number of simultaneous passengers.
+
+        Raises:
+            ValueError: If capacity is not greater than zero.
+        """
 
         capacity = int(
             capacity
@@ -129,6 +175,17 @@ class PublicTransportAgent(
     def dependencies_ready(
         self
     ):
+        """
+        Return whether the vehicle dependencies required for startup are ready.
+
+        In addition to the common TransportAgent dependencies, a public
+        transport vehicle requires its directional Pattern to have been
+        resolved before it may be considered fully ready.
+
+        Returns:
+            bool: True when both common dependencies and Pattern resolution
+            are complete.
+        """
 
         if not super().dependencies_ready():
             return False
@@ -141,6 +198,15 @@ class PublicTransportAgent(
     def get_registration_content(
         self
     ):
+        """
+        Extend the common transport registration payload.
+
+        Public transport resources advertise their resource type, configured
+        Pattern identifier, and passenger capacity to the FleetManager.
+
+        Returns:
+            dict: Fleet registration payload for this vehicle.
+        """
 
         content = (
             super().get_registration_content()
@@ -166,7 +232,35 @@ class PublicTransportAgent(
         pattern,
         stops
     ):
+        """
+        Validate and install a resolved directional Pattern.
 
+        Pattern metadata and stop definitions are fully validated before any
+        Pattern-dependent operational state is changed. This prevents a
+        partially invalid response from leaving the vehicle in an
+        inconsistent route state.
+
+        The resolved Pattern defines:
+
+        - route and transport mode;
+        - route type (``end-to-end`` or ``circular``);
+        - movement mode (``route`` or ``teleport``);
+        - ordered stop identifiers;
+        - optional travel times;
+        - optional next directional Pattern.
+
+        Once validation succeeds, the vehicle is positioned at
+        ``start_stop``.
+
+        Args:
+            pattern (dict): Pattern definition received from the FleetManager.
+            stops (list[dict]): Resolved stop definitions.
+
+        Raises:
+            ValueError: If the Pattern does not match this vehicle, contains
+                unsupported metadata, has no stops, or cannot resolve the
+                configured initial stop.
+        """
         if pattern.get(
             "pattern_id"
         ) != self.pattern_id:
@@ -340,6 +434,16 @@ class PublicTransportAgent(
     def get_next_stop(
         self
     ):
+        """
+        Return the next stop in the currently resolved Pattern.
+
+        End-to-end Patterns return None after their terminal stop. Circular
+        Patterns wrap to the first stop and increment ``rounds`` when the
+        vehicle crosses the Pattern boundary.
+
+        Returns:
+            str | None: Identifier of the next stop.
+        """
 
         if not self.stop_list:
             return None
@@ -380,6 +484,15 @@ class PublicTransportAgent(
     def is_pattern_finished(
         self
     ):
+        """
+        Return whether the current directional Pattern reached its terminal.
+
+        Circular Patterns never finish through this condition. An end-to-end
+        Pattern is finished when ``current_stop`` is its final ordered stop.
+
+        Returns:
+            bool: True when an end-to-end Pattern has finished.
+        """
 
         if not self.stop_list:
             return True
@@ -397,6 +510,12 @@ class PublicTransportAgent(
     def get_next_pattern_id(
         self
     ):
+        """
+        Return the directional Pattern configured after the current one.
+
+        Returns:
+            str | None: Next Pattern identifier when one is configured.
+        """
 
         return self.next_pattern_id
 
@@ -404,6 +523,21 @@ class PublicTransportAgent(
         self,
         destination_stop
     ):
+        """
+        Return whether a destination is reachable in the current direction.
+
+        A destination must belong to the active Pattern and differ from the
+        current stop. Circular Patterns may reach any other stop. For
+        end-to-end Patterns the destination must appear strictly after the
+        current stop in the ordered stop sequence.
+
+        Args:
+            destination_stop (str): Requested destination stop identifier.
+
+        Returns:
+            bool: True when the destination can be served without reversing
+            the current directional Pattern.
+        """
 
         if destination_stop not in (
             self.stop_list
@@ -446,6 +580,15 @@ class PublicTransportAgent(
         self,
         stop_id
     ):
+        """
+        Return the resolved definition of a Pattern stop.
+
+        Args:
+            stop_id (str): Stop identifier.
+
+        Returns:
+            dict | None: Resolved stop definition.
+        """
 
         return self.stops.get(
             stop_id
@@ -455,6 +598,15 @@ class PublicTransportAgent(
         self,
         stop_id
     ):
+        """
+        Return the resolved physical position of a stop.
+
+        Args:
+            stop_id (str): Stop identifier.
+
+        Returns:
+            Any: Stop position, or None when the stop is unknown.
+        """
 
         stop = self.get_stop(
             stop_id
@@ -471,6 +623,15 @@ class PublicTransportAgent(
         self,
         stop_id
     ):
+        """
+        Return the XMPP JID associated with a resolved stop.
+
+        Args:
+            stop_id (str): Stop identifier.
+
+        Returns:
+            str | None: Stop JID when available.
+        """
 
         stop = self.get_stop(
             stop_id
@@ -487,6 +648,26 @@ class PublicTransportAgent(
         self,
         destination_stop
     ):
+        """
+        Return the configured travel time for the next teleport segment.
+
+        Teleport movement follows the same ordered Pattern topology as routed
+        movement. The requested destination must therefore be the immediate
+        next stop. Circular Patterns also support the terminal-to-first-stop
+        segment.
+
+        Args:
+            destination_stop (str): Immediate destination stop identifier.
+
+        Returns:
+            Any: Configured travel time for the segment, or None when the
+            active movement mode is not ``teleport``.
+
+        Raises:
+            ValueError: If teleport travel times are unavailable, the current
+                stop is invalid, or the requested destination is not the next
+                valid Pattern stop.
+        """
 
         if self.movement_mode != (
             "teleport"
@@ -573,6 +754,22 @@ class PublicTransportAgent(
         self,
         stop_id
     ):
+        """
+        Move the vehicle to the next public transport stop.
+
+        ``route`` movement delegates to the common route-based movement
+        system. ``teleport`` movement waits for the Pattern segment travel
+        time and then updates the physical position directly.
+
+        In both modes ``next_stop`` is set before movement starts.
+
+        Args:
+            stop_id (str): Destination stop identifier.
+
+        Raises:
+            ValueError: If the stop is unknown or the configured movement
+                mode is unsupported.
+        """
 
         destination = (
             self.get_stop_position(
@@ -633,6 +830,31 @@ class PublicTransportAgent(
     def get_public_transport_presence(
         self
     ):
+        """
+        Build the compact Presence payload advertised by the vehicle.
+
+        The payload contains:
+
+        ``p``
+            Current physical position.
+        ``m``
+            Public transport mode.
+        ``r``
+            Route identifier.
+        ``pt``
+            Active directional Pattern identifier.
+        ``s``
+            Current stop.
+        ``n``
+            Next stop.
+        ``f``
+            Currently available passenger capacity.
+        ``c``
+            Total passenger capacity.
+
+        Returns:
+            dict: Public transport Presence payload.
+        """
 
         return {
             "p":
@@ -663,6 +885,12 @@ class PublicTransportAgent(
     def publish_public_transport_presence(
         self
     ):
+        """
+        Publish the current public transport state through XMPP Presence.
+
+        The application payload is JSON-encoded and delegated to the generic
+        SimfleetAgent Presence infrastructure.
+        """
 
         self.set_agent_presence(
             status=json.dumps(
@@ -673,6 +901,12 @@ class PublicTransportAgent(
     def start_pattern_resolution(
         self
     ):
+        """
+        Start asynchronous resolution of the configured directional Pattern.
+
+        Pattern resolution uses a dedicated QUERY_PROTOCOL behaviour and is
+        intentionally independent from the operational PublicTransport FSM.
+        """
 
         template = Template()
 
@@ -693,6 +927,23 @@ class PublicTransportAgent(
     def prepare_next_pattern(
         self
     ):
+        """
+        Prepare the vehicle to load the next directional Pattern.
+
+        The terminal stop of the current Pattern becomes ``start_stop`` for
+        the next Pattern. Pattern-dependent structural state is cleared and
+        resolution of ``next_pattern_id`` is started.
+
+        Passenger capacity and onboard-customer state are intentionally
+        preserved across the Pattern change.
+
+        ``pattern_changed`` is set so the operational FSM can process the
+        shared terminal stop before departing in the new direction.
+
+        Returns:
+            bool: True when transition to a next Pattern was started, or
+            False when no next Pattern is configured.
+        """
 
         next_pattern_id = (
             self.get_next_pattern_id()
@@ -771,14 +1022,14 @@ class PublicTransportAgent(
         self
     ):
         """
-        Starts the operational Public Transport strategy.
+        Start the operational PublicTransport FSM once.
 
-        QUERY_PROTOCOL is intentionally excluded from this
-        behaviour because Pattern resolution is handled by
+        The operational strategy receives only REQUEST_PROTOCOL messages.
+        QUERY_PROTOCOL is intentionally excluded because directional Pattern
+        resolution is handled independently by
         PublicTransportPatternBehaviour.
 
-        The operational FSM only receives REQUEST_PROTOCOL
-        messages.
+        ``running_strategy`` prevents duplicate FSM instances.
         """
 
         if self.running_strategy:
@@ -810,6 +1061,16 @@ class PublicTransportAgent(
     async def setup(
         self
     ):
+        """
+        Initialize the vehicle and start directional Pattern resolution.
+
+        Common TransportAgent setup is completed first. Pattern resolution is
+        then started asynchronously.
+
+        The local ``ready`` flag is enabled here, while
+        ``dependencies_ready()`` continues to prevent global simulator
+        readiness until the Pattern has actually been resolved.
+        """
 
         await super().setup()
 
@@ -821,10 +1082,22 @@ class PublicTransportAgent(
 class PublicTransportPatternBehaviour(
     CyclicBehaviour
 ):
+    """
+    Resolve directional Pattern data from the vehicle FleetManager.
+
+    The behaviour communicates through QUERY_PROTOCOL independently from the
+    operational PublicTransport FSM. It retries while Pattern data is not yet
+    available and terminates itself once a valid Pattern has been installed.
+    """
 
     async def request_pattern(
         self
     ):
+        """
+        Request the configured Pattern definition from the FleetManager.
+
+        No request is sent when the vehicle has no registration FleetManager.
+        """
 
         fleet_id = (
             self.agent.get_registration_fleet()
@@ -868,6 +1141,21 @@ class PublicTransportPatternBehaviour(
     async def run(
         self
     ):
+        """
+        Execute one Pattern-resolution attempt.
+
+        If the Pattern is already resolved, the behaviour terminates.
+        Otherwise it requests the Pattern and waits for a FleetManager
+        response.
+
+        INFORM responses containing valid Pattern and stop data are installed
+        through ``set_pattern_data()`` and terminate the behaviour.
+        CANCEL responses indicate that the Pattern is not ready yet and leave
+        the cyclic behaviour active for a later retry.
+
+        Cancellation and unexpected errors are logged without modifying the
+        operational PublicTransport FSM.
+        """
 
         try:
 

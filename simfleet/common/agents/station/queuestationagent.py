@@ -22,17 +22,29 @@ from simfleet.communications.protocol import (
 
 class QueueStationAgent(GeoLocatedAgent):
     """
-    A QueueStationAgent is responsible for managing a queue of agents (vehicles) requesting various services,
-    such as charging or fueling. It extends GeoLocatedAgent to include geographic position tracking, and handles
-    both the queue of waiting agents and the management of service slots.
+    Base station model for services that maintain waiting queues.
 
-    Attributes:
-        queuebehaviour (QueueBehaviour): Manages the waiting lists and the queue logic.
-        waiting_lists (dict): Tracks the waiting lists of agents for each service type.
-        simulatorjid (str): Identifier for the simulator agent that provides coordination.
+    Each configured service owns an independent FIFO queue stored in
+    ``waiting_lists``. Queue entries contain the requesting agent JID together
+    with service-specific arguments.
+
+    Before a requester is admitted to a queue, QueueBehaviour asks the
+    Simulator for its current position through COORDINATION_PROTOCOL and
+    verifies that the requester is physically close enough to the station.
+
+    This class manages queue admission and cancellation only. Concrete
+    subclasses such as ServiceStationAgent define how queued requests are
+    actually served.
     """
 
     def __init__(self, agentjid, password):
+        """
+        Initialize station queue state and its queue-management behaviour.
+
+        Args:
+            agentjid (str): XMPP JID used by the station.
+            password (str): XMPP authentication password.
+        """
         GeoLocatedAgent.__init__(self, agentjid, password)
 
         # Initialize queue management behaviour
@@ -45,25 +57,28 @@ class QueueStationAgent(GeoLocatedAgent):
 
     def set_simulatorjid(self, jid):
         """
-        Sets the JID of the simulator agent responsible for coordination.
+        Store the Simulator JID used for proximity checks.
 
         Args:
-            jid (str): The JID of the simulator agent.
+            jid: Simulator XMPP identifier.
         """
         self.simulatorjid = str(jid)
 
     def get_simulatorjid(self):
         """
-        Returns the JID of the simulator agent.
+        Return the Simulator JID used for proximity checks.
 
         Returns:
-            str: The simulator agent JID.
+            str | None: Configured Simulator JID.
         """
         return self.simulatorjid
 
     async def setup(self):
         """
-        Configures the agent, setting up the behavior templates to handle different performative messages.
+        Install queue admission and cancellation handling.
+
+        QueueBehaviour listens to REQUEST_PROTOCOL messages carrying either
+        REQUEST_PERFORMATIVE or CANCEL_PERFORMATIVE.
         """
 
         await super().setup()
@@ -82,11 +97,10 @@ class QueueStationAgent(GeoLocatedAgent):
 
     def add_queue(self, name):
         """
-        Adds a queue for a specific bus line or service line.
+        Create an empty FIFO waiting queue for a service.
 
         Args:
-            line (str): The name of the line or service.
-            **arguments: Additional arguments related to the line.
+            name (str): Service identifier associated with the queue.
         """
 
         if name not in self.waiting_lists:
@@ -100,6 +114,12 @@ class QueueStationAgent(GeoLocatedAgent):
             logger.warning("Agent[{}]: The queue ({}) exists.".format(self.name, name))
 
     def remove_queue(self, name):
+        """
+        Remove the waiting queue associated with a service.
+
+        Args:
+            name (str): Service identifier whose queue must be removed.
+        """
         if name in self.waiting_lists:
             del self.waiting_lists[name]
             logger.warning(
@@ -108,50 +128,64 @@ class QueueStationAgent(GeoLocatedAgent):
 
 
     def to_json(self):
+        """
+        Serialize the common geolocated station state.
+
+        Returns:
+            dict: Serializable station representation.
+        """
         data = super().to_json()
         return data
 
     # Queue management for agents requesting services
     class QueueBehaviour(CyclicBehaviour):
         """
-        Manages the queue of agents waiting for services and handles requests for entry and cancellation.
+        Manage queue admission, cancellation, and FIFO queue operations.
+
+        REQUEST messages are admitted only after CheckNearBehaviour confirms
+        proximity to the station. CANCEL messages remove the requesting agent
+        from the corresponding service queue.
         """
 
         def __init__(self):
+            """Initialize the cyclic queue-management behaviour."""
             super().__init__()
 
         def total_queue_size(self, service_name):
             """
-            Returns the total size of the queue for a given service.
+            Return the number of requests waiting for a service.
 
             Args:
-                service_name (str): The name of the service.
+                service_name (str): Service queue identifier.
 
             Returns:
-                int: The number of agents in the queue.
+                int: Number of queued requests.
             """
             return len(self.agent.waiting_lists[service_name])
 
         def queue_agent_to_waiting_list(self, service_name, id_agent, **kwargs):
             """
-            Adds an agent to the waiting list for a specific service.
+            Append one request to a service FIFO queue.
+
+            Queue entries are stored as ``(agent_jid, service_arguments)``.
 
             Args:
-                service_name (str): The name of the service.
-                id_agent (str): The ID of the agent.
-                **kwargs: Additional arguments for the agent.
+                service_name (str): Target service.
+                id_agent (str): Requesting agent JID.
+                **kwargs: Service-specific request arguments.
             """
             self.agent.waiting_lists[service_name].append((id_agent, kwargs))
 
         def dequeue_first_agent_to_waiting_list(self, service_name):
             """
-            Removes and returns the first agent from the waiting list for a service.
+            Remove and return the oldest request from a service queue.
 
             Args:
-                service_name (str): The name of the service.
+                service_name (str): Service queue identifier.
 
             Returns:
-                tuple: A tuple containing the agent ID and arguments.
+                tuple | None: ``(agent_jid, arguments)`` for the first request,
+                or None when the queue is empty.
             """
             if len(self.agent.waiting_lists[service_name]) == 0:
                 return None
@@ -159,11 +193,11 @@ class QueueStationAgent(GeoLocatedAgent):
 
         def dequeue_agent_to_waiting_list(self, service_name, id_agent):
             """
-            Removes a specific agent from the waiting list of a service.
+            Remove a specific requesting agent from a service queue.
 
             Args:
-                service_name (str): The name of the service.
-                id_agent (str): The ID of the agent to remove.
+                service_name (str): Service queue identifier.
+                id_agent (str): Agent JID to remove.
             """
             if service_name in self.agent.waiting_lists:
                 for agent in self.agent.waiting_lists[service_name]:
@@ -172,6 +206,21 @@ class QueueStationAgent(GeoLocatedAgent):
                         break
 
         def find_queue_position(self, service_name, agent_id):
+            """
+            Return the queue index reported for the supplied agent identifier.
+
+            Args:
+                service_name (str): Service queue identifier.
+                agent_id (str): Agent identifier to locate.
+
+            Returns:
+                int | None: Queue index when found.
+
+            Note:
+                Queue entries currently store ``(agent_id, arguments)`` tuples.
+                The lookup implementation is retained unchanged pending a dedicated
+                consistency review.
+            """
             try:
                 position = self.agent.waiting_lists[service_name].index(agent_id)
                 return position
@@ -179,16 +228,25 @@ class QueueStationAgent(GeoLocatedAgent):
                 return None
 
         def get_queue(self, service_name):
+            """
+            Return the FIFO queue associated with a service.
+
+            Args:
+                service_name (str): Service identifier.
+
+            Returns:
+                deque | None: Service queue when configured.
+            """
             if service_name in self.agent.waiting_lists:
                 return self.agent.waiting_lists[service_name]
 
         async def accept_request_agent(self, agent_id, content=None):
             """
-            Accepts a request from an agent by sending a message.
+            Inform a requester that admission to the station queue was accepted.
 
             Args:
-                agent_id (str): The ID of the agent.
-                content (dict, optional): The content of the message.
+                agent_id: Requesting agent JID.
+                content (dict | None): Optional acceptance payload.
             """
             if content is None:
                 content = {}
@@ -204,10 +262,10 @@ class QueueStationAgent(GeoLocatedAgent):
 
         async def refuse_request_agent(self, agent_id):
             """
-            Refuses a request from an agent by sending a message.
+            Inform a requester that queue admission was refused.
 
             Args:
-                agent_id (str): The ID of the agent.
+                agent_id: Requesting agent JID.
             """
             reply = Message()
             reply.to = str(agent_id)
@@ -224,6 +282,7 @@ class QueueStationAgent(GeoLocatedAgent):
             )
 
         async def on_start(self):
+            """Log the start of queue management."""
             logger.debug(
                 "Agent[{}]: Strategy ({}) started.".format(
                     self.agent.name, type(self).__name__
@@ -232,8 +291,13 @@ class QueueStationAgent(GeoLocatedAgent):
 
         async def run(self):
             """
-            Main behavior logic for handling agent requests, including acceptance, refusal,
-            and cancellation based on service availability.
+            Process one queue-management message.
+
+            REQUEST performs an asynchronous proximity check through the Simulator.
+            A nearby requester is appended to the appropriate service queue and
+            receives ACCEPT; unknown services or non-near requesters receive REFUSE.
+
+            CANCEL removes the requester from the specified queue.
             """
             msg = await self.receive(timeout=5)
 
@@ -339,9 +403,27 @@ class QueueStationAgent(GeoLocatedAgent):
 
 
 class CheckNearBehaviour(OneShotBehaviour):
+    """
+    Resolve a requester's position through the Simulator before queue entry.
+
+    QueueStationAgent does not assume that the position contained in a service
+    request is authoritative. Instead, this one-shot behaviour queries the
+    Simulator through COORDINATION_PROTOCOL and stores the resolved position
+    for QueueBehaviour to validate with ``near_agent()``.
+    """
     def __init__(
         self, simulatorjid, user_agent_id, service_name, object_type, arguments
     ):
+        """
+        Initialize one proximity-check request.
+
+        Args:
+            simulatorjid: Simulator JID.
+            user_agent_id: Agent whose position must be resolved.
+            service_name: Requested station service.
+            object_type: Agent type supplied to the Simulator lookup.
+            arguments: Original service-request arguments.
+        """
         super().__init__()
 
         self.agent_simulator_id = simulatorjid
@@ -352,6 +434,13 @@ class CheckNearBehaviour(OneShotBehaviour):
         self.agent_position = None
 
     async def request_agent_position_near(self, agent_id, content):
+        """
+        Request an agent position from the Simulator.
+
+        Args:
+            agent_id: Simulator JID.
+            content (dict): Position-query payload.
+        """
         reply = Message()
         reply.to = str(agent_id)
         reply.set_metadata("protocol", COORDINATION_PROTOCOL)
@@ -360,6 +449,12 @@ class CheckNearBehaviour(OneShotBehaviour):
         await self.send(reply)
 
     async def run(self):
+        """
+        Request and store the requester position used by queue admission.
+
+        INFORM_PERFORMATIVE responses received through COORDINATION_PROTOCOL
+        provide the position consumed later by QueueBehaviour.
+        """
 
         content = {"user_agent_id": self.user_agent_id, "object_type": self.object_type}
         await self.request_agent_position_near(

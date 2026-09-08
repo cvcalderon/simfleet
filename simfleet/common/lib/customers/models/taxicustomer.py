@@ -20,60 +20,74 @@ from simfleet.utils.abstractstrategies import StrategyBehaviour
 class TaxiCustomerAgent(CustomerAgent):
 
     """
-    Represents a customer agent in the taxi fleet system.
-    Inherits from the `CustomerAgent` class and provides functionalities
-    for requesting transportation services and interacting with fleet managers.
+    Customer model for on-demand taxi services.
 
-    Attributes:
-        fleetmanagers (dict): A dictionary containing the JIDs of the fleet manager(s).
-        transport_assigned (str): The JID of the transport agent currently assigned to the customer.
+    TaxiCustomerAgent extends the common customer state with the transport
+    currently assigned to the active taxi service.
 
-    Methods:
-        set_fleetmanagers(fleetmanagers):
-            Assigns the fleet manager's JIDs to the customer agent.
-        get_fleetmanagers():
-            Retrieves the fleet managers' JIDs.
-        set_transport_assigned(transport_id):
-            Sets the currently assigned transport agent.
-        clear_transport_assigned():
-            Clears the assigned transport agent.
-        run_strategy():
-            Adds the behavior for handling requests and executes the customer's strategy.
+    FleetManager discovery, customer destination, position updates, and
+    generic travel handling remain responsibilities of CustomerAgent.
+
+    Taxi request negotiation and service progression are implemented by the
+    configured taxi customer strategy.
     """
 
     def __init__(self, agentjid, password):
+        """
+        Initialize the common customer infrastructure and Taxi capability.
+
+        Args:
+            agentjid (str): XMPP JID used by the customer.
+            password (str): XMPP authentication password.
+        """
         CustomerAgent.__init__(self, agentjid, password)
         self._init_taxi_state()
 
     def _init_taxi_state(self):
-        """Initialize state owned by the taxi customer capability."""
+        """
+        Initialize state owned exclusively by the Taxi customer capability.
+
+        The helper is intentionally separate from ``__init__`` so
+        MultiModalCustomerAgent can initialize Taxi state without executing the
+        complete TaxiCustomerAgent constructor through multiple inheritance.
+        """
         self.transport_assigned = None
 
 
     def set_transport_assigned(self, transport_id):
         """
-                Sets the currently assigned transport agent.
+        Store the taxi transport assigned to the current service.
 
-                Args:
-                    transport_id (str): The JID of the transport agent.
-                """
+        Args:
+            transport_id (str): Assigned transport JID.
+        """
         self.transport_assigned = transport_id
 
     def clear_transport_assigned(self):
         """
-                Clears the assigned transport agent.
-                """
+        Clear the taxi transport assigned to the current service.
+        """
         self.transport_assigned = None
 
     def reset_taxi_context(self):
-        """Reset transient state from the current taxi service."""
+        """
+        Reset transient state owned by the completed Taxi service.
+
+        The generic customer destination, physical position, FleetManagers, and
+        accumulated metrics are intentionally not modified here.
+        """
         self.clear_transport_assigned()
 
 
     def run_strategy(self):
         """
-        Runs the strategy associated with the customer agent.
-        Adds the behavior responsible for handling requests to the agent.
+        Start the configured Taxi customer strategy once.
+
+        Taxi service negotiation uses REQUEST_PROTOCOL. Generic
+        TRAVEL_PROTOCOL position updates remain handled by the inherited
+        TravelBehaviour.
+
+        ``running_strategy`` prevents duplicate strategy instances.
         """
         if not self.running_strategy:
             template1 = Template()

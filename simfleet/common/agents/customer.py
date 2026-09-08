@@ -18,13 +18,27 @@ from simfleet.common.geolocatedagent import GeoLocatedAgent
 
 class CustomerAgent(GeoLocatedAgent):
     """
-        CustomerAgent is responsible for representing customers in the simulation. It handles tasks such as
-        requesting transport, tracking their destination, and interacting with assigned transport agents.
+    Base model for customers requesting mobility services.
 
-        Attributes:
-            customer_dest (list): The destination coordinates of the customer.
+    CustomerAgent owns the state shared by all customer modalities:
+
+    - the requested destination;
+    - the set of FleetManagers available to the customer;
+    - the generic travel-position update behaviour;
+    - the configured operational customer strategy.
+
+    Modalities extend this model with their own transient service context.
+    The base class also provides neutral completion hooks used by the
+    multimodal customer orchestrator without changing legacy customers.
     """
     def __init__(self, agentjid, password):
+        """
+        Initialize common customer state.
+
+        Args:
+            agentjid (str): XMPP JID used by the customer.
+            password (str): XMPP authentication password.
+        """
         super().__init__(agentjid, password)
 
         self.customer_dest = None
@@ -88,6 +102,12 @@ class CustomerAgent(GeoLocatedAgent):
         )
 
     def get_target_position(self):
+        """
+        Return the destination currently requested by the customer.
+
+        Returns:
+            list | None: Destination coordinates.
+        """
         return self.customer_dest
 
     async def set_position(self, coords=None):
@@ -102,6 +122,15 @@ class CustomerAgent(GeoLocatedAgent):
         self.set("current_pos", coords)
 
     def to_json(self):
+        """
+        Serialize the customer state used by the simulator and frontend.
+
+        Extends the geolocated-agent representation with the requested
+        destination.
+
+        Returns:
+            dict: Serializable customer state.
+        """
         data = super().to_json()
         data.update({
             "dest": [float("{0:.6f}".format(coord)) for coord in self.customer_dest],

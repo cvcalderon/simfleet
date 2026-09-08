@@ -26,19 +26,42 @@ from spade.presence import (
 
 class SharingStationAgent(ServiceStationAgent):
     """
-    Represents a station-based sharing station.
+    Station model for station-based vehicle sharing.
 
-    The station manages a dynamic inventory of shared transports
-    and publishes its operational state to its FleetManager.
+    The station exposes an agent-backed service whose inventory contains the
+    transport JIDs currently available at the station.
 
-    Shared transports register directly with the station, while
-    the station registers with its FleetManager.
+    Shared transports register directly with the station. The station itself
+    registers with its FleetManager and publishes dynamic inventory through
+    Presence.
+
+    Station capacity is fixed by the configured ``max_agents`` value:
+
+    - available bikes correspond to transports currently in the inventory;
+    - available docks correspond to unused inventory capacity.
+
+    Removing or returning a transport updates the station inventory and its
+    published Presence state.
     """
 
     def __init__(self, agentjid, password):
+        """
+        Initialize the common agent-backed service-station infrastructure.
+
+        Args:
+            agentjid (str): XMPP JID used by the station.
+            password (str): XMPP authentication password.
+        """
         super().__init__(agentjid, password)
 
     async def setup(self):
+        """
+        Initialize station registration and common service handling.
+
+        SharingStationRegistrationBehaviour handles both registration of this
+        station with its FleetManager and registration of shared transports into
+        the local inventory.
+        """
         try:
             template = Template()
             template.set_metadata(
@@ -90,7 +113,13 @@ class SharingStationAgent(ServiceStationAgent):
 
     def get_capacity(self):
         """
-        Returns the physical capacity of the station.
+        Return the physical capacity of the Sharing station.
+
+        Capacity corresponds to ``max_agents`` of the agent-backed service whose
+        name matches the station fleet type.
+
+        Returns:
+            int: Maximum number of transports that may belong to the station.
         """
         service = self.services_list.get(
             self.fleet_type,
@@ -107,8 +136,10 @@ class SharingStationAgent(ServiceStationAgent):
 
     def get_available_bikes(self):
         """
-        Returns the number of bikes currently available
-        at the station.
+        Return the number of transports currently stored in the station inventory.
+
+        Returns:
+            int: Number of available shared transports.
         """
         service = self.services_list.get(
             self.fleet_type,
@@ -127,7 +158,10 @@ class SharingStationAgent(ServiceStationAgent):
 
     def get_available_docks(self):
         """
-        Returns the number of currently available docks.
+        Return the remaining physical capacity of the station.
+
+        Returns:
+            int: Number of free docks.
         """
         capacity = self.get_capacity()
         available_bikes = self.get_available_bikes()
@@ -138,14 +172,22 @@ class SharingStationAgent(ServiceStationAgent):
         )
 
     def has_available_bikes(self):
+        """Return whether the station currently has at least one transport."""
         return self.get_available_bikes() > 0
 
     def has_available_docks(self):
+        """Return whether the station can currently accept another transport."""
         return self.get_available_docks() > 0
 
     def is_bike_registered(self, bike_jid):
         """
-        Checks whether a bike currently belongs to this station.
+        Return whether a transport currently belongs to this station inventory.
+
+        Args:
+            bike_jid: Transport JID.
+
+        Returns:
+            bool: True when the transport is registered at the station.
         """
         service = self.services_list.get(
             self.fleet_type,
@@ -170,10 +212,17 @@ class SharingStationAgent(ServiceStationAgent):
 
     def register_bike(self, bike_jid):
         """
-        Registers a bike in the station inventory.
+        Register a transport in the station inventory.
 
-        Returns True when the bike belongs to the station after
-        the operation and False when the station cannot accept it.
+        Registration is idempotent for an already registered transport and is
+        refused when no dock capacity remains.
+
+        Args:
+            bike_jid: Transport JID.
+
+        Returns:
+            bool: True when the transport belongs to the station after the
+            operation.
         """
         if self.is_bike_registered(
             bike_jid
@@ -194,7 +243,10 @@ class SharingStationAgent(ServiceStationAgent):
 
     def assign_bike(self):
         """
-        Removes and returns one available bike from the station.
+        Remove and return one available transport from the station inventory.
+
+        Returns:
+            str | None: Assigned transport JID.
         """
         return self.assign_agent(
             self.fleet_type
@@ -202,8 +254,21 @@ class SharingStationAgent(ServiceStationAgent):
 
     def get_presence_status(self):
         """
-        Returns the dynamic station information published
-        through Presence.
+        Build the compact dynamic inventory advertised through Presence.
+
+        The payload contains:
+
+        ``p``
+            Station position.
+        ``b``
+            Available transports.
+        ``d``
+            Available docks.
+        ``c``
+            Total station capacity.
+
+        Returns:
+            dict: Sharing-station Presence payload.
         """
         return {
             "p": self.get_position(),
@@ -213,7 +278,12 @@ class SharingStationAgent(ServiceStationAgent):
         }
 
     def publish_station_presence(self):
+        """
+        Publish the current station inventory through XMPP Presence.
 
+        Presence is emitted only after FleetManager registration and only when
+        Presence-based registration is enabled.
+        """
         if not self.registration:
             return
 
@@ -233,13 +303,26 @@ class SharingStationAgent(ServiceStationAgent):
         service_name,
         agent_jid
     ):
+        """
+        Publish an inventory update after a shared transport leaves the station.
 
+        Args:
+            service_name (str): Agent-backed service that assigned the transport.
+            agent_jid: Transport removed from the inventory.
+        """
         if service_name != self.fleet_type:
             return
 
         self.publish_station_presence()
 
     def to_json(self):
+        """
+        Serialize station inventory information for simulator consumers.
+
+        Returns:
+            dict: Common station state extended with available transports,
+            available docks, and total capacity.
+        """
         data = super().to_json()
 
         data.update(
@@ -253,6 +336,12 @@ class SharingStationAgent(ServiceStationAgent):
         return data
 
     def run_strategy(self):
+        """
+        Mark the Sharing station operational strategy as started.
+
+        Runtime inventory and registration are handled by the station's existing
+        service and registration behaviours.
+        """
         if not self.running_strategy:
             self.running_strategy = True
 
@@ -260,8 +349,20 @@ class SharingStationAgent(ServiceStationAgent):
 
 
 class SharingStationRegistrationBehaviour(CyclicBehaviour):
+    """
+    Coordinate Sharing-station registration relationships.
+
+    The behaviour handles two different REGISTER_PROTOCOL flows:
+
+    - registration of the station with its FleetManager;
+    - registration of shared transports with the station inventory.
+
+    Transport registration validates fleet type, sender identity, duplicate
+    membership, and station capacity before accepting the resource.
+    """
 
     async def on_start(self):
+        """Log the start of Sharing-station registration handling."""
         logger.debug(
             "Strategy {} started in sharing station [{}]".format(
                 type(self).__name__,
@@ -270,6 +371,9 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def send_station_registration(self):
+        """
+        Send the station identity and fleet type to its configured FleetManager.
+        """
         fleetmanager_id = (
             self.agent.get_registration_fleet()
         )
@@ -315,6 +419,12 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def accept_bike_registration(self, bike_jid):
+        """
+        Accept a shared transport into the station inventory.
+
+        Args:
+            bike_jid: Transport JID receiving the acceptance.
+        """
         content = {
             "icon": self.agent.icon,
             "fleet_type": self.agent.fleet_type,
@@ -344,6 +454,12 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def reject_bike_registration(self, bike_jid):
+        """
+        Refuse a shared transport registration request.
+
+        Args:
+            bike_jid: Transport JID receiving the refusal.
+        """
         reply = Message()
         reply.to = str(
             bike_jid
@@ -370,6 +486,13 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def process_bike_registration(self, msg):
+        """
+        Validate and process one shared-transport registration request.
+
+        The request is accepted only when its payload is valid, the declared
+        fleet type matches the station, the sender matches the advertised JID,
+        and physical station capacity is available.
+        """
         try:
             content = json.loads(
                 msg.body
@@ -472,6 +595,12 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def process_fleetmanager_accept(self, msg):
+        """
+        Complete station registration after FleetManager acceptance.
+
+        Successful registration publishes station Presence and marks the station
+        ready.
+        """
         fleetmanager_id = (
             self.agent.get_registration_fleet()
         )
@@ -502,6 +631,9 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def process_fleetmanager_refuse(self, msg):
+        """
+        Handle refusal of station registration by the configured FleetManager.
+        """
         fleetmanager_id = (
             self.agent.get_registration_fleet()
         )
@@ -524,6 +656,13 @@ class SharingStationRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def run(self):
+        """
+        Process one REGISTER_PROTOCOL interaction.
+
+        REQUEST_PERFORMATIVE represents transport registration at the station.
+        ACCEPT_PERFORMATIVE and REFUSE_PERFORMATIVE represent responses from the
+        station's FleetManager.
+        """
         try:
             if (
                 not self.agent.registration

@@ -24,6 +24,21 @@ from simfleet.communications.protocol import (
 class PublicTransportStopAgent(
     QueueStationAgent
 ):
+    """
+    Station model representing a scheduled public transport stop.
+
+    Each directional Pattern served by the stop owns an independent FIFO
+    customer queue. Customers therefore wait for a Pattern rather than for a
+    generic route or bus line.
+
+    The stop registers as a fleet resource with its PublicTransport
+    FleetManager. Its operational strategy receives vehicle-arrival
+    notifications and informs a bounded number of waiting customers according
+    to the vehicle's free passenger capacity.
+
+    Customers are removed from a Pattern queue only after boarding is
+    explicitly confirmed.
+    """
 
     def __init__(
         self,
@@ -31,6 +46,18 @@ class PublicTransportStopAgent(
         password,
         **kwargs
     ):
+        """
+        Initialize Pattern-specific waiting queues for the stop.
+
+        Args:
+            agentjid (str): XMPP JID used by the stop.
+            password (str): XMPP authentication password.
+            **kwargs: Stop configuration containing an optional ``patterns`` list.
+
+        Raises:
+            ValueError: If ``patterns`` is not a list or contains non-string
+                Pattern identifiers.
+        """
         super().__init__(
             agentjid,
             password
@@ -73,11 +100,23 @@ class PublicTransportStopAgent(
             )
 
     def get_stop_id(self):
+        """
+        Return the canonical stop identifier.
+
+        Returns:
+            str: Agent identifier used as the stop ID.
+        """
         return self.agent_id
 
     def get_registration_content(
         self
     ):
+        """
+        Build the stop resource payload sent to its FleetManager.
+
+        Returns:
+            dict: Stop identity, resource type, fleet type, and physical position.
+        """
 
         return {
             "name":
@@ -97,6 +136,12 @@ class PublicTransportStopAgent(
         }
 
     async def setup(self):
+        """
+        Initialize queue handling and bootstrap FleetManager registration.
+
+        Local setup marks the stop ready. Registration dependencies remain
+        evaluated separately by the inherited readiness contract.
+        """
 
         await super().setup()
 
@@ -137,6 +182,14 @@ class PublicTransportStopAgent(
 
 
     def run_strategy(self):
+        """
+        Start the public transport stop strategy once.
+
+        The strategy listens only to REQUEST_PROTOCOL / INFORM_PERFORMATIVE
+        messages carrying vehicle-arrival and customer-boarded notifications.
+
+        ``running_strategy`` prevents duplicate strategy instances.
+        """
 
         if self.running_strategy:
             return
@@ -172,8 +225,16 @@ class PublicTransportStopAgent(
 
 
 class PublicTransportStopRegistrationBehaviour(CyclicBehaviour):
+    """
+    Register a public transport stop with its configured FleetManager.
+
+    Registration is retried while the stop remains unregistered.
+    ACCEPT_PERFORMATIVE completes registration; REFUSE_PERFORMATIVE leaves
+    the cyclic behaviour available for subsequent attempts.
+    """
 
     async def on_start(self):
+        """Log the start of public transport stop registration."""
 
         logger.debug(
             "Registration behaviour started in public transport stop {}".format(
@@ -184,7 +245,9 @@ class PublicTransportStopRegistrationBehaviour(CyclicBehaviour):
     async def send_registration(
         self
     ):
-
+        """
+        Send the stop resource definition to its configured FleetManager.
+        """
         fleet_id = (
             self.agent.get_registration_fleet()
         )
@@ -221,7 +284,9 @@ class PublicTransportStopRegistrationBehaviour(CyclicBehaviour):
         )
 
     async def run(self):
-
+        """
+        Execute one FleetManager-registration cycle and process its response.
+        """
         try:
 
             if not self.agent.registration:
@@ -296,9 +361,19 @@ class PublicTransportStopRegistrationBehaviour(CyclicBehaviour):
 
 
 class PublicTransportStopStrategyBehaviour(CyclicBehaviour):
+    """
+    Coordinate waiting customers with arriving public transport vehicles.
 
+    When a vehicle reports arrival, the behaviour takes a snapshot of at most
+    ``free_capacity`` customers from the queue associated with the vehicle's
+    directional Pattern and informs them that the vehicle is available.
+
+    Queue entries are deliberately retained during this notification phase.
+    A customer is removed only after an explicit
+    ``public_transport_customer_boarded`` confirmation is received.
+    """
     async def on_start(self):
-
+        """Log the start of public transport stop coordination."""
         logger.debug(
             "Public transport stop strategy started in {}".format(
                 self.agent.name
@@ -311,7 +386,14 @@ class PublicTransportStopStrategyBehaviour(CyclicBehaviour):
         vehicle_id,
         pattern_id
     ):
+        """
+        Inform one waiting customer that a compatible vehicle is available.
 
+        Args:
+            customer_id: Waiting customer JID.
+            vehicle_id: Available public transport vehicle JID.
+            pattern_id: Directional Pattern served by the arriving vehicle.
+        """
         content = {
             "request_type":
                 "public_transport_vehicle_available",
@@ -355,7 +437,20 @@ class PublicTransportStopStrategyBehaviour(CyclicBehaviour):
         sender,
         content
     ):
+        """
+        Process arrival of a public transport vehicle at this stop.
 
+        The vehicle must advertise a Pattern known by the stop and positive free
+        capacity. At most that number of customers is selected from the
+        corresponding Pattern queue.
+
+        Selection uses a queue snapshot: customers are informed but remain queued
+        until boarding confirmation.
+
+        Args:
+            sender: Vehicle message sender.
+            content (dict): Vehicle-arrival payload.
+        """
         pattern_id = content.get(
             "pattern_id"
         )
@@ -448,7 +543,13 @@ class PublicTransportStopStrategyBehaviour(CyclicBehaviour):
         self,
         content
     ):
+        """
+        Remove a customer from its Pattern queue after confirmed boarding.
 
+        Args:
+            content (dict): Boarding confirmation containing ``pattern_id`` and
+                ``customer_id``.
+        """
         pattern_id = content.get(
             "pattern_id"
         )
@@ -483,7 +584,19 @@ class PublicTransportStopStrategyBehaviour(CyclicBehaviour):
 
 
     async def run(self):
+        """
+        Process one public transport stop INFORM message.
 
+        Supported request types are:
+
+        ``public_transport_vehicle_arrival``
+            Advertise an arriving vehicle and its free capacity.
+
+        ``public_transport_customer_boarded``
+            Confirm boarding and remove that customer from the Pattern queue.
+
+        Unsupported INFORM messages are logged and ignored.
+        """
         try:
 
             msg = await self.receive(
