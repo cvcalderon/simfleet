@@ -559,19 +559,40 @@ class ResourceRegistrationForFleetBehaviour(CyclicBehaviour):
 
 class FleetManagerStrategyBehaviour(StrategyBehaviour):
     """
-    The FleetManagerStrategyBehaviour class defines the main strategy for coordinating customer and resource
-    agents in the fleet. This behavior needs to implement a `_process` method for custom strategies.
+    Base behaviour for FleetManager operational strategies.
+
+    Concrete FleetManager strategies receive and route customer or resource
+    requests according to their own selection policy. This base class does not
+    impose a specific protocol, performative, resource-ranking rule, or
+    dispatch algorithm.
+
+    Fleet registration itself is handled separately by
+    ResourceRegistrationForFleetBehaviour; this class represents only the
+    FleetManager's operational strategy.
+
+    Concrete subclasses must implement ``run()``.
     """
 
     async def on_start(self):
         """
-            Logs that the strategy has started in the Fleet Manager.
+        Log the start of the FleetManager operational strategy.
+
+        This override currently does not delegate to
+        StrategyBehaviour.on_start(), so the generic ``initial_event`` lifecycle
+        event is not emitted through this hook.
         """
         logger.debug("Strategy {} started in manager".format(type(self).__name__))
 
 
     async def run(self):
         """
-            A placeholder method that needs to be implemented by any subclass defining specific fleet management strategies.
+        Execute one iteration of the concrete FleetManager strategy.
+
+        Subclasses define how incoming requests are interpreted, how candidate
+        resources are selected, and where messages are delegated.
+
+        Raises:
+            NotImplementedError: When no concrete FleetManager strategy is
+                implemented.
         """
         raise NotImplementedError

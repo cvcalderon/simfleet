@@ -42,7 +42,29 @@ from simfleet.utils.status import (
 # ==================================================================
 
 class DeliveryStrategyBehaviour(State):
+    """
+    Base SPADE State shared by the Delivery transport FSM.
 
+    The class provides the common contracts used by Delivery states:
+
+    - schema-1.0 service lifecycle correlation;
+    - canonical service and movement event emission;
+    - pending-offer validation before requester acceptance;
+    - active-service message correlation after acceptance;
+    - requester assignment helpers;
+    - REQUEST_PROTOCOL messaging primitives.
+
+    Delivery follows the same canonical service lifecycle structure used by
+    Taxi, but declares ``modality="delivery"`` and has no post-service Taxi
+    return phase.
+
+    The service requester creates the logical ``service_id``. Delivery
+    preserves that identifier throughout negotiation, approach, service
+    execution, failure, and completion so MobilityStatisticsClass can
+    reconstruct the complete lifecycle.
+
+    This class is an FSM state helper, not the complete Delivery FSM.
+    """
 
     METRICS_MODALITY = "delivery"
     _METRICS_SERVICE_CONTEXT_ATTR = "_metrics_service_context"
@@ -50,6 +72,16 @@ class DeliveryStrategyBehaviour(State):
     _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
 
     def _metrics_modality(self):
+        """
+        Return the canonical modality associated with Delivery metrics.
+
+        Returns:
+            str: ``"delivery"``.
+
+        Raises:
+            ValueError: If a concrete strategy does not define
+                ``METRICS_MODALITY``.
+        """
         modality = self.METRICS_MODALITY
         if modality is None:
             raise ValueError(
@@ -58,6 +90,12 @@ class DeliveryStrategyBehaviour(State):
         return modality
 
     def get_service_context(self):
+        """
+        Return the active canonical Delivery service context.
+
+        Returns:
+            dict | None: Current schema-1.0 service context.
+        """
         return getattr(
             self.agent,
             self._METRICS_SERVICE_CONTEXT_ATTR,
@@ -73,6 +111,31 @@ class DeliveryStrategyBehaviour(State):
         destination=None,
         emit_requested=False,
     ):
+        """
+        Create and store one canonical Delivery service context.
+
+        Transport-side Delivery normally reuses the ``service_id`` created by the
+        requester. A new identifier is generated locally only when
+        ``emit_requested`` is True.
+
+        An unfinished or uncleared context is never silently replaced.
+
+        The context tracks service identifiers, origin and destination, lifecycle
+        flags, terminal status, and any pending canonical movement.
+
+        Args:
+            service_id: Existing logical service identifier.
+            user_id: Service-requester JID.
+            transport_id: Optional Delivery transport JID.
+            origin: Collection or service origin.
+            destination: Final service destination.
+            emit_requested (bool): Whether this agent emits the initial
+                ``service_requested`` event.
+
+        Returns:
+            dict | None: Created or reusable service context, or None when a safe
+            context cannot be established.
+        """
         current = self.get_service_context()
         if current is not None:
             requested_id = str(service_id) if service_id is not None else None
@@ -148,6 +211,18 @@ class DeliveryStrategyBehaviour(State):
         return context
 
     def get_or_create_service_context(self, **kwargs):
+        """
+        Return the matching active service context or create a new one.
+
+        An explicitly supplied ``service_id`` must match an already active
+        context; mismatched services are rejected instead of replacing it.
+
+        Args:
+            **kwargs: Arguments forwarded to ``create_service_context()``.
+
+        Returns:
+            dict | None: Matching or newly created service context.
+        """
         context = self.get_service_context()
         service_id = kwargs.get("service_id")
         if context is not None:
@@ -167,6 +242,15 @@ class DeliveryStrategyBehaviour(State):
         return self.create_service_context(**kwargs)
 
     def clear_service_context(self):
+        """
+        Clear a terminal Delivery service context when no movement remains.
+
+        An unfinished lifecycle or a service that still owns a pending movement
+        is deliberately retained.
+
+        Returns:
+            bool: True when no service context remains.
+        """
         context = self.get_service_context()
         if context is None:
             return True
@@ -195,6 +279,16 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def _service_event_details(self, context=None):
+        """
+        Build canonical identifiers shared by Delivery lifecycle events.
+
+        Args:
+            context (dict | None): Service context. The active context is used
+                when omitted.
+
+        Returns:
+            dict | None: Modality, service, user, and transport identifiers.
+        """
         context = context or self.get_service_context()
         if context is None:
             return None
@@ -211,6 +305,20 @@ class DeliveryStrategyBehaviour(State):
         context=None,
         transport_id=None,
     ):
+        """
+        Add canonical service identifiers to a copied outgoing payload.
+
+        Args:
+            content (dict | None): Existing payload.
+            context (dict | None): Service context to use.
+            transport_id: Optional transport identifier to bind.
+
+        Returns:
+            dict: Payload extended with canonical identifiers.
+
+        Raises:
+            ValueError: If no service context exists.
+        """
         context = context or self.get_service_context()
         if context is None:
             raise ValueError("Cannot propagate identifiers without a service context.")
@@ -221,6 +329,20 @@ class DeliveryStrategyBehaviour(State):
         return result
 
     def message_matches_service(self, content, context=None):
+        """
+        Validate that a message belongs to the expected Delivery service.
+
+        Service ID, modality, and requester JID must match. When the context
+        already contains a transport identifier, that identifier must also be
+        supplied and match.
+
+        Args:
+            content: Decoded message payload.
+            context (dict | None): Expected service context.
+
+        Returns:
+            bool: True when the message belongs to the service.
+        """
         context = context or self.get_service_context()
         if context is None or not isinstance(content, dict):
             return False
@@ -246,6 +368,15 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def mark_service_assigned(self, transport_id):
+        """
+        Mirror Delivery assignment state without emitting an event.
+
+        Args:
+            transport_id: Assigned Delivery transport JID.
+
+        Returns:
+            bool: True when the local assignment is valid.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -259,6 +390,15 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def mark_service_started(self, transport_id=None):
+        """
+        Mirror Delivery service-start state without emitting an event.
+
+        Args:
+            transport_id: Optional Delivery transport JID.
+
+        Returns:
+            bool: True when the context can be marked started.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -277,7 +417,15 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def mark_service_completed(self):
-        """Mirror a successful terminal event emitted by the delivery requester."""
+        """
+        Mirror successful completion already emitted by the service requester.
+
+        Delivery uses this after receiving the final ``CUSTOMER_IN_DEST``
+        confirmation. No second ``service_completed`` event is emitted.
+
+        Returns:
+            bool: True when completion is valid or was already mirrored.
+        """
         context = self.get_service_context()
         if context is None:
             return False
@@ -289,6 +437,16 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def assign_service(self, transport_id, extra_details=None):
+        """
+        Mark the service assigned and emit ``service_assigned`` exactly once.
+
+        Args:
+            transport_id: Delivery transport JID.
+            extra_details (dict | None): Additional canonical fields.
+
+        Returns:
+            bool: True when assignment was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -309,6 +467,16 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def start_service(self, transport_id=None, extra_details=None):
+        """
+        Mark Delivery service execution as started and emit ``service_started``.
+
+        Args:
+            transport_id: Optional Delivery transport JID.
+            extra_details (dict | None): Additional canonical fields.
+
+        Returns:
+            bool: True when the event was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -329,6 +497,20 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def complete_service(self, extra_details=None):
+        """
+        Mark the service completed and emit ``service_completed``.
+
+        The helper requires an already started service and is retained as part of
+        the generic Delivery metrics contract, even though the current FSM
+        normally mirrors requester-owned completion through
+        ``mark_service_completed()``.
+
+        Args:
+            extra_details (dict | None): Additional canonical fields.
+
+        Returns:
+            bool: True when completion was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -351,6 +533,19 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def fail_service(self, failure_reason=None, extra_details=None):
+        """
+        Mark the active Delivery service failed and emit ``service_failed``.
+
+        Failure may occur before or after service start, but only one terminal
+        state may be stored.
+
+        Args:
+            failure_reason (str | None): Machine-readable failure reason.
+            extra_details (dict | None): Additional canonical fields.
+
+        Returns:
+            bool: True when failure was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -373,6 +568,27 @@ class DeliveryStrategyBehaviour(State):
         extra_details=None,
         require_service=True,
     ):
+        """
+        Register one planned Delivery movement for deferred metric emission.
+
+        ``movement_completed`` is emitted only after physical movement is
+        confirmed by ``complete_pending_movement()``.
+
+        Supported canonical phases are ``approach``, ``service``, and
+        ``auxiliary``. At most one pending movement is allowed.
+
+        Args:
+            phase (str): Canonical movement phase.
+            distance_m: Finite non-negative planned distance in metres.
+            extra_details (dict | None): Additional movement fields.
+            require_service (bool): Whether an active service context is required.
+
+        Returns:
+            bool: True when the movement was registered.
+
+        Raises:
+            ValueError: If phase or distance violates the movement contract.
+        """
         if phase not in self._METRICS_MOVEMENT_PHASES:
             raise ValueError("Invalid metrics movement phase: {}".format(phase))
         if (
@@ -419,6 +635,15 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def complete_pending_movement(self):
+        """
+        Emit the pending Delivery movement as ``movement_completed``.
+
+        The pending movement is removed from both transport and service context
+        after emission.
+
+        Returns:
+            bool: True when one movement existed and was emitted.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -442,6 +667,12 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def discard_pending_movement(self):
+        """
+        Discard an incomplete planned movement without emitting a metric.
+
+        Returns:
+            bool: True when one pending movement existed.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -464,7 +695,22 @@ class DeliveryStrategyBehaviour(State):
     _METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR = "_metrics_active_message_context"
 
     def _validate_metrics_service_request(self, content):
-        """Validate a strict schema-1.0 Taxi-like request before proposing."""
+        """
+        Validate a schema-1.0 Delivery request before sending a proposal.
+
+        Required fields are ``service_id``, ``modality``, ``user_id``,
+        ``customer_id``, ``origin``, and ``dest``.
+
+        User and customer identifiers must represent the same bare JID, the
+        modality must be ``delivery``, and the initial request must not already
+        contain a transport assignment.
+
+        Args:
+            content: Decoded service request.
+
+        Returns:
+            bool: True when the request may enter Delivery negotiation.
+        """
         if not isinstance(content, dict):
             return False
         for key in (
@@ -488,6 +734,18 @@ class DeliveryStrategyBehaviour(State):
         return True
 
     def store_pending_offer(self, content):
+        """
+        Store one validated Delivery request while its proposal is unresolved.
+
+        The pending context binds the current Delivery transport as proposed
+        ``transport_id`` without yet creating the active lifecycle context.
+
+        Args:
+            content (dict): Validated request payload.
+
+        Returns:
+            dict | None: Pending proposal context.
+        """
         if not self._validate_metrics_service_request(content):
             return None
         pending = {
@@ -503,13 +761,31 @@ class DeliveryStrategyBehaviour(State):
         return pending
 
     def get_pending_offer(self):
+        """
+        Return the Delivery proposal currently awaiting resolution.
+
+        Returns:
+            dict | None: Pending proposal context.
+        """
         return getattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
 
     def clear_pending_offer(self):
+        """
+        Clear the currently pending Delivery proposal.
+
+        Returns:
+            bool: True after cleanup.
+        """
         setattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
         return True
 
     def pending_offer_message_details(self):
+        """
+        Build canonical identifiers propagated with a Delivery proposal.
+
+        Returns:
+            dict | None: Service, modality, requester, and transport identifiers.
+        """
         pending = self.get_pending_offer()
         if pending is None:
             return None
@@ -521,6 +797,18 @@ class DeliveryStrategyBehaviour(State):
         }
 
     def message_matches_pending_offer(self, content):
+        """
+        Validate a requester response against the pending Delivery proposal.
+
+        Service, modality, user, transport, and customer identifiers must match
+        the stored proposal.
+
+        Args:
+            content: Decoded response payload.
+
+        Returns:
+            bool: True when the response belongs to the pending proposal.
+        """
         pending = self.get_pending_offer()
         if pending is None or not isinstance(content, dict):
             return False
@@ -536,6 +824,15 @@ class DeliveryStrategyBehaviour(State):
         )
 
     def activate_pending_offer(self, content):
+        """
+        Promote a matching pending proposal into active message context.
+
+        Args:
+            content: Matching requester response.
+
+        Returns:
+            dict | None: Newly activated message context.
+        """
         if not self.message_matches_pending_offer(content):
             return None
         pending = dict(self.get_pending_offer())
@@ -544,6 +841,12 @@ class DeliveryStrategyBehaviour(State):
         return pending
 
     def get_active_message_context(self):
+        """
+        Return message-correlation state for the accepted Delivery service.
+
+        Returns:
+            dict | None: Active message context.
+        """
         return getattr(
             self.agent,
             self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR,
@@ -551,6 +854,15 @@ class DeliveryStrategyBehaviour(State):
         )
 
     def active_service_message_details(self):
+        """
+        Add active Delivery service identifiers to a copied payload.
+
+        Args:
+            content (dict | None): Existing payload.
+
+        Returns:
+            dict: Extended or unchanged copied payload.
+        """
         active = self.get_active_message_context()
         if active is None:
             return None
@@ -562,6 +874,15 @@ class DeliveryStrategyBehaviour(State):
         }
 
     def add_active_service_identifiers(self, content=None):
+        """
+        Add active Delivery service identifiers to a copied payload.
+
+        Args:
+            content (dict | None): Existing payload.
+
+        Returns:
+            dict: Extended or unchanged copied payload.
+        """
         details = self.active_service_message_details()
         if details is None:
             return dict(content or {})
@@ -570,6 +891,16 @@ class DeliveryStrategyBehaviour(State):
         return result
 
     def message_matches_active_service(self, content):
+        """
+        Validate that a message belongs to the accepted Delivery service.
+
+        Args:
+            content: Decoded message payload.
+
+        Returns:
+            bool: True when service, modality, user, and transport identifiers
+            match the active context.
+        """
         active = self.get_active_message_context()
         if active is None or not isinstance(content, dict):
             return False
@@ -584,10 +915,22 @@ class DeliveryStrategyBehaviour(State):
         )
 
     def clear_active_message_context(self):
+        """
+        Clear message-correlation state for the accepted Delivery service.
+
+        Returns:
+            bool: True after cleanup.
+        """
         setattr(self.agent, self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR, None)
         return True
 
     async def on_start(self):
+        """
+        Log entry into one concrete Delivery FSM state.
+
+        Generic FSM lifecycle instrumentation belongs to FSMDeliveryBehaviour
+        rather than to individual State transitions.
+        """
         logger.debug(
             "Agent[{}]: Strategy {} started.".format(
                 self.agent.name, type(self).__name__
@@ -595,6 +938,9 @@ class DeliveryStrategyBehaviour(State):
         )
 
     async def on_end(self):
+        """
+        Log exit from one concrete Delivery FSM state.
+        """
         logger.debug(
             "Agent[{}]: Strategy {} finished.".format(
                 self.agent.name, type(self).__name__
@@ -602,6 +948,14 @@ class DeliveryStrategyBehaviour(State):
         )
 
     async def assigned_customer(self, customer_id, origin=None, dest=None):
+        """
+        Bind one requester/customer to the Delivery transport and mark it busy.
+
+        Args:
+            customer_id: Assigned requester JID.
+            origin: Service collection origin.
+            dest: Service destination.
+        """
         self.agent.add_assigned_customer(
             customer_id,
             origin,
@@ -611,18 +965,22 @@ class DeliveryStrategyBehaviour(State):
         self.agent.set_busy()
 
     async def unassigned_customer(self):
+        """
+        Remove the current pre-service assigned-customer context.
+
+        Transport availability is managed separately by the concrete FSM state.
+        """
         self.agent.remove_assigned_customer()
 
     # ======== Comunications ========
 
     async def send_proposal(self, customer_id, content=None):
         """
-        Send a ``spade.message.Message`` with a proposal to a customer to pick up him.
-        If the content is empty the proposal is sent without content.
+        Send a Delivery proposal through REQUEST_PROTOCOL / PROPOSE_PERFORMATIVE.
 
         Args:
-            customer_id (str): the id of the customer
-            content (dict, optional): the optional content of the message
+            customer_id: Requester JID.
+            content (dict | None): Proposal payload.
         """
         if content is None:
             content = {}
@@ -638,12 +996,14 @@ class DeliveryStrategyBehaviour(State):
 
     async def cancel_proposal(self, agent_id, content=None):
         """
-        Send a ``spade.message.Message`` to cancel a proposal.
-        If the content is empty the proposal is sent without content.
+        Cancel an accepted Delivery proposal.
+
+        Active canonical service identifiers are added before sending
+        REQUEST_PROTOCOL / CANCEL_PERFORMATIVE.
 
         Args:
-            agent_id (str): the id of the customer
-            content (dict, optional): the optional content of the message
+            agent_id: Requester JID.
+            content (dict | None): Additional cancellation fields.
         """
         if content is None:
             content = {}
@@ -662,12 +1022,15 @@ class DeliveryStrategyBehaviour(State):
 
     async def inform_customer(self, customer_id, status, data=None):
         """
-        Sends a message to inform the customer of the transport's new status.
+        Inform the requester of a Delivery service-status change.
+
+        Active service identifiers and ``status`` are sent through
+        REQUEST_PROTOCOL / INFORM_PERFORMATIVE.
 
         Args:
-            customer_id (str): The ID of the customer.
-            status (int): The new status code.
-            data (dict, optional): Additional information about the status.
+            customer_id: Requester JID.
+            status: Operational service status.
+            data (dict | None): Additional status fields.
         """
         if data is None:
             data = {}
@@ -682,11 +1045,14 @@ class DeliveryStrategyBehaviour(State):
 
     async def cancel_customer(self, customer_id, data=None):
         """
-        Cancels the assignment of a customer and informs them via a message.
+        Inform the active requester that Delivery service execution is cancelled.
+
+        Active canonical identifiers are propagated with
+        REQUEST_PROTOCOL / CANCEL_PERFORMATIVE.
 
         Args:
-            customer_id (str): The ID of the customer.
-            data (dict, optional): Additional cancellation-related information.
+            customer_id: Requester JID.
+            data (dict | None): Failure or cancellation information.
         """
         logger.error(
             "Agent[{}]: The agent could not get a path to customer [{}].".format(
@@ -709,6 +1075,13 @@ class DeliveryStrategyBehaviour(State):
         await self.send(reply)
 
     async def run(self):
+        """
+        Execute the concrete Delivery FSM state.
+
+        Raises:
+            NotImplementedError: When a concrete Delivery state does not provide
+                an implementation.
+        """
         raise NotImplementedError
 
 # ==================================================================
@@ -724,17 +1097,37 @@ class DeliveryStrategyBehaviour(State):
 
 class DeliveryWaitingState(DeliveryStrategyBehaviour):
     """
-        Represents the 'Waiting' state for the delivery. The delivery is waiting to receive a transport request.
+    Idle and proposal-entry state of the Delivery FSM.
 
-        Methods:
-            on_start(): Sets the initial state to 'TRANSPORT_WAITING' and logs the state.
-            run(): Handles incoming messages, processes transport requests, and transitions to the next state.
-        """
+    The transport waits for REQUEST_PROTOCOL messages while no Delivery
+    service is active.
+
+    A REQUEST_PERFORMATIVE enters negotiation only when its payload satisfies
+    the canonical Delivery service-request contract. The validated request is
+    stored as a pending offer, a PROPOSE_PERFORMATIVE is sent to the requester,
+    and execution advances to ``TRANSPORT_WAITING_FOR_APPROVAL``.
+
+    Missing, invalid, or unsupported messages keep the Delivery transport in
+    ``TRANSPORT_WAITING``.
+    """
     async def on_start(self):
+        """
+        Enter the idle Delivery state and mark the transport as waiting.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING
 
     async def run(self):
+        """
+        Wait for and validate one new Delivery service request.
+
+        A valid REQUEST_PERFORMATIVE is stored as a pending proposal and receives
+        a PROPOSE_PERFORMATIVE containing canonical service identifiers.
+
+        The FSM then advances to ``TRANSPORT_WAITING_FOR_APPROVAL``. Missing
+        messages, invalid schema-1.0 requests, and unsupported performatives remain
+        in the waiting state.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_WAITING)
@@ -768,18 +1161,54 @@ class DeliveryWaitingState(DeliveryStrategyBehaviour):
 
 class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
     """
-        Represents the state where the delivery is waiting for approval from a customer or station.
-        After making a transport offer, the delivery waits for a response (approval or refusal).
+    Resolve the requester response to a pending Delivery proposal.
 
-        Methods:
-            on_start(): Logs the transition to 'Waiting For Approval'.
-            run(): Handles incoming approval or refusal messages and transitions accordingly.
-        """
+    A matching ACCEPT_PERFORMATIVE promotes the pending offer to active
+    message context, creates the transport-side canonical service context,
+    emits ``service_assigned``, binds the requester to the transport, and
+    starts approach movement toward the service origin.
+
+    A matching REFUSE_PERFORMATIVE clears the pending proposal and returns to
+    waiting without creating an active service lifecycle.
+
+    Stale or mismatched responses are ignored while the current proposal
+    remains unresolved.
+    """
     async def on_start(self):
+        """
+        Enter proposal resolution and mark Delivery as waiting for approval.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
 
     async def run(self):
+        """
+        Process acceptance or refusal of the current Delivery proposal.
+
+        On valid acceptance the state:
+
+        1. activates pending message correlation;
+        2. creates the Delivery service context using the requester-created
+           service ID;
+        3. emits ``service_assigned``;
+        4. informs the requester that approach movement is starting;
+        5. stores requester assignment and marks the transport busy;
+        6. requests a route to the service origin;
+        7. registers that route as pending ``phase="approach"`` movement.
+
+        Successful route planning advances to
+        ``TRANSPORT_MOVING_TO_CUSTOMER``.
+
+        If the transport is already at the service origin, an explicit
+        zero-distance approach movement is completed and execution advances
+        directly to ``TRANSPORT_ARRIVED_AT_CUSTOMER``.
+
+        Route failure or an unexpected approach error emits ``service_failed``,
+        cancels the requester interaction, clears transient service state,
+        restores availability, and returns to ``TRANSPORT_WAITING``.
+
+        A matching refusal clears the pending proposal and returns to waiting.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
@@ -929,19 +1358,49 @@ class DeliveryWaitingForApprovalState(DeliveryStrategyBehaviour):
 
 class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
     """
-        Represents the state where the delivery is moving towards the customer to pick them up.
+    Monitor Delivery approach movement toward the service origin.
 
-        Methods:
-            on_start(): Logs the transition to 'Moving To Customer'.
-            run(): Handles the movement to the customer and manages unexpected issues during the trip.
-        """
+    Physical movement is executed by MovableMixin's MovingBehaviour. This
+    state monitors arrival and briefly processes messages while approach
+    movement remains active.
+
+    A matching REFUSE_PERFORMATIVE represents cancellation before service
+    collection. The lifecycle is failed, the incomplete approach movement is
+    discarded, requester assignment is removed, and the transport returns to
+    waiting.
+
+    Confirmed physical arrival emits the pending ``phase="approach"``
+    ``movement_completed`` event and informs the requester that the transport
+    has reached the service origin.
+    """
     async def on_start(self):
+        """
+        Enter approach monitoring and mark Delivery as moving to the service
+        origin.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
         logger.debug("{} in Transport Moving To Customer State".format(self.agent.jid))
 
     async def run(self):
+        """
+        Monitor approach movement until arrival or cancellation.
 
+        While the transport has not reached the service origin, messages are
+        received with a short timeout and execution otherwise remains in
+        ``TRANSPORT_MOVING_TO_CUSTOMER``.
+
+        Matching requester refusal emits ``service_failed`` with
+        ``customer_cancelled_before_pickup`` and discards the incomplete approach
+        movement.
+
+        Confirmed arrival completes the pending approach movement, informs the
+        requester with ``TRANSPORT_IN_CUSTOMER_PLACE``, and advances to
+        ``TRANSPORT_ARRIVED_AT_CUSTOMER``.
+
+        Existing route and unexpected-error recovery returns the transport to
+        normal waiting.
+        """
         customers = self.get("assigned_customer")
         customer_id = next(iter(customers.items()))[0]
 
@@ -1070,20 +1529,50 @@ class DeliveryMovingToCustomerState(DeliveryStrategyBehaviour):
 
 class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
     """
-        Represents the state where the delivery has arrived at the customer's location.
+    Wait for service-start confirmation at the Delivery origin.
 
-        Methods:
-            on_start(): Logs the transition to 'Arrived At Customer'.
-            run(): Handles the pickup of the customer and begins the journey to their destination.
-        """
+    A matching INFORM_PERFORMATIVE carrying ``CUSTOMER_IN_TRANSPORT`` begins
+    the actual Delivery service. The requester is transferred from assigned
+    state into current-service state, ``service_started`` is emitted, and
+    movement toward the configured service destination begins.
+
+    A matching CANCEL_PERFORMATIVE fails the service at its origin, clears
+    requester state, restores transport availability, and returns to waiting.
+    """
 
     async def on_start(self):
+        """
+        Enter service-origin waiting and mark Delivery as arrived at the requester.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_ARRIVED_AT_CUSTOMER
 
 
     async def run(self):
+        """
+        Process Delivery service start or cancellation at the origin.
 
+        INFORM_PERFORMATIVE with ``CUSTOMER_IN_TRANSPORT``:
+
+        - moves the requester into current-service state;
+        - emits ``service_started``;
+        - removes the pre-service assignment;
+        - resolves a route to the Delivery destination;
+        - registers that route as pending ``phase="service"`` movement.
+
+        Successful route planning advances to
+        ``TRANSPORT_MOVING_TO_DESTINATION``.
+
+        If origin and destination coincide, a zero-distance service movement is
+        completed immediately and execution advances directly to
+        ``TRANSPORT_ARRIVED_AT_DESTINATION``.
+
+        Route failure or unexpected error emits ``service_failed``, clears the
+        active service, restores availability, and returns to waiting.
+
+        A matching cancellation fails the service with
+        ``customer_cancelled_at_pickup``.
+        """
         msg = await self.receive(timeout=60)
 
         if not msg:
@@ -1234,19 +1723,44 @@ class DeliveryArrivedAtCustomerState(DeliveryStrategyBehaviour):
 
 class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
     """
-        Represents the state where the delivery is transporting the customer to their destination.
+    Monitor active Delivery service movement toward its destination.
 
-        Methods:
-            on_start(): Logs the transition to 'Moving To Destination'.
-            run(): Manages the trip to the customer's destination.
-        """
+    MovableMixin performs the physical position updates while this state polls
+    for destination completion.
+
+    Confirmed arrival emits the pending ``phase="service"``
+    ``movement_completed`` event and informs the requester with
+    ``CUSTOMER_IN_DEST``.
+
+    The FSM then enters ``TRANSPORT_ARRIVED_AT_DESTINATION`` and waits for
+    explicit requester-side lifecycle completion confirmation.
+    """
     async def on_start(self):
+        """
+        Enter service-movement monitoring and mark Delivery as moving to
+        destination.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_MOVING_TO_DESTINATION
 
 
     async def run(self):
+        """
+        Monitor Delivery service movement until destination or failure.
 
+        Incomplete movement remains in
+        ``TRANSPORT_MOVING_TO_DESTINATION`` after a one-second asynchronous wait.
+
+        Confirmed physical arrival completes the pending service movement and
+        informs the requester that the destination has been reached.
+
+        Route failure or an unexpected service error emits ``service_failed``,
+        cancels the requester interaction, removes current-service state, restores
+        transport availability, and returns to waiting.
+
+        An AlreadyInDestination path completes an existing pending movement or
+        emits an explicit zero-distance service movement when none remains.
+        """
         customers = self.get("current_customer")
         customer_id = next(iter(customers.items()))[0]
 
@@ -1337,19 +1851,47 @@ class DeliveryMovingToCustomerDestState(DeliveryStrategyBehaviour):
 
 class DeliveryArrivedAtCustomerDestState(DeliveryStrategyBehaviour):
     """
-        Represents the state where the delivery has arrived at the customer's destination.
+    Wait for requester confirmation after physical Delivery arrival.
 
-        Methods:
-            on_start(): Logs the transition to 'Arrived At Destination'.
-            run(): Handles the process of dropping the customer off and resets the delivery to 'Waiting' state.
-        """
+    Physical arrival alone does not complete the canonical service lifecycle.
+    Completion is owned by the requester-side strategy.
+
+    A matching INFORM_PERFORMATIVE with ``CUSTOMER_IN_DEST`` mirrors that
+    completed lifecycle locally, removes current-service state, clears service
+    and message-correlation contexts, increments completed assignments,
+    restores transport availability, and returns directly to
+    ``TRANSPORT_WAITING``.
+
+    A matching cancellation instead emits ``service_failed`` and performs the
+    same operational cleanup without incrementing successful assignments.
+    """
     async def on_start(self):
+        """
+        Enter destination-confirmation waiting and mark physical Delivery arrival.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_ARRIVED_AT_DESTINATION
 
 
     async def run(self):
+        """
+        Resolve the requester-side terminal Delivery message.
 
+        Matching INFORM_PERFORMATIVE with ``CUSTOMER_IN_DEST`` mirrors successful
+        completion through ``mark_service_completed()`` without emitting a second
+        ``service_completed`` event.
+
+        The current requester, canonical service context, and active message
+        context are then cleared. The completed-assignment counter is incremented,
+        the transport becomes available immediately, and the FSM returns to
+        ``TRANSPORT_WAITING``.
+
+        Matching CANCEL_PERFORMATIVE emits ``service_failed`` with
+        ``customer_cancelled_at_destination`` and performs terminal cleanup.
+
+        Timeouts, unsupported messages, and stale terminal messages remain in
+        ``TRANSPORT_ARRIVED_AT_DESTINATION``.
+        """
         customers = self.get("current_customer")
         customer_id = next(iter(customers.items()))[0]
 
@@ -1421,19 +1963,42 @@ class DeliveryArrivedAtCustomerDestState(DeliveryStrategyBehaviour):
 
 class FSMDeliveryBehaviour(FSMSimfleetBehaviour):
     """
-    Represents the Finite State Machine (FSM) strategy for the delivery agent.
-    This class manages the different states and transitions for the delivery based on its behavior,
-    including waiting for customers, moving to charging stations, and traveling to destinations.
+    Finite-state operational strategy for Delivery transport agents.
 
-    Methods:
-        setup(): Initializes all states and defines transitions between them.
+    The FSM implements one complete Delivery service cycle:
+
+    ``TRANSPORT_WAITING``
+        Receive and validate new service requests.
+
+    ``TRANSPORT_WAITING_FOR_APPROVAL``
+        Resolve a pending proposal.
+
+    ``TRANSPORT_MOVING_TO_CUSTOMER``
+        Monitor approach movement to the service origin.
+
+    ``TRANSPORT_ARRIVED_AT_CUSTOMER``
+        Wait for service-start confirmation.
+
+    ``TRANSPORT_MOVING_TO_DESTINATION``
+        Monitor Delivery service movement.
+
+    ``TRANSPORT_ARRIVED_AT_DESTINATION``
+        Wait for explicit requester completion confirmation.
+
+    Successful completion returns directly to ``TRANSPORT_WAITING`` and makes
+    the Delivery transport available again. There is no Taxi-style return
+    phase.
+
+    Service failures similarly recover to ``TRANSPORT_WAITING`` after
+    lifecycle and requester-state cleanup.
+
+    Generic FSM lifecycle instrumentation is inherited from
+    FSMSimfleetBehaviour.
     """
 
     def setup(self):
         """
-        Sets up the FSM by adding states and defining transitions.
-        This method creates the states the electric delivery can be in and
-        specifies the valid transitions between these states.
+        Register Delivery FSM states and permitted transitions.
         """
 
         # Add states to the FSM

@@ -8,7 +8,6 @@ from simfleet.utils.abstractstrategies import FSMSimfleetBehaviour
 from spade.behaviour import State
 from spade.message import Message
 
-#from simfleet.common.lib.transports.models.electrictaxi import ElectricTaxiStrategyBehaviour
 from simfleet.communications.protocol import (
     REQUEST_PROTOCOL,
     REQUEST_PERFORMATIVE,
@@ -36,29 +35,32 @@ from simfleet.utils.status import TRANSPORT_WAITING, TRANSPORT_WAITING_FOR_APPRO
 
 class ElectricTaxiStrategyBehaviour(State):
     """
-    Base class to define the transport strategy for an electric taxi.
-    This class should be inherited and extended to create custom strategies.
-    Subclasses must override the `run` coroutine to define specific behaviors.
+    Base SPADE State shared by the ElectricTaxi transport FSM.
 
-    Methods:
-        async on_start():
-            Logs the beginning of the strategy execution.
-        async on_end():
-            Logs the end of the strategy execution.
-        async go_to_the_station(station_id, dest):
-            Directs the taxi to a specific station and updates autonomy based on distance.
-        check_and_decrease_autonomy(customer_orig, customer_dest):
-            Checks if there is enough autonomy for a trip and decreases it if possible.
-        async drop_station():
-            Resets the current station assignment for the taxi.
-        async request_access_station(station_id, content):
-            Sends a request to a station for access.
-        async send_proposal(customer_id, content=None):
-            Sends a transport proposal to a customer.
-        async cancel_proposal(agent_id, content=None):
-            Cancels a previously sent proposal to a customer.
-        async run():
-            Abstract method that must be implemented by subclasses.
+    The class combines two independent canonical lifecycles:
+
+    Mobility service lifecycle
+        Correlates customer negotiation and execution through ``service_id``
+        and emits schema-1.0 service and movement events.
+
+    Charging lifecycle
+        Correlates one charging attempt through an independent ``charging_id``
+        and emits ``charging_arrived``, ``charging_started``, and
+        ``charging_completed``.
+
+    It also provides common ElectricTaxi messaging helpers, charging-station
+    selection context, autonomy-related helpers, and Taxi-style return-point
+    requests.
+
+    ``service_id`` and ``charging_id`` belong to different metric entities and
+    must never be substituted for one another.
+
+    Although its service contract closely mirrors TaxiStrategyBehaviour, this
+    class currently inherits directly from SPADE State and maintains its own
+    implementation rather than inheriting the Taxi strategy class.
+
+    This class is an FSM state helper; state registration and transitions
+    belong to FSMElectricTaxiBehaviour.
     """
 
 
@@ -68,6 +70,16 @@ class ElectricTaxiStrategyBehaviour(State):
     _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
 
     def _metrics_modality(self):
+        """
+        Return the canonical ElectricTaxi mobility modality.
+
+        Returns:
+            str: ``"electric_taxi"``.
+
+        Raises:
+            ValueError: If the concrete strategy does not define
+                ``METRICS_MODALITY``.
+        """
         modality = self.METRICS_MODALITY
         if modality is None:
             raise ValueError(
@@ -76,6 +88,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return modality
 
     def get_service_context(self):
+        """
+        Return the active canonical mobility-service context.
+
+        Returns:
+            dict | None: Current schema-1.0 service context.
+        """
         return getattr(
             self.agent,
             self._METRICS_SERVICE_CONTEXT_ATTR,
@@ -91,6 +109,27 @@ class ElectricTaxiStrategyBehaviour(State):
         destination=None,
         emit_requested=False,
     ):
+        """
+        Create and store one canonical ElectricTaxi service context.
+
+        Transport-side ElectricTaxi normally reuses the ``service_id`` created by
+        the customer. A new identifier may be generated locally only when
+        ``emit_requested`` is True.
+
+        Existing unfinished or uncleared contexts are never silently replaced.
+
+        Args:
+            service_id: Existing logical customer-service identifier.
+            user_id: Customer JID.
+            transport_id: Optional ElectricTaxi JID.
+            origin: Customer-service origin.
+            destination: Customer-service destination.
+            emit_requested (bool): Whether this agent owns and emits the initial
+                ``service_requested`` event.
+
+        Returns:
+            dict | None: Created or reusable service context.
+        """
         current = self.get_service_context()
         if current is not None:
             requested_id = str(service_id) if service_id is not None else None
@@ -166,6 +205,18 @@ class ElectricTaxiStrategyBehaviour(State):
         return context
 
     def get_or_create_service_context(self, **kwargs):
+        """
+        Return the matching active service context or create a new one.
+
+        An explicitly supplied service identifier must match any existing active
+        context.
+
+        Args:
+            **kwargs: Arguments forwarded to ``create_service_context()``.
+
+        Returns:
+            dict | None: Matching or newly created service context.
+        """
         context = self.get_service_context()
         service_id = kwargs.get("service_id")
         if context is not None:
@@ -185,6 +236,15 @@ class ElectricTaxiStrategyBehaviour(State):
         return self.create_service_context(**kwargs)
 
     def clear_service_context(self):
+        """
+        Clear a terminal ElectricTaxi service context when no movement remains.
+
+        Unfinished services and contexts that still own pending movement are
+        deliberately retained.
+
+        Returns:
+            bool: True when no service context remains.
+        """
         context = self.get_service_context()
         if context is None:
             return True
@@ -213,6 +273,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def _service_event_details(self, context=None):
+        """
+        Build canonical identifiers shared by mobility-service events.
+
+        Returns:
+            dict | None: Modality, service, user, and transport identifiers.
+        """
         context = context or self.get_service_context()
         if context is None:
             return None
@@ -229,6 +295,20 @@ class ElectricTaxiStrategyBehaviour(State):
         context=None,
         transport_id=None,
     ):
+        """
+        Add canonical service identifiers to a copied outgoing payload.
+
+        Args:
+            content (dict | None): Existing payload.
+            context (dict | None): Service context.
+            transport_id: Optional ElectricTaxi identifier to bind.
+
+        Returns:
+            dict: Payload extended with canonical identifiers.
+
+        Raises:
+            ValueError: If no service context is available.
+        """
         context = context or self.get_service_context()
         if context is None:
             raise ValueError("Cannot propagate identifiers without a service context.")
@@ -239,6 +319,15 @@ class ElectricTaxiStrategyBehaviour(State):
         return result
 
     def message_matches_service(self, content, context=None):
+        """
+        Validate that a message belongs to the expected ElectricTaxi service.
+
+        Service ID, modality, user identifier, and any established transport
+        identifier must match the active service context.
+
+        Returns:
+            bool: True when the message belongs to the expected service.
+        """
         context = context or self.get_service_context()
         if context is None or not isinstance(content, dict):
             return False
@@ -264,6 +353,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def mark_service_assigned(self, transport_id):
+        """
+        Mirror ElectricTaxi assignment state without emitting a canonical event.
+
+        Returns:
+            bool: True when the local assignment is valid.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -277,6 +372,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def mark_service_started(self, transport_id=None):
+        """
+        Mirror mobility-service start without emitting a canonical event.
+
+        Returns:
+            bool: True when the service context can be marked started.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -295,7 +396,14 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def mark_service_completed(self):
-        """Mirror the successful terminal event emitted by the customer."""
+        """
+        Mirror successful completion already emitted by the customer.
+
+        No second ``service_completed`` event is emitted.
+
+        Returns:
+            bool: True when completion is valid or already mirrored.
+        """
         context = self.get_service_context()
         if context is None:
             return False
@@ -307,6 +415,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def assign_service(self, transport_id, extra_details=None):
+        """
+        Mark the mobility service assigned and emit ``service_assigned`` once.
+
+        Returns:
+            bool: True when assignment was newly recorded and emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -327,6 +441,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def start_service(self, transport_id=None, extra_details=None):
+        """
+        Mark customer transport as started and emit ``service_started``.
+
+        Returns:
+            bool: True when service start was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -347,6 +467,16 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def complete_service(self, extra_details=None):
+        """
+        Mark the service completed and emit ``service_completed``.
+
+        The helper requires an already started service. The current ElectricTaxi
+        FSM normally mirrors customer-owned completion through
+        ``mark_service_completed()``.
+
+        Returns:
+            bool: True when completion was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -369,6 +499,15 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def fail_service(self, failure_reason=None, extra_details=None):
+        """
+        Mark the active mobility service failed and emit ``service_failed``.
+
+        Failure may occur before or after service start, but only one terminal
+        status may be recorded.
+
+        Returns:
+            bool: True when failure was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -391,6 +530,27 @@ class ElectricTaxiStrategyBehaviour(State):
         extra_details=None,
         require_service=True,
     ):
+        """
+        Register one planned ElectricTaxi movement for deferred metric emission.
+
+        ``movement_completed`` is emitted only after physical completion is
+        confirmed.
+
+        Canonical phases are ``approach``, ``service``, and ``auxiliary``.
+        ``require_service=False`` allows operational movements such as travel to a
+        charging station or Taxi return movement without requiring an active
+        customer service.
+
+        If a service context does exist, its identifiers are still propagated even
+        when ``require_service`` is False.
+
+        Returns:
+            bool: True when the pending movement was registered.
+
+        Raises:
+            ValueError: If phase or distance violates the canonical movement
+                contract.
+        """
         if phase not in self._METRICS_MOVEMENT_PHASES:
             raise ValueError("Invalid metrics movement phase: {}".format(phase))
         if (
@@ -437,6 +597,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def complete_pending_movement(self):
+        """
+        Emit the pending movement as canonical ``movement_completed``.
+
+        Returns:
+            bool: True when one pending movement existed and was emitted.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -460,6 +626,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def discard_pending_movement(self):
+        """
+        Discard incomplete planned movement without emitting a movement metric.
+
+        Returns:
+            bool: True when one pending movement existed.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -481,6 +653,12 @@ class ElectricTaxiStrategyBehaviour(State):
     _METRICS_CHARGING_CONTEXT_ATTR = "_metrics_charging_context"
 
     def get_charging_context(self):
+        """
+        Return the active ElectricTaxi charging-session context.
+
+        Returns:
+            dict | None: Current charging context.
+        """
         return getattr(
             self.agent,
             self._METRICS_CHARGING_CONTEXT_ATTR,
@@ -488,6 +666,28 @@ class ElectricTaxiStrategyBehaviour(State):
         )
 
     def create_charging_context(self, station_id, charging_id=None):
+        """
+        Create one independent ElectricTaxi charging-session context.
+
+        Charging sessions use ``charging_id`` rather than the customer
+        ``service_id``. When no identifier is supplied, a new UUID is generated.
+
+        The context binds one ElectricTaxi transport to one charging station and
+        tracks three ordered milestones:
+
+        - arrived;
+        - started;
+        - completed.
+
+        An unfinished charging context is never silently replaced.
+
+        Args:
+            station_id: Charging-station JID.
+            charging_id (str | None): Optional existing charging-session ID.
+
+        Returns:
+            dict | None: Created or reusable charging context.
+        """
         current = self.get_charging_context()
         if current is not None:
             requested_id = str(charging_id) if charging_id is not None else None
@@ -526,6 +726,14 @@ class ElectricTaxiStrategyBehaviour(State):
         return context
 
     def clear_charging_context(self):
+        """
+        Clear a completed charging-session context.
+
+        Unfinished sessions cannot be cleared through this normal completion path.
+
+        Returns:
+            bool: True when no charging context remains.
+        """
         context = self.get_charging_context()
         if context is None:
             return True
@@ -545,11 +753,17 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def abandon_charging_context(self):
-        """Drop an unfinished internal charging context without inventing a public failure.
+        """
+        Abandon an unfinished internal charging context without emitting failure.
 
-        Any already-emitted charging milestones remain in the log and will therefore
-        be reconstructed as an unfinished charging session. A later station attempt
-        receives a new charging_id.
+        Any charging milestones already emitted remain in the event log and are
+        therefore reconstructed by MobilityStatisticsClass as an ``unfinished``
+        charging session.
+
+        A later charging attempt receives a new ``charging_id``.
+
+        Returns:
+            bool: True after the internal context has been abandoned.
         """
         context = self.get_charging_context()
         if context is None:
@@ -558,6 +772,15 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def _charging_event_details(self, context=None):
+        """
+        Build canonical identifiers shared by charging lifecycle events.
+
+        Args:
+            context (dict | None): Charging-session context.
+
+        Returns:
+            dict | None: Modality, charging ID, transport ID, and station ID.
+        """
         context = context or self.get_charging_context()
         if context is None:
             return None
@@ -573,7 +796,26 @@ class ElectricTaxiStrategyBehaviour(State):
         content,
         sender=None
     ):
-        """Validate that a charging message belongs to the active station."""
+        """
+        Validate that a station message belongs to the active charging session.
+
+        When an XMPP sender is available, its bare JID is authoritative and must
+        match the station stored in the charging context.
+
+        When sender information is unavailable, ``station_id`` in the decoded
+        payload is used as a backward-compatible fallback.
+
+        If neither sender nor payload station identifier is available, the current
+        compatibility behaviour accepts the message.
+
+        Args:
+            content: Decoded station payload.
+            sender: Optional XMPP sender JID.
+
+        Returns:
+            bool: True when station identity is compatible with the active
+            charging context.
+        """
 
         context = self.get_charging_context()
 
@@ -606,6 +848,12 @@ class ElectricTaxiStrategyBehaviour(State):
         )
 
     def charging_arrived(self):
+        """
+        Record physical station arrival and emit ``charging_arrived`` once.
+
+        Returns:
+            bool: True when the arrival milestone was newly emitted.
+        """
         context = self.get_charging_context()
         if context is None or context.get("arrived"):
             return False
@@ -617,6 +865,14 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def charging_started(self):
+        """
+        Record charging-service start and emit ``charging_started`` once.
+
+        Charging can start only after ``charging_arrived`` has been recorded.
+
+        Returns:
+            bool: True when the start milestone was newly emitted.
+        """
         context = self.get_charging_context()
         if context is None or context.get("started") or not context.get("arrived"):
             return False
@@ -628,6 +884,14 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def charging_completed(self):
+        """
+        Record charging completion and emit ``charging_completed`` once.
+
+        Completion is accepted only after ``charging_started``.
+
+        Returns:
+            bool: True when the completion milestone was newly emitted.
+        """
         context = self.get_charging_context()
         if context is None or context.get("completed") or not context.get("started"):
             return False
@@ -643,7 +907,19 @@ class ElectricTaxiStrategyBehaviour(State):
     _METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR = "_metrics_active_message_context"
 
     def _validate_metrics_service_request(self, content):
-        """Validate a strict schema-1.0 Taxi-like request before proposing."""
+        """
+        Validate a schema-1.0 ElectricTaxi request before proposing service.
+
+        Required fields are ``service_id``, ``modality``, ``user_id``,
+        ``customer_id``, ``origin``, and ``dest``.
+
+        User and customer identifiers must represent the same bare JID, modality
+        must be ``electric_taxi``, and the initial request must not already contain
+        a transport assignment.
+
+        Returns:
+            bool: True when the request may enter proposal negotiation.
+        """
         if not isinstance(content, dict):
             return False
         for key in (
@@ -667,6 +943,20 @@ class ElectricTaxiStrategyBehaviour(State):
         return True
 
     def store_pending_offer(self, content):
+        """
+        Store one validated customer request while the Taxi proposal is pending.
+
+        The pending context preserves service correlation and binds this Taxi as
+        the proposed ``transport_id`` without yet creating the active service
+        lifecycle context.
+
+        Args:
+            content (dict): Validated customer request.
+
+        Returns:
+            dict | None: Stored pending-offer context, or None when validation
+            fails.
+        """
         if not self._validate_metrics_service_request(content):
             return None
         pending = {
@@ -682,13 +972,32 @@ class ElectricTaxiStrategyBehaviour(State):
         return pending
 
     def get_pending_offer(self):
+        """
+        Return the Taxi proposal currently awaiting customer resolution.
+
+        Returns:
+            dict | None: Pending-offer context.
+        """
         return getattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
 
     def clear_pending_offer(self):
+        """
+        Clear the currently stored pending Taxi proposal.
+
+        Returns:
+            bool: True after the pending-offer context has been cleared.
+        """
         setattr(self.agent, self._METRICS_PENDING_OFFER_ATTR, None)
         return True
 
     def pending_offer_message_details(self):
+        """
+        Build canonical identifiers propagated with a Taxi proposal.
+
+        Returns:
+            dict | None: Service, modality, user, and proposed transport
+            identifiers.
+        """
         pending = self.get_pending_offer()
         if pending is None:
             return None
@@ -700,6 +1009,18 @@ class ElectricTaxiStrategyBehaviour(State):
         }
 
     def message_matches_pending_offer(self, content):
+        """
+        Validate a customer response against the currently pending Taxi proposal.
+
+        Service, modality, user, transport, and customer identifiers must all
+        match the stored pending context.
+
+        Args:
+            content: Decoded customer response.
+
+        Returns:
+            bool: True when the response resolves the current proposal.
+        """
         pending = self.get_pending_offer()
         if pending is None or not isinstance(content, dict):
             return False
@@ -715,6 +1036,18 @@ class ElectricTaxiStrategyBehaviour(State):
         )
 
     def activate_pending_offer(self, content):
+        """
+        Promote a matching pending proposal into active message context.
+
+        The pending context is copied into the active context and then removed from
+        pending storage.
+
+        Args:
+            content: Customer response expected to match the pending proposal.
+
+        Returns:
+            dict | None: Newly active message context.
+        """
         if not self.message_matches_pending_offer(content):
             return None
         pending = dict(self.get_pending_offer())
@@ -723,6 +1056,12 @@ class ElectricTaxiStrategyBehaviour(State):
         return pending
 
     def get_active_message_context(self):
+        """
+        Return canonical message-correlation context for the accepted service.
+
+        Returns:
+            dict | None: Active message context.
+        """
         return getattr(
             self.agent,
             self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR,
@@ -730,6 +1069,12 @@ class ElectricTaxiStrategyBehaviour(State):
         )
 
     def active_service_message_details(self):
+        """
+        Build canonical identifiers for messages belonging to the active service.
+
+        Returns:
+            dict | None: Service, modality, user, and transport identifiers.
+        """
         active = self.get_active_message_context()
         if active is None:
             return None
@@ -741,6 +1086,18 @@ class ElectricTaxiStrategyBehaviour(State):
         }
 
     def add_active_service_identifiers(self, content=None):
+        """
+        Add active service-correlation identifiers to an outgoing payload.
+
+        When no active message context exists, a copy of the supplied payload is
+        returned unchanged.
+
+        Args:
+            content (dict | None): Existing outgoing payload.
+
+        Returns:
+            dict: Copied payload with active identifiers when available.
+        """
         details = self.active_service_message_details()
         if details is None:
             return dict(content or {})
@@ -749,6 +1106,18 @@ class ElectricTaxiStrategyBehaviour(State):
         return result
 
     def message_matches_active_service(self, content):
+        """
+        Validate that a message belongs to the currently accepted Taxi service.
+
+        The message must match service ID, modality, user bare JID, and transport
+        bare JID.
+
+        Args:
+            content: Decoded message payload.
+
+        Returns:
+            bool: True when the message belongs to the active service.
+        """
         active = self.get_active_message_context()
         if active is None or not isinstance(content, dict):
             return False
@@ -763,13 +1132,22 @@ class ElectricTaxiStrategyBehaviour(State):
         )
 
     def clear_active_message_context(self):
+        """
+        Clear message-correlation state for the accepted Taxi service.
+
+        Returns:
+            bool: True after the active context has been cleared.
+        """
         setattr(self.agent, self._METRICS_ACTIVE_MESSAGE_CONTEXT_ATTR, None)
         return True
 
     async def on_start(self):
         """
-                Logs the beginning of the strategy execution.
-                """
+        Log entry into one concrete ElectricTaxi FSM state.
+
+        Generic FSM lifecycle instrumentation belongs to
+        FSMElectricTaxiBehaviour rather than to individual State transitions.
+        """
         # await super().on_start()
         logger.debug(
             "Agent[{}]: Strategy {} started.".format(
@@ -779,8 +1157,8 @@ class ElectricTaxiStrategyBehaviour(State):
 
     async def on_end(self):
         """
-                Logs the end of the strategy execution.
-                """
+        Log exit from one concrete ElectricTaxi FSM state.
+        """
         # await super().on_start()
         logger.debug(
             "Agent[{}]: Strategy {} finished.".format(
@@ -790,12 +1168,16 @@ class ElectricTaxiStrategyBehaviour(State):
 
     async def go_to_the_station(self, station_id, dest):
         """
-                Directs the taxi to a specific station and updates autonomy based on the distance.
+        Bind the selected charging station as the ElectricTaxi current station.
 
-                Args:
-                    station_id (str): The ID of the destination station.
-                    dest (list): The coordinates of the station (x, y).
-                """
+        This helper does not perform physical movement and does not modify
+        autonomy. Route execution is started separately by the charging FSM state
+        through ``move_to()``.
+
+        Args:
+            station_id: Selected charging-station JID.
+            dest: Station coordinates retained by the caller for route planning.
+        """
         logger.info(
             "Agent[{}]: On route to station [{}]".format(
                 self.agent.name,
@@ -812,7 +1194,23 @@ class ElectricTaxiStrategyBehaviour(State):
         customer_orig,
         customer_dest
     ):
+        """
+        Validate and reserve autonomy for one complete customer service.
 
+        Required distance is estimated as current position to customer origin plus
+        customer origin to destination using ChargeableMixin's straight-line
+        distance model.
+
+        When sufficient autonomy remains above the configured reserve, the full
+        estimated service distance is immediately deducted.
+
+        Args:
+            customer_orig: Customer pickup coordinates.
+            customer_dest: Customer destination coordinates.
+
+        Returns:
+            bool: True when sufficient autonomy existed and was deducted.
+        """
         travel_km = self.agent.calculate_service_km(
             customer_orig,
             customer_dest
@@ -831,7 +1229,9 @@ class ElectricTaxiStrategyBehaviour(State):
 
     async def drop_station(self):
         """
-        Resets the current station assignment for the transport.
+        Clear ElectricTaxi charging-station assignment state.
+
+        Both the current station and cached nearby-station selection are removed.
         """
 
         logger.debug(
@@ -845,14 +1245,16 @@ class ElectricTaxiStrategyBehaviour(State):
         self.agent.clear_nearby_station()
 
     async def request_access_station(self, station_id, content):
-
         """
-                Sends a request to a station for access.
+        Request access to one charging-station service.
 
-                Args:
-                    station_id (str): The ID of the station to request access from.
-                    content (dict): Additional information to include in the request.
-                """
+        A REQUEST_PROTOCOL / REQUEST_PERFORMATIVE message containing the supplied
+        service payload is sent directly to the selected station.
+
+        Args:
+            station_id: Charging-station JID.
+            content (dict | None): Requested service data.
+        """
 
         if content is None:
             content = {}
@@ -872,11 +1274,13 @@ class ElectricTaxiStrategyBehaviour(State):
 
     async def send_proposal(self, customer_id, content=None):
         """
-        Sends a proposal to a customer offering transport.
+        Send an ElectricTaxi service proposal to a customer.
+
+        The message uses REQUEST_PROTOCOL / PROPOSE_PERFORMATIVE.
 
         Args:
-            customer_id (str): The ID of the customer.
-            content (dict, optional): Additional content for the proposal. Defaults to None.
+            customer_id: Customer JID.
+            content (dict | None): Proposal payload.
         """
         if content is None:
             content = {}
@@ -962,6 +1366,14 @@ class ElectricTaxiStrategyBehaviour(State):
         await self.send(reply)
 
     async def request_return_position(self):
+        """
+        Request an operational ElectricTaxi return point from its FleetManager.
+
+        A ``taxi_return`` REQUEST_PROTOCOL message containing the current position
+        is sent to the registered FleetManager.
+
+        If no FleetManager is configured, the request is skipped.
+        """
         fleetmanager = self.agent.get_registration_fleet()
 
         if not fleetmanager:
@@ -1002,6 +1414,13 @@ class ElectricTaxiStrategyBehaviour(State):
         await self.send(msg)
 
     async def run(self):
+        """
+        Execute the concrete ElectricTaxi FSM state.
+
+        Raises:
+            NotImplementedError: When a concrete state does not provide an
+                implementation.
+        """
         raise NotImplementedError
 
 # ==================================================================
@@ -1017,17 +1436,47 @@ class ElectricTaxiStrategyBehaviour(State):
 
 class ElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
     """
-        Represents the 'Waiting' state for the electric taxi. The taxi is waiting to receive a transport request.
+    Idle request-screening state of the standard ElectricTaxi FSM.
 
-        Methods:
-            on_start(): Sets the initial state to 'TRANSPORT_WAITING' and logs the state.
-            run(): Handles incoming messages, processes transport requests, and transitions to the next state.
-        """
+    The transport waits for canonical ElectricTaxi service requests.
+
+    A valid REQUEST_PERFORMATIVE is stored as a pending offer. Before sending
+    a proposal, the ElectricTaxi estimates whether its current autonomy is
+    sufficient for travel from its current position to the customer origin and
+    then to the requested destination.
+
+    When autonomy is sufficient, a PROPOSE_PERFORMATIVE is sent and execution
+    advances to ``TRANSPORT_WAITING_FOR_APPROVAL``.
+
+    When autonomy is insufficient, the customer receives a cancellation of the
+    unresolved proposal, the pending offer is cleared, and the FSM enters
+    ``TRANSPORT_NEEDS_CHARGING``. No mobility service context has been created
+    at this point, so no ``service_failed`` event is emitted.
+
+    Missing, invalid, or unsupported messages remain in
+    ``TRANSPORT_WAITING``.
+    """
     async def on_start(self):
+        """
+        Enter ElectricTaxi request waiting and mark the operational status as
+        ``TRANSPORT_WAITING``.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING
 
     async def run(self):
+        """
+        Validate one ElectricTaxi request and screen it against available autonomy.
+
+        Valid requests are stored as pending offers before autonomy is evaluated.
+
+        Sufficient autonomy sends the normal service proposal and advances to
+        approval waiting. Insufficient autonomy cancels the unresolved proposal,
+        clears pending negotiation state, and enters the charging circuit.
+
+        No customer-service lifecycle is created until a later valid
+        ACCEPT_PERFORMATIVE.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_WAITING)
@@ -1073,12 +1522,60 @@ class ElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
             return
 
 class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
+    """
+    Discover a charging station and start travel toward it.
+
+    Entering the state marks the ElectricTaxi busy so it cannot accept a new
+    customer service while charging is required.
+
+    When no usable station list is available, station positions are requested
+    for the configured charging ``service_type`` and the state retries.
+
+    From the available stations, one nearby station is selected and stored.
+    A new independent charging context is created before physical travel so the
+    same ``charging_id`` can later correlate arrival, charging start, and
+    charging completion.
+
+    Route-based travel to the station is registered as canonical
+    ``phase="auxiliary"`` movement. Physical autonomy is reduced using
+    ChargeableMixin's straight-line distance estimate to the station.
+
+    Successful route planning advances to
+    ``TRANSPORT_MOVING_TO_STATION``.
+
+    If the ElectricTaxi is already at the station, a zero-distance auxiliary
+    movement and ``charging_arrived`` are emitted immediately, station access
+    is requested, and execution advances directly to
+    ``TRANSPORT_IN_STATION_PLACE``.
+
+    Route or unexpected setup failure discards any incomplete movement,
+    abandons the current charging attempt, clears station selection, and
+    retries from ``TRANSPORT_NEEDS_CHARGING``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_NEEDS_CHARGING
         self.agent.set_busy()
 
     async def run(self):
+        """
+        Resolve one charging station and initiate travel toward it.
+
+        Missing station candidates keep the FSM in
+        ``TRANSPORT_NEEDS_CHARGING``.
+
+        Once a station is selected, a charging context is established before
+        movement begins. The OSRM-resolved route distance is stored for canonical
+        movement metrics, while autonomy consumption uses the ChargeableMixin
+        geographic-distance estimate.
+
+        Successful travel setup enters ``TRANSPORT_MOVING_TO_STATION``.
+        Immediate physical coincidence with the station records arrival and
+        requests station access directly.
+
+        Failed route setup abandons this charging attempt and retries station
+        selection.
+        """
         if self.agent.get_stations() is None or self.agent.get_number_stations() < 1:
             logger.info(
                 "Agent[{}]: The agent looking for a station.".format(
@@ -1175,11 +1672,43 @@ class ElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
             return
 
 class ElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor physical ElectricTaxi movement toward the selected charging
+    station.
+
+    MovableMixin performs the actual movement. This state remains active until
+    the selected station is reached.
+
+    Confirmed arrival completes the pending auxiliary movement, ensures the
+    charging context exists, emits ``charging_arrived``, and requests access
+    to the charging service. The FSM then enters
+    ``TRANSPORT_IN_STATION_PLACE``.
+
+    Route or unexpected movement failure discards the incomplete movement,
+    abandons the charging attempt, clears station state, and returns to
+    ``TRANSPORT_NEEDS_CHARGING``.
+    """
     async def on_start(self):
+        """
+        Enter charging-station movement monitoring.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_MOVING_TO_STATION
 
     async def _arrive_and_request(self):
+        """
+        Finalize physical station arrival and request charging-service access.
+
+        The pending auxiliary movement is completed first. A charging context is
+        created if necessary, ``charging_arrived`` is emitted exactly once, and a
+        station request is sent containing the ElectricTaxi's remaining charging
+        need.
+
+        Successful setup advances to ``TRANSPORT_IN_STATION_PLACE``.
+
+        Returns:
+            bool: True when the arrival/access sequence was prepared successfully.
+        """
         station_id = self.agent.get_current_station()
         self.complete_pending_movement()
         if self.get_charging_context() is None:
@@ -1198,6 +1727,21 @@ class ElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
         return True
 
     async def run(self):
+        """
+        Monitor movement to the charging station until arrival or recovery.
+
+        Incomplete movement remains in ``TRANSPORT_MOVING_TO_STATION`` after a
+        one-second asynchronous wait.
+
+        Arrival delegates to ``_arrive_and_request()``.
+
+        An AlreadyInDestination path guarantees an explicit auxiliary movement,
+        including zero distance when necessary, before the charging-arrival
+        milestone is emitted.
+
+        Route and unexpected failures abandon the current charging attempt and
+        return to station selection.
+        """
         try:
             if not self.agent.is_in_destination():
                 await self.agent.sleep(1)
@@ -1228,11 +1772,45 @@ class ElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
             return
 
 class ElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for charging-station admission after physical arrival.
+
+    The ElectricTaxi has already emitted ``charging_arrived`` and requested
+    station service before entering this state.
+
+    A matching ACCEPT_PERFORMATIVE represents admission to the station service
+    queue and advances to ``TRANSPORT_IN_WAITING_LIST``. It does not yet mean
+    that charging has started.
+
+    A matching REFUSE_PERFORMATIVE abandons the internal charging context,
+    clears station selection, and returns to ``TRANSPORT_NEEDS_CHARGING``.
+
+    Any already emitted ``charging_arrived`` milestone remains in the event log
+    and is therefore reconstructed as an unfinished charging session.
+
+    Timeouts, malformed payloads, unrelated messages, and mismatched station
+    identities keep the ElectricTaxi in this state.
+    """
     async def on_start(self):
+        """
+        Enter charging-station admission waiting.
+        """
         await super().on_start()
         self.agent.status = TRANSPORT_IN_STATION_PLACE
 
     async def run(self):
+        """
+        Process charging-station admission or refusal.
+
+        ACCEPT from the station associated with the active charging context moves
+        the ElectricTaxi into the station waiting list.
+
+        REFUSE from that station abandons the current charging attempt and retries
+        station discovery.
+
+        Station identity is validated through
+        ``charging_message_matches_context()`` before either transition.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_IN_STATION_PLACE)
@@ -1270,11 +1848,33 @@ class ElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_IN_STATION_PLACE)
 
 class ElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait in the charging-station queue until service begins.
+
+    A matching INFORM_PERFORMATIVE with ``serving`` records
+    ``charging_started`` and advances to ``TRANSPORT_CHARGING``.
+
+    A matching station refusal abandons the current charging attempt, clears
+    station state, and returns to ``TRANSPORT_NEEDS_CHARGING``.
+
+    Timeouts, malformed messages, mismatched stations, and non-serving informs
+    keep the ElectricTaxi in the waiting list.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_IN_WAITING_LIST
 
     async def run(self):
+        """
+        Wait for station confirmation that charging service is starting.
+
+        Matching ``INFORM_PERFORMATIVE`` with a truthy ``serving`` field must
+        successfully emit ``charging_started`` before the FSM may enter
+        ``TRANSPORT_CHARGING``.
+
+        A matching refusal abandons the unfinished charging session and starts a
+        new station-selection attempt.
+        """
         msg = await self.receive(timeout=5)
         if not msg:
             self.set_next_state(TRANSPORT_IN_WAITING_LIST)
@@ -1315,11 +1915,41 @@ class ElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_IN_WAITING_LIST)
 
 class ElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for completion of the active ElectricTaxi charging service.
+
+    A charging session completes only when the active station sends
+    REQUEST_PROTOCOL / INFORM_PERFORMATIVE with a truthy ``charged`` field.
+
+    The station identity must match the current charging context and
+    ``charging_completed`` must be emitted successfully before operational
+    cleanup occurs.
+
+    Successful completion restores autonomy to its configured maximum, clears
+    station state, and removes the completed charging context.
+
+    If a Taxi return position was preserved before charging, the ElectricTaxi
+    remains busy and resumes ``TRANSPORT_WAITING_FOR_RETURN``. Otherwise it
+    becomes available and returns to ``TRANSPORT_WAITING``.
+
+    Other messages and timeouts keep the vehicle in
+    ``TRANSPORT_CHARGING``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_CHARGING
 
     async def run(self):
+        """
+        Process completion of the active charging session.
+
+        Valid station completion first emits ``charging_completed``. Full autonomy
+        is then restored, station state is cleared, and the completed charging
+        context is removed.
+
+        A preserved return position resumes the interrupted Taxi return lifecycle;
+        otherwise the ElectricTaxi becomes available for new customer requests.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_CHARGING)
@@ -1357,11 +1987,56 @@ class ElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_CHARGING)
 
 class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
+    """
+    Resolve the customer response to a pending ElectricTaxi proposal.
+
+    A matching ACCEPT_PERFORMATIVE promotes the pending offer to active
+    message context and recalculates the complete estimated service distance
+    from the ElectricTaxi's current position to pickup and then destination.
+
+    If autonomy is no longer sufficient, the accepted proposal is cancelled,
+    active message correlation is cleared, and the ElectricTaxi enters the
+    charging circuit without creating a canonical mobility-service lifecycle.
+
+    With sufficient autonomy, the state creates the transport-side service
+    context, emits ``service_assigned``, binds the customer, starts approach
+    movement, and reserves autonomy for the complete estimated customer trip.
+
+    A matching REFUSE_PERFORMATIVE clears the pending proposal and returns to
+    normal waiting.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
 
     async def run(self):
+        """
+        Process acceptance or refusal of the current ElectricTaxi proposal.
+
+        Valid acceptance first recalculates the full estimated customer-service
+        distance. Insufficient autonomy cancels the unresolved service and enters
+        ``TRANSPORT_NEEDS_CHARGING`` without emitting ``service_assigned`` or
+        ``service_failed``.
+
+        When autonomy is sufficient:
+
+        1. the canonical service context is created;
+        2. ``service_assigned`` is emitted;
+        3. the customer is bound to the ElectricTaxi;
+        4. approach movement to the customer is requested;
+        5. the complete estimated trip autonomy is deducted;
+        6. the route is registered as pending ``phase="approach"`` movement.
+
+        Successful setup advances to ``TRANSPORT_MOVING_TO_CUSTOMER``.
+
+        If the ElectricTaxi is already at pickup, the same complete trip autonomy
+        is deducted, an explicit zero-distance approach movement is emitted, and
+        execution advances directly to ``TRANSPORT_ARRIVED_AT_CUSTOMER``.
+
+        Approach-route or unexpected setup failure terminates the canonical
+        service as failed and restores normal waiting according to the existing
+        recovery path.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
@@ -1459,10 +2134,40 @@ class ElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
 
 class ElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor ElectricTaxi approach movement toward the assigned customer.
+
+    MovableMixin performs physical movement while this state observes arrival
+    and customer cancellation.
+
+    Matching customer refusal before pickup emits ``service_failed`` with
+    ``customer_cancelled_before_pickup``, discards the incomplete approach
+    movement, clears service and assignment state, and restores availability.
+
+    Confirmed arrival emits the pending ``phase="approach"``
+    ``movement_completed`` event and informs the customer that the
+    ElectricTaxi is at the pickup location.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
 
     async def run(self):
+        """
+        Monitor approach movement until pickup arrival or cancellation.
+
+        While movement remains incomplete, the state briefly waits for customer
+        messages and otherwise remains in ``TRANSPORT_MOVING_TO_CUSTOMER``.
+
+        Matching refusal fails the service and discards the pending approach
+        movement.
+
+        Physical arrival completes that movement, informs the customer with
+        ``TRANSPORT_IN_CUSTOMER_PLACE``, and advances to
+        ``TRANSPORT_ARRIVED_AT_CUSTOMER``.
+
+        Existing route and unexpected-error recovery terminates the active service
+        and returns the ElectricTaxi to normal waiting.
+        """
         customers = self.get("assigned_customer")
         if not customers:
             self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
@@ -1503,10 +2208,43 @@ class ElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
             self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class ElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for the customer to board after ElectricTaxi pickup arrival.
+
+    Matching INFORM_PERFORMATIVE with ``CUSTOMER_IN_TRANSPORT`` transfers the
+    customer into onboard state, emits ``service_started``, and starts physical
+    movement toward the customer destination.
+
+    The destination leg is not charged again against autonomy because the
+    complete estimated customer trip was already deducted when the proposal
+    was accepted.
+
+    A matching cancellation fails the service at pickup and restores normal
+    ElectricTaxi availability.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER
 
     async def run(self):
+        """
+        Process customer boarding or cancellation at the pickup point.
+
+        CUSTOMER_IN_TRANSPORT moves the customer into onboard state and emits
+        ``service_started`` before destination route resolution.
+
+        Successful route planning registers pending ``phase="service"`` movement
+        and advances to ``TRANSPORT_MOVING_TO_DESTINATION``.
+
+        If pickup and destination already coincide, an explicit zero-distance
+        service movement is emitted and the FSM advances directly to
+        ``TRANSPORT_ARRIVED_AT_DESTINATION``.
+
+        A destination PathRequestException restores the straight-line
+        ``service_km`` reserved for the unexecuted destination leg, emits
+        ``service_failed``, clears the active lifecycle, and returns to waiting.
+
+        Other unexpected service-setup failures follow the existing failure path.
+        """
         msg=await self.receive(timeout=60)
         if not msg: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
         try: content=json.loads(msg.body)
@@ -1605,10 +2343,40 @@ class ElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
 
 class ElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor active ElectricTaxi passenger movement to destination.
+
+    Physical movement is performed by MovableMixin. This state waits for
+    destination completion while preserving the already reserved autonomy
+    accounting for the service.
+
+    Confirmed arrival emits the pending ``phase="service"``
+    ``movement_completed`` event and informs the customer with
+    ``CUSTOMER_IN_DEST``.
+
+    The FSM then enters ``TRANSPORT_ARRIVED_AT_DESTINATION`` and waits for
+    explicit customer-side lifecycle completion.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_MOVING_TO_DESTINATION
 
     async def run(self):
+        """
+        Monitor customer-service movement until destination or failure.
+
+        Incomplete physical movement keeps the state active after a one-second
+        asynchronous wait.
+
+        Arrival completes the pending service movement and informs the customer
+        that the destination has been reached.
+
+        Route or unexpected movement failures terminate the canonical service,
+        clear onboard customer state, restore availability according to the
+        existing recovery path, and return to ``TRANSPORT_WAITING``.
+
+        AlreadyInDestination completes an existing pending movement or emits an
+        explicit zero-distance service movement.
+        """
         customers=self.get("current_customer")
         if not customers: self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         customer_id=next(iter(customers.items()))[0]
@@ -1637,10 +2405,39 @@ class ElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
             self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class ElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for explicit customer confirmation after physical destination arrival.
+
+    Physical arrival alone does not emit ``service_completed``. The customer
+    side owns canonical completion.
+
+    Matching INFORM_PERFORMATIVE with ``CUSTOMER_IN_DEST`` mirrors the
+    already-completed lifecycle locally, removes the onboard customer,
+    increments completed assignments, and keeps the ElectricTaxi busy while it
+    enters the Taxi return phase.
+
+    A matching terminal cancellation instead emits ``service_failed``, clears
+    the service context, restores availability, and returns directly to
+    ``TRANSPORT_WAITING``.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION
 
     async def run(self):
+        """
+        Resolve the customer-side terminal service message.
+
+        CUSTOMER_IN_DEST mirrors successful customer-owned completion through
+        ``mark_service_completed()`` without emitting a duplicate
+        ``service_completed`` event.
+
+        The onboard customer and active message context are cleared, completed
+        assignments are incremented, and the ElectricTaxi remains busy while
+        entering ``TRANSPORT_WAITING_FOR_RETURN``.
+
+        Matching cancellation emits ``service_failed`` with
+        ``customer_cancelled_at_destination`` and performs terminal cleanup.
+        """
         customers=self.get("current_customer")
         if not customers: self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION); return
         customer_id=next(iter(customers.items()))[0]
@@ -1662,10 +2459,54 @@ class ElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
 
 class ElectricTaxiWaitingForReturnState(ElectricTaxiStrategyBehaviour):
+    """
+    Resolve and execute the post-service ElectricTaxi return operation.
+
+    The completed customer service context is retained while this state is
+    active and the ElectricTaxi remains unavailable for new assignments.
+
+    If no return position is stored, the registered FleetManager is queried
+    using ``request_type="taxi_return"``.
+
+    Once a return point is known, the ElectricTaxi calculates the straight-line
+    autonomy required to reach it.
+
+    Sufficient autonomy starts route-based return movement and registers
+    pending ``phase="auxiliary"`` movement.
+
+    Insufficient autonomy preserves the return point, keeps the ElectricTaxi
+    busy, and enters ``TRANSPORT_NEEDS_CHARGING``. After successful charging,
+    the charging FSM returns here to continue the same return operation.
+
+    Reaching an already-current return point emits zero-distance auxiliary
+    movement, clears the retained completed service context, removes the return
+    point, restores availability, and returns to normal waiting.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.return_requested=False
 
     async def run(self):
+        """
+        Resolve a return point, verify autonomy, and initiate ElectricTaxi return.
+
+        Missing return-point data triggers FleetManager resolution.
+
+        When the return point is known, straight-line distance is used for the
+        autonomy check while ``move_to()`` provides the routed distance recorded in
+        the pending auxiliary movement.
+
+        Insufficient autonomy diverts to ``TRANSPORT_NEEDS_CHARGING`` without
+        clearing the return point or completed service context.
+
+        Successful route setup deducts the straight-line return estimate and
+        enters ``TRANSPORT_MOVING_TO_RETURN``.
+
+        Already being at the return point completes an explicit zero-distance
+        auxiliary movement and ends the retained service cycle.
+
+        Route-resolution failures discard any pending return movement and retry
+        this state without changing the already completed customer lifecycle.
+        """
         if not self.agent.has_return_position():
             if not self.return_requested:
                 await self.request_return_position(); self.return_requested=True
@@ -1697,10 +2538,37 @@ class ElectricTaxiWaitingForReturnState(ElectricTaxiStrategyBehaviour):
             logger.error("Unexpected error returning electric taxi [{}]: {}".format(self.agent.name,e)); self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
 
 class ElectricTaxiMovingToReturnState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor auxiliary movement toward the ElectricTaxi return point.
+
+    MovableMixin performs physical return movement while the ElectricTaxi
+    remains unavailable for new services.
+
+    Confirmed arrival completes the pending auxiliary movement, clears the
+    retained completed mobility-service context and return position, restores
+    availability, and transitions to ``TRANSPORT_WAITING``.
+
+    If the return position disappears before arrival, the pending movement is
+    discarded and execution returns to
+    ``TRANSPORT_WAITING_FOR_RETURN``.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_MOVING_TO_RETURN
 
     async def run(self):
+        """
+        Monitor ElectricTaxi return movement until completion.
+
+        Missing return-point state discards pending movement and restarts
+        return-point resolution.
+
+        While physical movement remains incomplete, the state waits one second and
+        remains active.
+
+        Arrival emits the pending auxiliary movement, clears retained service and
+        return contexts, restores availability, and returns to
+        ``TRANSPORT_WAITING``.
+        """
         return_position=self.agent.get_return_position()
         if return_position is None:
             self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING_FOR_RETURN; self.set_next_state(TRANSPORT_WAITING_FOR_RETURN); return
@@ -1710,19 +2578,38 @@ class ElectricTaxiMovingToReturnState(ElectricTaxiStrategyBehaviour):
 
 class FSMElectricTaxiBehaviour(FSMSimfleetBehaviour):
     """
-    Represents the Finite State Machine (FSM) strategy for the electric taxi agent.
-    This class manages the different states and transitions for the taxi based on its behavior,
-    including waiting for customers, moving to charging stations, and traveling to destinations.
+    Finite-state operational strategy for the standard ElectricTaxi agent.
 
-    Methods:
-        setup(): Initializes all states and defines transitions between them.
+    The FSM combines three coordinated operational flows:
+
+    Customer service
+        Request negotiation, approach, pickup, passenger movement, and
+        customer-confirmed completion.
+
+    Charging
+        Charging-station discovery, auxiliary station travel, admission,
+        waiting-list service, and charging completion through an independent
+        ``charging_id``.
+
+    Post-service Taxi return
+        FleetManager return-point resolution and auxiliary return movement
+        before the ElectricTaxi becomes available again.
+
+    Charging may be entered before accepting a customer when autonomy is
+    insufficient, or during the post-service return when the retained return
+    point cannot be reached safely.
+
+    When charging interrupts a return operation, successful charging resumes
+    ``TRANSPORT_WAITING_FOR_RETURN`` instead of returning directly to normal
+    waiting.
+
+    Generic FSM lifecycle instrumentation is inherited from
+    FSMSimfleetBehaviour.
     """
 
     def setup(self):
         """
-        Sets up the FSM by adding states and defining transitions.
-        This method creates the states the electric taxi can be in and
-        specifies the valid transitions between these states.
+        Register standard ElectricTaxi states and permitted transitions.
         """
 
         # Add states to the FSM
@@ -1824,17 +2711,41 @@ class FSMElectricTaxiBehaviour(FSMSimfleetBehaviour):
 
 class NRPElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
     """
-        Represents the 'Waiting' state for the electric taxi. The taxi is waiting to receive a transport request.
+    Idle request-screening state of the NRP ElectricTaxi FSM.
 
-        Methods:
-            on_start(): Sets the initial state to 'TRANSPORT_WAITING' and logs the state.
-            run(): Handles incoming messages, processes transport requests, and transitions to the next state.
-        """
+    The transport waits for canonical ElectricTaxi customer requests and uses
+    the same schema-1.0 negotiation contract as the standard ElectricTaxi.
+
+    A valid REQUEST_PERFORMATIVE is stored as a pending offer before autonomy
+    is evaluated.
+
+    Sufficient autonomy sends a PROPOSE_PERFORMATIVE and advances to
+    ``TRANSPORT_WAITING_FOR_APPROVAL``.
+
+    Insufficient autonomy cancels the unresolved proposal, clears the pending
+    offer, and enters ``TRANSPORT_NEEDS_CHARGING``. No mobility-service
+    context has been created at that point, so no ``service_failed`` event is
+    emitted.
+
+    Missing or unsupported messages remain in ``TRANSPORT_WAITING``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING
 
     async def run(self):
+        """
+        Receive one NRP ElectricTaxi request and screen it against autonomy.
+
+        A valid schema-1.0 request becomes a pending proposal.
+
+        Sufficient autonomy sends the proposal and advances to customer approval.
+        Insufficient autonomy cancels the unresolved proposal and diverts the
+        ElectricTaxi into the charging circuit.
+
+        Customer-service lifecycle creation remains deferred until a later valid
+        ACCEPT_PERFORMATIVE.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_WAITING)
@@ -1881,11 +2792,56 @@ class NRPElectricTaxiWaitingState(ElectricTaxiStrategyBehaviour):
 
 
 class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
+    """
+    Resolve the customer response to a pending NRP ElectricTaxi proposal.
+
+    Matching acceptance activates message correlation and performs a second
+    autonomy validation for the complete estimated customer trip.
+
+    If autonomy is no longer sufficient, the accepted proposal is cancelled,
+    active message context is cleared, the ElectricTaxi remains unavailable,
+    and execution enters ``TRANSPORT_NEEDS_CHARGING`` without creating a
+    canonical mobility-service lifecycle.
+
+    With sufficient autonomy, the service context is created,
+    ``service_assigned`` is emitted, the customer is bound to the transport,
+    and approach movement begins.
+
+    Matching refusal clears the pending offer and returns directly to normal
+    waiting.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_WAITING_FOR_APPROVAL
 
     async def run(self):
+        """
+        Process acceptance or refusal of the pending NRP ElectricTaxi proposal.
+
+        Valid acceptance first recalculates the complete service distance.
+
+        Insufficient autonomy cancels the accepted proposal and enters the
+        charging circuit before ``service_assigned`` is emitted.
+
+        When autonomy is sufficient:
+
+        1. the canonical service context is created;
+        2. ``service_assigned`` is emitted;
+        3. the customer is assigned;
+        4. the ElectricTaxi is marked busy;
+        5. approach movement to the customer is requested;
+        6. autonomy for the complete estimated trip is deducted;
+        7. the route is registered as pending ``phase="approach"`` movement.
+
+        Successful route setup enters ``TRANSPORT_MOVING_TO_CUSTOMER``.
+
+        Already being at pickup produces an explicit zero-distance approach
+        movement and advances directly to
+        ``TRANSPORT_ARRIVED_AT_CUSTOMER``.
+
+        Approach-route and unexpected setup failures terminate the service and
+        recover to ``TRANSPORT_WAITING`` according to the current error path.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
@@ -1976,10 +2932,40 @@ class NPRElectricTaxiWaitingForApprovalState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_WAITING_FOR_APPROVAL)
 
 class NPRElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor NRP ElectricTaxi approach movement toward the assigned customer.
+
+    MovableMixin performs physical movement while this state observes arrival
+    and possible customer cancellation.
+
+    A matching REFUSE_PERFORMATIVE before pickup emits ``service_failed`` with
+    ``customer_cancelled_before_pickup``, discards the incomplete approach
+    movement, clears active service state, and restores transport
+    availability.
+
+    Confirmed arrival emits the pending ``phase="approach"``
+    ``movement_completed`` event and informs the customer that the vehicle is
+    at the pickup location.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status = TRANSPORT_MOVING_TO_CUSTOMER
 
     async def run(self):
+        """
+        Monitor approach movement until pickup arrival or cancellation.
+
+        Incomplete movement briefly waits for customer messages and otherwise
+        remains in ``TRANSPORT_MOVING_TO_CUSTOMER``.
+
+        Matching customer refusal fails the service and discards pending movement.
+
+        Physical arrival completes the approach metric, informs the customer with
+        ``TRANSPORT_IN_CUSTOMER_PLACE``, and advances to
+        ``TRANSPORT_ARRIVED_AT_CUSTOMER``.
+
+        Route and unexpected movement errors terminate the active service and
+        recover to normal waiting.
+        """
         customers = self.get("assigned_customer")
         if not customers:
             self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
@@ -2020,10 +3006,49 @@ class NPRElectricTaxiMovingToCustomerState(ElectricTaxiStrategyBehaviour):
             self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class NPRElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for customer boarding at the NRP ElectricTaxi pickup location.
+
+    Matching INFORM_PERFORMATIVE with ``CUSTOMER_IN_TRANSPORT`` transfers the
+    customer into onboard state and emits ``service_started``.
+
+    Movement toward the customer destination is then resolved and registered
+    as pending ``phase="service"`` movement.
+
+    The destination leg is not deducted from autonomy a second time because the
+    complete estimated customer trip was reserved during proposal acceptance.
+
+    Matching cancellation fails the service at pickup and restores the
+    ElectricTaxi to normal waiting.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_CUSTOMER
 
     async def run(self):
+        """
+        Process customer boarding or cancellation at the pickup location.
+
+        CUSTOMER_IN_TRANSPORT:
+
+        - moves the customer into onboard state;
+        - emits ``service_started``;
+        - clears pre-pickup assignment;
+        - resolves movement to the customer destination;
+        - registers pending ``phase="service"`` movement.
+
+        Successful route setup enters
+        ``TRANSPORT_MOVING_TO_DESTINATION``.
+
+        If the destination already equals the current position, a zero-distance
+        service movement is emitted and execution advances directly to
+        ``TRANSPORT_ARRIVED_AT_DESTINATION``.
+
+        A destination PathRequestException restores the straight-line autonomy
+        reserved for the unexecuted service leg before failing the service.
+
+        Other unexpected setup errors follow the existing failure path without
+        changing the current autonomy-recovery policy.
+        """
         msg=await self.receive(timeout=60)
         if not msg: self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER); return
         try: content=json.loads(msg.body)
@@ -2122,10 +3147,39 @@ class NPRElectricTaxiArrivedAtCustomerState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_ARRIVED_AT_CUSTOMER)
 
 class NPRElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor active NRP ElectricTaxi passenger movement to destination.
+
+    MovableMixin performs physical movement while this state waits for arrival.
+
+    Confirmed arrival emits the pending ``phase="service"``
+    ``movement_completed`` event and informs the customer with
+    ``CUSTOMER_IN_DEST``.
+
+    The FSM then waits in ``TRANSPORT_ARRIVED_AT_DESTINATION`` for explicit
+    customer-side lifecycle completion.
+
+    Route or unexpected movement failure terminates the active service and
+    restores normal transport availability.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_MOVING_TO_DESTINATION
 
     async def run(self):
+        """
+        Monitor NRP customer-service movement until destination or failure.
+
+        Incomplete movement remains active after a one-second asynchronous wait.
+
+        Arrival completes the pending service movement and informs the customer
+        that the destination has been reached.
+
+        AlreadyInDestination completes an existing pending movement or emits an
+        explicit zero-distance service movement.
+
+        Route and unexpected errors fail the canonical service, clear onboard
+        customer state, restore availability, and return to waiting.
+        """
         customers=self.get("current_customer")
         if not customers: self.discard_pending_movement(); self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         customer_id=next(iter(customers.items()))[0]
@@ -2154,10 +3208,46 @@ class NPRElectricTaxiMovingToCustomerDestState(ElectricTaxiStrategyBehaviour):
             self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
 
 class NPRElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
+    """
+    Resolve customer-side completion after NRP ElectricTaxi destination
+    arrival.
+
+    Physical arrival alone does not emit ``service_completed``. Canonical
+    completion remains owned by the customer strategy.
+
+    Matching INFORM_PERFORMATIVE with ``CUSTOMER_IN_DEST`` mirrors that
+    completion locally through ``mark_service_completed()``, removes the
+    onboard customer, clears active message and service contexts, increments
+    completed assignments, immediately restores ElectricTaxi availability, and
+    returns to ``TRANSPORT_WAITING``.
+
+    Unlike the standard ElectricTaxi FSM, NRP has no FleetManager return-point
+    phase after successful customer service.
+
+    Matching cancellation emits ``service_failed`` and performs terminal
+    cleanup before returning to waiting.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_ARRIVED_AT_DESTINATION
 
     async def run(self):
+        """
+        Process the terminal customer message for an NRP ElectricTaxi service.
+
+        CUSTOMER_IN_DEST mirrors already emitted customer-side completion without
+        producing a duplicate ``service_completed`` event.
+
+        The customer, active message context, and canonical service context are
+        then cleared. Completed assignments are incremented and the ElectricTaxi
+        becomes immediately available for another service.
+
+        CANCEL_PERFORMATIVE records
+        ``customer_cancelled_at_destination`` as ``service_failed`` and performs
+        terminal cleanup.
+
+        Timeouts, malformed payloads, and stale messages remain in
+        ``TRANSPORT_ARRIVED_AT_DESTINATION``.
+        """
         customers=self.get("current_customer")
         if not customers: self.agent.status=TRANSPORT_WAITING; self.agent.set_available(); self.set_next_state(TRANSPORT_WAITING); return
         customer_id=next(iter(customers.items()))[0]
@@ -2179,12 +3269,64 @@ class NPRElectricTaxiArrivedAtCustomerDestState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_ARRIVED_AT_DESTINATION)
 
 class NPRElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
+    """
+    Discover a charging station for the NRP ElectricTaxi and start travel
+    toward it.
+
+    The ElectricTaxi remains busy while charging is required and therefore
+    cannot accept another customer service.
+
+    When no usable station list is available, charging-station positions are
+    requested for the configured service type and the state retries.
+
+    A nearby station is selected, stored as the current charging target, and
+    associated with a new independent ``charging_id`` before physical travel
+    begins.
+
+    Route-based travel to the station is registered as canonical
+    ``phase="auxiliary"`` movement. Autonomy consumption uses
+    ChargeableMixin's straight-line geographic estimate, while movement
+    metrics retain the routed distance returned by ``move_to()``.
+
+    Successful travel setup advances to
+    ``TRANSPORT_MOVING_TO_STATION``.
+
+    If the ElectricTaxi is already at the station, an explicit zero-distance
+    auxiliary movement and ``charging_arrived`` are emitted immediately before
+    station access is requested.
+
+    Charging-route failures abandon the unfinished charging attempt, clear the
+    selected station, and retry from ``TRANSPORT_NEEDS_CHARGING``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_NEEDS_CHARGING
         self.agent.set_busy()
 
     async def run(self):
+        """
+        Resolve a charging station and initiate NRP ElectricTaxi travel toward it.
+
+        Missing station candidates keep the FSM in
+        ``TRANSPORT_NEEDS_CHARGING``.
+
+        Once a station is selected, a charging context is created before movement
+        starts so arrival, service start, and completion share one
+        ``charging_id``.
+
+        Straight-line station distance is used for autonomy consumption, whereas
+        ``move_to()`` supplies the distance stored in the pending auxiliary
+        movement.
+
+        Successful route setup enters ``TRANSPORT_MOVING_TO_STATION``.
+
+        Already being at the station completes a zero-distance auxiliary movement,
+        emits ``charging_arrived``, requests charging service, and enters
+        ``TRANSPORT_IN_STATION_PLACE``.
+
+        Route and unexpected setup errors discard incomplete movement, abandon the
+        charging context, clear station selection, and retry.
+        """
         if self.agent.get_stations() is None or self.agent.get_number_stations() < 1:
             logger.info(
                 "Agent[{}]: The agent looking for a station.".format(
@@ -2281,11 +3423,40 @@ class NPRElectricTaxiNeedsChargingState(ElectricTaxiStrategyBehaviour):
             return
 
 class NPRElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
+    """
+    Monitor NRP ElectricTaxi movement toward the selected charging station.
+
+    MovableMixin performs physical movement while this state observes station
+    arrival.
+
+    Confirmed arrival completes the pending ``phase="auxiliary"`` movement,
+    ensures that a charging context exists, emits ``charging_arrived``, and
+    requests access to the station service.
+
+    Successful arrival advances to ``TRANSPORT_IN_STATION_PLACE``.
+
+    Route or unexpected movement failure discards the incomplete movement,
+    abandons the charging attempt, clears station state, and returns to
+    ``TRANSPORT_NEEDS_CHARGING``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_MOVING_TO_STATION
 
     async def _arrive_and_request(self):
+        """
+        Finalize station arrival and request NRP ElectricTaxi charging access.
+
+        The pending auxiliary movement is completed first. A charging context is
+        created when necessary, ``charging_arrived`` is emitted exactly once, and
+        the remaining charging need is sent to the selected station.
+
+        Successful preparation advances to
+        ``TRANSPORT_IN_STATION_PLACE``.
+
+        Returns:
+            bool: True when station-arrival processing was prepared successfully.
+        """
         station_id = self.agent.get_current_station()
         self.complete_pending_movement()
         if self.get_charging_context() is None:
@@ -2304,6 +3475,21 @@ class NPRElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
         return True
 
     async def run(self):
+        """
+        Monitor NRP movement to the charging station until arrival or recovery.
+
+        While physical movement is incomplete, the state sleeps asynchronously for
+        one second and remains in ``TRANSPORT_MOVING_TO_STATION``.
+
+        Confirmed arrival delegates to ``_arrive_and_request()``.
+
+        AlreadyInDestination ensures an explicit auxiliary movement exists,
+        including zero distance when necessary, before the station-arrival
+        lifecycle is processed.
+
+        Charging-route failures abandon the current attempt and return to station
+        discovery.
+        """
         try:
             if not self.agent.is_in_destination():
                 await self.agent.sleep(1)
@@ -2334,11 +3520,41 @@ class NPRElectricTaxiMovingToStationState(ElectricTaxiStrategyBehaviour):
             return
 
 class NPRElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for charging-station admission after NRP ElectricTaxi arrival.
+
+    ``charging_arrived`` has already been emitted before this state begins.
+
+    A matching ACCEPT_PERFORMATIVE admits the ElectricTaxi to the station
+    waiting list and advances to ``TRANSPORT_IN_WAITING_LIST``. Admission does
+    not yet mean that charging has started.
+
+    A matching REFUSE_PERFORMATIVE abandons the current internal charging
+    context, clears station state, and returns to
+    ``TRANSPORT_NEEDS_CHARGING``.
+
+    Previously emitted charging milestones remain in the event log, so a
+    refused session after physical arrival is reconstructed as unfinished.
+
+    Timeouts, malformed messages, unrelated performatives, and mismatched
+    station identities keep the ElectricTaxi in this state.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_IN_STATION_PLACE
 
     async def run(self):
+        """
+        Resolve NRP charging-station admission or refusal.
+
+        ACCEPT from the station associated with the active charging context moves
+        the ElectricTaxi into the station waiting list.
+
+        REFUSE from that station abandons the unfinished charging attempt and
+        restarts station selection.
+
+        Station identity is validated before either transition.
+        """
         msg = await self.receive(timeout=60)
         if not msg:
             self.set_next_state(TRANSPORT_IN_STATION_PLACE)
@@ -2376,11 +3592,32 @@ class NPRElectricTaxiInStationState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_IN_STATION_PLACE)
 
 class NPRElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait in the charging-station queue until NRP charging service begins.
+
+    Matching INFORM_PERFORMATIVE with a truthy ``serving`` value emits
+    ``charging_started`` and advances to ``TRANSPORT_CHARGING``.
+
+    A matching station refusal abandons the unfinished charging context, clears
+    station state, and returns to ``TRANSPORT_NEEDS_CHARGING``.
+
+    Timeouts, malformed messages, mismatched stations, and non-serving informs
+    keep the ElectricTaxi in the waiting list.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = TRANSPORT_IN_WAITING_LIST
 
     async def run(self):
+        """
+        Wait for confirmation that NRP ElectricTaxi charging is starting.
+
+        A matching ``serving`` notification must successfully emit
+        ``charging_started`` before the FSM enters ``TRANSPORT_CHARGING``.
+
+        A station refusal abandons the current unfinished charging attempt and
+        restarts station selection.
+        """
         msg = await self.receive(timeout=5)
         if not msg:
             self.set_next_state(TRANSPORT_IN_WAITING_LIST)
@@ -2421,10 +3658,38 @@ class NPRElectricTaxiInWaitingListState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_IN_WAITING_LIST)
 
 class NPRElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
+    """
+    Wait for completion of the active NRP ElectricTaxi charging session.
+
+    A session completes only when the station associated with the current
+    charging context sends REQUEST_PROTOCOL / INFORM_PERFORMATIVE with a
+    truthy ``charged`` field.
+
+    Successful completion emits ``charging_completed``, restores autonomy to
+    its configured maximum, clears station state, and removes the completed
+    charging context.
+
+    Because the NRP strategy has no post-service return-point lifecycle,
+    successful charging always makes the ElectricTaxi available and returns
+    directly to ``TRANSPORT_WAITING``.
+
+    Other messages, malformed payloads, mismatched stations, and timeouts keep
+    the vehicle in ``TRANSPORT_CHARGING``.
+    """
     async def on_start(self):
         await super().on_start(); self.agent.status=TRANSPORT_CHARGING
 
     async def run(self):
+        """
+        Process completion of the active NRP charging session.
+
+        Matching station completion must first emit ``charging_completed``.
+        Full autonomy is then restored, station state is cleared, and the completed
+        charging context is removed.
+
+        The NRP ElectricTaxi subsequently becomes available and returns directly
+        to ``TRANSPORT_WAITING``.
+        """
         msg=await self.receive(timeout=60)
         if not msg: self.set_next_state(TRANSPORT_CHARGING); return
         try: content=json.loads(msg.body)
@@ -2440,9 +3705,38 @@ class NPRElectricTaxiChargingState(ElectricTaxiStrategyBehaviour):
         self.set_next_state(TRANSPORT_CHARGING)
 
 class FSMNPRElectricTaxiBehaviour(FSMSimfleetBehaviour):
+    """
+    Finite-state operational strategy for the No-Return-Point ElectricTaxi.
 
+    The FSM combines two operational flows:
+
+    Customer service
+        Request negotiation, autonomy screening, approach, pickup, passenger
+        movement, and customer-confirmed completion.
+
+    Charging
+        Charging-station discovery, auxiliary station travel, admission,
+        waiting-list service, and charging completion through an independent
+        ``charging_id``.
+
+    The strategy deliberately omits the standard ElectricTaxi post-service
+    return-point lifecycle. Successful customer completion clears the mobility
+    service context and returns directly to ``TRANSPORT_WAITING``.
+
+    Likewise, successful charging always restores availability and returns to
+    ``TRANSPORT_WAITING``; there is no
+    ``TRANSPORT_WAITING_FOR_RETURN`` recovery branch.
+
+    NRP remains part of the canonical ``electric_taxi`` modality rather than
+    defining a separate public metrics modality.
+
+    Generic FSM lifecycle instrumentation is inherited from
+    FSMSimfleetBehaviour.
+    """
     def setup(self):
-
+        """
+        Register NRP ElectricTaxi states and permitted transitions.
+        """
         # ============================================================
         # States
         # ============================================================

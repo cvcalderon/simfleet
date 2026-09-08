@@ -323,27 +323,44 @@ class RegistrationBehaviour(CyclicBehaviour):
 
 class VehicleStrategyBehaviour(State):
     """
-    This class defines the vehicle's behavior strategy. It is designed to be extended to implement
-    custom strategies for vehicle operations.
+    Base SPADE State shared by generic VehicleAgent FSM strategies.
 
-    Key Methods:
-        - on_start(): Logs the initialization of the strategy.
-        - planned_trip(): Defines how the vehicle should move to its destination.
+    This class is not a complete FSM behaviour. Concrete vehicle states inherit
+    from it to reuse common state startup logging and route initiation through
+    ``planned_trip()``.
+
+    The surrounding FSM defines state registration, transitions, and complete
+    strategy lifecycle instrumentation through FSMSimfleetBehaviour.
+
+    Concrete state subclasses implement ``run()``.
     """
 
     async def on_start(self):
         """
-            Logs the start of the vehicle's strategy behavior.
+        Log entry into a concrete Vehicle FSM state.
+
+        Generic FSM ``initial_event`` instrumentation belongs to the surrounding
+        FSMSimfleetBehaviour, not to individual Vehicle states.
         """
         logger.debug("Strategy {} started in vehicle".format(type(self).__name__))
 
     async def planned_trip(self, dest=None):
         """
-        Initiates the process for the vehicle to travel to the specified destination. The vehicle moves along the
-        path, updating its position until it reaches its destination.
+        Start MovableMixin route execution toward a vehicle destination.
+
+        The helper delegates physical route planning and movement setup to the
+        owning VehicleAgent through ``move_to()``.
+
+        ``AlreadyInDestination`` is handled locally and logged, so callers normally
+        receive no exception when the requested destination already equals the
+        current position.
+
+        Other movement exceptions, including PathRequestException, are not handled
+        here and may be processed by the concrete state.
 
         Args:
-            dest (list): The coordinates of the vehicle's destination.
+            dest (list | None): Destination coordinates passed to
+                VehicleAgent.move_to().
         """
         logger.info(
             "Agent[{}]: The agent on route to destination ({})".format(self.agent.name, dest)
@@ -360,7 +377,12 @@ class VehicleStrategyBehaviour(State):
 
     async def run(self):
         """
-            Abstract method that should be implemented in subclasses. This is where the specific strategy of the
-            vehicle will be executed.
+        Execute the concrete Vehicle FSM state.
+
+        State subclasses implement their transition and movement decisions.
+
+        Raises:
+            NotImplementedError: When the state does not provide an
+                implementation.
         """
         raise NotImplementedError

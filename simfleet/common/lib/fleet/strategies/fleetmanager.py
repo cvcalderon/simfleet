@@ -16,11 +16,23 @@ from simfleet.utils.helpers import distance_in_meters
 
 class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
     """
-    The default strategy for the FleetManager agent. By default it delegates all requests to all transports.
+    Default FleetManager strategy that broadcasts requests to the fleet.
+
+    Every message received by the strategy is forwarded to every resource
+    currently registered with the FleetManager. The original message object
+    is reused while its destination is changed for each resource.
+
+    Resource selection, availability ranking, and load balancing are
+    deliberately not performed by this strategy.
     """
 
     async def run(self):
+        """
+        Receive one fleet request and forward it to every registered resource.
 
+        When no message is received before the behaviour timeout, no delegation
+        is performed during that iteration.
+        """
         msg = await self.receive(timeout=5)
 
         logger.warning(
@@ -50,16 +62,43 @@ class DelegateRequestBehaviour(FleetManagerStrategyBehaviour):
 ################################################################
 class SendAvailableTransportsBehaviour(FleetManagerStrategyBehaviour):
     """
-    Awaits customer's requests and replies with the lest of available transports
+    Maintain and expose a message-driven registry of available transports.
+
+    The strategy supports two REQUEST_PROTOCOL interactions:
+
+    ``REQUEST_PERFORMATIVE``
+        A customer requests currently available transports. The complete local
+        ``available_transports`` mapping is returned through QUERY_PROTOCOL /
+        INFORM_PERFORMATIVE.
+
+    ``INFORM_PERFORMATIVE``
+        A transport reports its current status. Transports in
+        ``TRANSPORT_WAITING`` are stored as available; transports leaving that
+        status are removed from the local registry.
+
+    This strategy uses explicit transport status messages rather than the
+    FleetManager's generic live-Presence resource-selection API.
     """
     async def on_start(self):
+        """
+        Initialize the message-driven available-transport registry.
+
+        FleetManager strategy startup logging is delegated to the parent hook.
+        """
         await super().on_start()
         self.agent.available_transports = {}
 
     async def run(self):
-        #if not self.agent.registration:
-        #    await self.send_registration()
+        """
+        Process one available-transport registry interaction.
 
+        Customer REQUEST messages receive the complete current registry.
+
+        Transport INFORM messages update that registry according to
+        ``TRANSPORT_WAITING`` status: waiting transports are added or refreshed,
+        while previously registered transports reporting another status are
+        removed.
+        """
         msg = await self.receive(timeout=5)
         if msg:
             logger.debug("Manager received message: {}".format(msg))
@@ -102,7 +141,33 @@ class SendAvailableTransportsBehaviour(FleetManagerStrategyBehaviour):
 
 class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
     """
-    Selects an available resource using its presence information.
+    Base FleetManager strategy for selecting one resource from Presence data.
+
+    Candidate resources come from ``FleetManagerAgent.get_available_resources()``,
+    which prefers live XMPP Presence and may fall back to the registered
+    message-based Presence mirror.
+
+    Each candidate may expose two compact Presence attributes:
+
+    ``p``
+        Current resource position.
+
+    ``a``
+        Number of completed assignments advertised by the transport.
+
+    Concrete subclasses define three policy parameters:
+
+    ``requires_origin``
+        Whether the incoming request must contain an origin.
+
+    ``requires_assignments``
+        Whether candidate Presence must contain assignment information.
+
+    ``sort_key``
+        Candidate ordering used to select the first available resource.
+
+    The original incoming message is delegated to exactly one selected
+    resource.
     """
 
     requires_origin = True
@@ -111,6 +176,25 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
     sort_key = staticmethod(lambda candidate: candidate["distance"])
 
     def get_presence_candidates(self, origin=None):
+        """
+        Build sortable candidates from currently available fleet resources.
+
+        Resources without Presence position ``p`` are excluded.
+
+        When the active policy requires assignment information, resources without
+        Presence field ``a`` are also excluded.
+
+        Geographic distance to ``origin`` is calculated only when an origin is
+        supplied. Candidate positions and assignment counts are otherwise
+        preserved from Presence.
+
+        Args:
+            origin (list | None): Request origin used for distance ranking.
+
+        Returns:
+            list[dict]: Candidate mappings containing ``jid``, ``position``,
+            ``distance``, and ``assignments``.
+        """
         candidates = []
 
         resources = self.agent.get_available_resources()
@@ -161,8 +245,19 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
         return candidates
 
     async def run(self):
-        #if not self.agent.registration:
-        #    await self.send_registration()
+        """
+        Select and delegate one fleet request using the configured Presence policy.
+
+        The request body must be valid JSON. Policies requiring an origin reject
+        requests that do not provide one.
+
+        Available resources are converted into policy candidates, sorted with
+        ``sort_key``, and the first candidate receives the original request
+        message.
+
+        Invalid requests or an empty candidate set are logged and ignored; no
+        refusal reply is generated by this strategy.
+        """
 
         msg = await self.receive(timeout=5)
 
@@ -221,7 +316,10 @@ class PresenceRequestBehaviour(FleetManagerStrategyBehaviour):
 
 class NearRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects the nearest available vehicle.
+    Select the geographically nearest available resource.
+
+    The request must contain an origin. Candidate assignment counts are not
+    required and do not influence ordering.
     """
 
     requires_origin = True
@@ -234,7 +332,12 @@ class NearRequestBehaviour(PresenceRequestBehaviour):
 
 class FewerAssignmentsRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects the available transport with the fewest completed assignments.
+    Select the available resource with the fewest completed assignments.
+
+    Request origin is not required. Candidates must advertise assignment count
+    ``a`` through Presence.
+
+    Geographic distance does not influence ordering.
     """
 
     requires_origin = False
@@ -247,8 +350,14 @@ class FewerAssignmentsRequestBehaviour(PresenceRequestBehaviour):
 
 class FewerAssignmentsAndNearRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects by fewer completed assignments first,
-    then by nearest distance.
+    Select by completed assignments first and geographic distance second.
+
+    Both request origin and candidate assignment information are required.
+
+    Candidate ordering is lexicographic:
+
+    1. fewer completed assignments;
+    2. shorter geographic distance when assignment counts tie.
     """
 
     requires_origin = True
@@ -264,8 +373,14 @@ class FewerAssignmentsAndNearRequestBehaviour(PresenceRequestBehaviour):
 
 class NearAndFewerAssignmentsRequestBehaviour(PresenceRequestBehaviour):
     """
-    Selects by nearest distance first,
-    then by fewer completed assignments.
+    Select by geographic distance first and completed assignments second.
+
+    Both request origin and candidate assignment information are required.
+
+    Candidate ordering is lexicographic:
+
+    1. shorter geographic distance;
+    2. fewer completed assignments when distances tie.
     """
 
     requires_origin = True

@@ -98,24 +98,33 @@ class TaxiCustomerAgent(CustomerAgent):
 
 class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
     """
-    Represents the strategy behavior for the TaxiCustomerAgent.
-    It defines the communication protocol and decision-making processes for requesting,
-    accepting, and managing transport services.
+    Base operational strategy for TaxiCustomerAgent.
 
-    Methods:
-        async send_request(content=None):
-            Sends a transport request to the fleet manager(s).
-        async accept_transport(transport_id):
-            Accepts a transport proposal from a transport agent.
-        async refuse_transport(transport_id):
-            Refuses a transport proposal from a transport agent.
-        async inform_transport(transport_id, status, data=None):
-            Sends a message to a transport agent to inform about a status update.
-        async run():
-            Abstract method that must be implemented in a subclass to define behavior.
+    The behaviour provides the common REQUEST_PROTOCOL messaging primitives
+    used by taxi-customer strategies:
+
+    - request transport service from configured FleetManagers;
+    - accept a transport proposal;
+    - refuse a transport proposal;
+    - inform the selected transport of customer status changes.
+
+    Concrete subclasses implement the proposal-selection and service
+    progression policy in ``run()``.
+
+    The behaviour also participates in multimodal orchestration. When the
+    complete Taxi customer strategy terminates, ``on_end()`` invokes the
+    generic customer completion hook. Legacy TaxiCustomerAgent treats that
+    hook as a no-op, while MultiModalCustomerAgent converts it into explicit
+    modal completion signalling.
     """
 
     async def on_start(self):
+        """
+        Start the Taxi customer strategy lifecycle.
+
+        The generic StrategyBehaviour hook runs first, emitting
+        ``initial_event``, after which Taxi-specific strategy startup is logged.
+        """
         await super().on_start()
         logger.debug(
             "Agent[{}]: Strategy {} started.".format(
@@ -125,7 +134,14 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
 
     async def on_end(self):
         """
-        Finalize the Taxi strategy and notify customer orchestration.
+        Finalize Taxi customer strategy execution.
+
+        The generic StrategyBehaviour end hook emits ``final_event`` first. The
+        Taxi customer completion hook is then invoked so multimodal customers can
+        notify their orchestration FSM that the current modal strategy has ended.
+
+        For legacy TaxiCustomerAgent instances, the completion hook remains a
+        no-op.
         """
         await super().on_end()
 
@@ -140,13 +156,22 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
 
     async def send_request(self, content=None):
         """
-        Sends a transport request to the fleet manager(s).
-        Uses the REQUEST_PROTOCOL and REQUEST_PERFORMATIVE.
+        Send one Taxi service request to every configured FleetManager.
+
+        REQUEST_PROTOCOL / REQUEST_PERFORMATIVE is used for each FleetManager.
+
+        When no explicit payload is supplied, the default request contains:
+
+        - customer JID;
+        - current customer position as origin;
+        - current customer destination.
+
+        If the customer has no destination, the current implementation attempts
+        to generate a random routable destination before creating the request.
 
         Args:
-            content (dict): Optional dictionary containing request details.
-                            If not provided, a default content with customer ID,
-                            origin, and destination will be used.
+            content (dict | None): Optional request payload. None or an empty
+                mapping causes the default Taxi request payload to be built.
         """
         if not self.agent.customer_dest:
             self.agent.customer_dest = new_random_position(self.agent.boundingbox, self.agent.route_host, self.route_profile)
@@ -178,11 +203,16 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
 
     async def accept_transport(self, transport_id):
         """
-        Sends a message to a transport agent to accept a travel proposal.
-        Uses the REQUEST_PROTOCOL and ACCEPT_PERFORMATIVE.
+        Accept one Taxi transport proposal.
+
+        An ACCEPT_PERFORMATIVE message is sent through REQUEST_PROTOCOL containing
+        the customer identifier, current origin, and requested destination.
+
+        After sending the acceptance, the selected transport JID is stored in the
+        Taxi customer's transient assignment context.
 
         Args:
-            transport_id (str): The JID of the transport agent to accept.
+            transport_id (str): Transport JID whose proposal is accepted.
         """
         reply = Message()
         reply.to = str(transport_id)
@@ -204,11 +234,16 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
 
     async def refuse_transport(self, transport_id):
         """
-        Sends a message to a transport agent to refuse a travel proposal.
-        Uses the REQUEST_PROTOCOL and REFUSE_PERFORMATIVE.
+        Refuse one Taxi transport proposal.
+
+        A REFUSE_PERFORMATIVE message is sent through REQUEST_PROTOCOL containing
+        the same customer, origin, and destination context used for acceptance.
+
+        Refusing a proposal does not change the currently stored Taxi transport
+        assignment.
 
         Args:
-            transport_id (str): The JID of the transport agent to refuse.
+            transport_id (str): Transport JID whose proposal is refused.
         """
         reply = Message()
         reply.to = str(transport_id)
@@ -230,13 +265,19 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
 
     async def inform_transport(self, transport_id, status, data=None):
         """
-        Sends a message to a transport agent to inform it of a status update.
-        Uses the REQUEST_PROTOCOL and INFORM_PERFORMATIVE.
+        Inform the selected Taxi transport of a customer status update.
+
+        The message uses REQUEST_PROTOCOL / INFORM_PERFORMATIVE. ``status`` is
+        inserted into the supplied payload before serialization.
+
+        Any status other than ``CUSTOMER_IN_DEST`` keeps or updates the transient
+        Taxi assignment to ``transport_id``. Destination completion clears that
+        assignment.
 
         Args:
-            transport_id (str): The JID of the transport agent.
-            status (str): The status to be informed.
-            data (dict): Optional additional data to be included in the message.
+            transport_id (str): Transport JID receiving the update.
+            status (str): Customer status included in the message.
+            data (dict | None): Optional additional payload fields.
         """
         if data is None:
             data = {}
@@ -260,7 +301,13 @@ class TaxiCustomerStrategyBehaviour(StrategyBehaviour):
 
     async def run(self):
         """
-                Abstract method to define the strategy's behavior.
-                This method must be implemented in the child class.
+        Execute one iteration of the concrete Taxi customer strategy.
+
+        Subclasses implement proposal handling, customer state progression, and
+        interaction with the assigned transport.
+
+        Raises:
+            NotImplementedError: When no concrete Taxi customer strategy is
+                implemented.
         """
         raise NotImplementedError
