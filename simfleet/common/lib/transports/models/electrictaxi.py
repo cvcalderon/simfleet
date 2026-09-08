@@ -4,33 +4,25 @@ from simfleet.common.lib.transports.models.taxi import TaxiAgent
 
 class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
     """
-        Represents an electric taxi agent with enhanced functionalities for managing charging stations,
-        nearby station selection, and other electric vehicle-specific features.
-        This class extends the capabilities of `TaxiAgent` and integrates charging functionality
-        through the `ChargeableMixin`.
+    Taxi model with battery and charging-station context.
 
-        Attributes:
-            stations (list): A list of available charging stations.
-            nearby_station (tuple): The ID and position of the nearest charging station.
-            arguments (dict): Additional custom arguments for the access to station agent.
+    ElectricTaxiAgent combines the taxi service lifecycle with the charging
+    capabilities provided by ChargeableMixin. The model stores charging
+    infrastructure discovered by the strategy and tracks the station being
+    considered or currently used.
 
-        Methods:
-            set_stations(stations):
-                Sets the list of available charging stations.
-            get_stations():
-                Retrieves the list of available charging stations.
-            get_number_stations():
-                Gets the total number of charging stations.
-            set_nearby_station(station):
-                Sets the nearest charging station.
-            get_nearby_station():
-                Retrieves the nearest charging station.
-            get_nearby_station_id():
-                Retrieves the ID of the nearest charging station.
-            get_nearby_station_position():
-                Retrieves the position of the nearest charging station.
-        """
+    Charging decisions and FSM transitions remain responsibilities of the
+    electric-taxi strategy.
+    """
     def __init__(self, agentjid, password, **kwargs):
+        """
+        Initialize taxi and charging-specific runtime state.
+
+        Args:
+            agentjid (str): XMPP JID used by the electric taxi.
+            password (str): XMPP authentication password.
+            **kwargs: Additional taxi configuration arguments.
+        """
         ChargeableMixin.__init__(self)
         TaxiAgent.__init__(self, agentjid, password, **kwargs)
 
@@ -90,31 +82,46 @@ class ElectricTaxiAgent(ChargeableMixin, TaxiAgent):
 
     def get_nearby_station_id(self):
         """
-                Retrieve the ID of the nearest charging station.
+        Return the identifier of the selected nearby charging station.
 
-                Returns:
-                    Any: The ID of the nearest charging station.
+        Returns:
+            Any: Station identifier stored in the nearby-station tuple.
         """
         return self.nearby_station[0]
 
     def get_nearby_station_position(self):
         """
-                Retrieve the position of the nearest charging station.
+        Return the position of the selected nearby charging station.
 
-                Returns:
-                    Any: The position of the nearest charging station.
+        Returns:
+            Any: Station position stored in the nearby-station tuple.
         """
         return self.nearby_station[1]
 
     def clear_nearby_station(self):
+        """
+        Clear the currently selected nearby charging station.
+        """
         self.nearby_station = None
 
     def set_current_station(self, station_id):
+        """
+        Store the charging station currently associated with the taxi.
+
+        Args:
+            station_id: Charging-station identifier.
+        """
         self.current_station = station_id
 
     def get_current_station(self):
+        """
+        Return the charging station currently associated with the taxi.
+        """
         return self.current_station
 
     def clear_current_station(self):
+        """
+        Clear the current charging-station association.
+        """
         self.current_station = None
 

@@ -25,18 +25,30 @@ from simfleet.utils.helpers import AlreadyInDestination
 
 class VehicleAgent(MovableMixin, GeoLocatedAgent):
     """
-        The VehicleAgent class represents a vehicle in the system. It inherits from both MovableMixin and GeoLocatedAgent,
-        combining the functionality of movement and geolocation. This agent can register with a fleet manager, move to a
-        destination, and execute strategies defined by specific behaviors.
+    Base model for movable fleet resources.
+
+    VehicleAgent combines geolocation and route-based movement with the
+    registration contract used by fleet-managed resources. Concrete vehicle
+    models extend this class with modality-specific state and strategies.
+
+    The model is responsible for:
+
+    - movement and target-position state;
+    - registration with an optional FleetManager;
+    - publication of resource availability through Presence;
+    - launching the configured operational strategy;
+    - serializing common vehicle movement information.
+
+    Operational decisions belong to the configured strategy rather than to
+    this model.
     """
     def __init__(self, agentjid, password):
         """
-            Initializes the VehicleAgent with its unique JID and password. The vehicle agent also has attributes
-            to store the fleet manager's ID and manages its own state regarding its location and registration.
+        Initialize the common runtime state of a vehicle.
 
-            Args:
-                agentjid (str): The Jabber ID of the agent.
-                password (str): The password used for agent authentication.
+        Args:
+            agentjid (str): XMPP JID used by the agent.
+            password (str): XMPP authentication password.
         """
         GeoLocatedAgent.__init__(self, agentjid, password)
         MovableMixin.__init__(self)
@@ -45,8 +57,11 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
 
     async def setup(self):
         """
-            Sets up the vehicle agent, registers it with the fleet manager, and ensures that
-            the agent has the required behaviors for communication.
+        Initialize the vehicle and its fleet-registration behaviour.
+
+        Vehicles without a configured registration fleet become ready
+        immediately. Otherwise, a RegistrationBehaviour is installed and
+        readiness is completed after the FleetManager accepts registration.
         """
 
         await super().setup()
@@ -76,6 +91,13 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
             )
 
     def get_registration_content(self):
+        """
+        Build the common payload sent when registering the vehicle.
+
+        Returns:
+            dict: Vehicle identity and fleet type advertised to the
+            FleetManager.
+        """
 
         return {
             "name":
@@ -91,11 +113,13 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
 
     def set_target_position(self, coords=None):
         """
-        Sets the target position of the customer (i.e., its destination).
-        If no position is provided, the destination is set to a random position.
+        Set the vehicle target position.
+
+        When no coordinates are provided, a valid random position is generated
+        inside the configured simulation bounding box.
 
         Args:
-            coords (list): A list of coordinates (longitude and latitude) for the destination.
+            coords (list | None): Target coordinates as longitude and latitude.
         """
         if coords:
             self.vehicle_dest = coords
@@ -107,8 +131,10 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
 
     def run_strategy(self):
         """
-        Runs the strategy for the vehicle agent. It initializes the behavior associated with the vehicle's operations
-        and begins executing its assigned strategy.
+        Start the configured operational vehicle strategy once.
+
+        The strategy receives messages using REQUEST_PROTOCOL. The
+        ``running_strategy`` flag prevents duplicate strategy instances.
         """
         if not self.running_strategy:
             template = Template()
@@ -119,16 +145,25 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
 
     async def set_position(self, coords=None):
         """
-        Sets the vehicle's position. If no position is provided, the vehicle will be assigned a random position.
+        Update the physical position of the vehicle.
+
+        The geolocation state and the vehicle ``current_pos`` value are kept
+        synchronized.
 
         Args:
-            coords (list): A list of coordinates representing the vehicle's longitude and latitude.
+            coords (list | None): New longitude/latitude coordinates.
         """
 
         super().set_position(coords)
         self.set("current_pos", coords)
 
     def get_presence_status(self):
+        """
+        Build the application payload published through vehicle Presence.
+
+        Returns:
+            dict: Current position and operational status.
+        """
         return {
             "p": self.get_position(),
             "st": self.status,
@@ -140,6 +175,15 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         show=PresenceShow.CHAT,
         priority=0
     ):
+        """
+        Publish the current vehicle state through the generic Presence contract.
+
+        Args:
+            presence_type: XMPP Presence availability type.
+            show: XMPP Presence show value.
+            priority (int): XMPP Presence priority.
+        """
+
         status = json.dumps(self.get_presence_status())
 
         self.set_agent_presence(
@@ -150,6 +194,10 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         )
 
     def set_available(self):
+        """
+        Advertise the vehicle as available when Presence registration is enabled.
+        """
+
         if not self.get_registration_presence():
             return
 
@@ -159,6 +207,10 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
         )
 
     def set_busy(self):
+        """
+        Advertise the vehicle as busy when Presence registration is enabled.
+        """
+
         if not self.get_registration_presence():
             return
 
@@ -169,6 +221,15 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
 
 
     def to_json(self):
+        """
+        Serialize the vehicle state used by the simulator and frontend.
+
+        Extends the geolocated-agent representation with destination, travelled
+        distance, animation speed, and current route path.
+
+        Returns:
+            dict: Serializable vehicle state.
+        """
         data = super().to_json()
         data.update({
             "dest": [float("{0:.6f}".format(coord)) for coord in self.dest]
@@ -182,12 +243,19 @@ class VehicleAgent(MovableMixin, GeoLocatedAgent):
 
 
 class RegistrationBehaviour(CyclicBehaviour):
+    """
+    Register a VehicleAgent with its configured FleetManager.
+
+    Registration requests are retried until an acceptance is received.
+    Successful registration stores the returned FleetManager information,
+    marks the vehicle as ready, and publishes its initial availability.
+    """
     async def on_start(self):
         logger.debug("Strategy {} started in transport".format(type(self).__name__))
 
     async def send_registration(self):
         """
-        Send a ``spade.message.Message`` with a proposal to manager to register.
+        Send the vehicle registration payload to the configured FleetManager.
         """
 
         registration_fleet = self.agent.get_registration_fleet()
@@ -213,7 +281,12 @@ class RegistrationBehaviour(CyclicBehaviour):
 
 
     async def run(self):
+        """
+        Execute one registration cycle and process the FleetManager response.
 
+        ACCEPT completes vehicle registration. REFUSE leaves the behaviour
+        active so registration may be retried.
+        """
         try:
 
             if not self.agent.registration and self.agent.get_registration_fleet():
