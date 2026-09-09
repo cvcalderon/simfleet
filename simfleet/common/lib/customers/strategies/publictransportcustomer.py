@@ -42,11 +42,29 @@ class PublicTransportCustomerStrategyBehaviour(
     State
 ):
     """
-    Base State used by the Public Transport Customer FSM.
+    Base SPADE State shared by the PublicTransport customer FSM.
 
-    It centralizes the communication contracts used by
-    the customer while keeping the concrete state
-    transitions in specialized FSM states.
+    The customer owns one door-to-door PublicTransport service identified by a
+    persistent ``service_id``. A selected journey may contain multiple walking
+    and public-transport legs and may therefore use several different vehicles
+    without creating additional logical services.
+
+    The customer owns public ``service_requested``, ``service_started``,
+    ``service_completed``, and ``service_failed`` events together with its
+    pedestrian movement metrics.
+
+    Each PublicTransport vehicle owns the public ``service_assigned`` event for
+    the boarding it accepts. The customer mirrors those assignments locally
+    through boarding-specific keys so several transfers can remain correlated
+    with the same ``service_id``.
+
+    The active service context tracks the current candidate or boarded vehicle,
+    the unique vehicles used by the journey, boarding keys, lifecycle state,
+    and pending customer movement.
+
+    Journey discovery, stop-queue interaction, boarding requests, and canonical
+    service correlation helpers are centralized here. Concrete state
+    transitions belong to FSMPublicTransportCustomerStrategyBehaviour.
     """
 
 
@@ -56,6 +74,15 @@ class PublicTransportCustomerStrategyBehaviour(
     _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
 
     def _metrics_modality(self):
+        """
+        Return the canonical PublicTransport metrics modality.
+
+        Returns:
+            str: ``"public_transport"``.
+
+        Raises:
+            ValueError: If a concrete metrics strategy does not define a modality.
+        """
         modality = self.METRICS_MODALITY
         if modality is None:
             raise ValueError(
@@ -64,6 +91,12 @@ class PublicTransportCustomerStrategyBehaviour(
         return modality
 
     def get_service_context(self):
+        """
+        Return the active door-to-door PublicTransport service context.
+
+        Returns:
+            dict | None: Current canonical service context.
+        """
         return getattr(
             self.agent,
             self._METRICS_SERVICE_CONTEXT_ATTR,
@@ -79,6 +112,31 @@ class PublicTransportCustomerStrategyBehaviour(
         destination=None,
         emit_requested=False,
     ):
+        """
+        Create and store one canonical PublicTransport door-to-door service.
+
+        A customer normally creates the ``service_id`` when journey requests are
+        first sent and emits ``service_requested`` at that point.
+
+        The same context persists across the complete selected journey, including
+        walking access, transfers, multiple PublicTransport boardings, and final
+        walking.
+
+        ``transport_id`` represents the currently selected or active vehicle.
+        ``transport_ids`` retains the unique vehicles used across boardings and
+        ``assignment_keys`` prevents the same boarding from being mirrored twice.
+
+        Args:
+            service_id: Optional existing logical service identifier.
+            user_id: PublicTransport customer JID.
+            transport_id: Optional current vehicle JID.
+            origin: Door-to-door journey origin.
+            destination: Door-to-door final destination.
+            emit_requested (bool): Whether to emit ``service_requested``.
+
+        Returns:
+            dict | None: Created or reusable service context.
+        """
         current = self.get_service_context()
         if current is not None:
             requested_id = str(service_id) if service_id is not None else None
@@ -156,6 +214,18 @@ class PublicTransportCustomerStrategyBehaviour(
         return context
 
     def get_or_create_service_context(self, **kwargs):
+        """
+        Return the matching PublicTransport service context or create one.
+
+        The same context is reused throughout all legs and transfers of the
+        journey. An explicitly supplied different ``service_id`` is rejected.
+
+        Args:
+            **kwargs: Arguments forwarded to ``create_service_context()``.
+
+        Returns:
+            dict | None: Matching or newly created service context.
+        """
         context = self.get_service_context()
         service_id = kwargs.get("service_id")
         if context is not None:
@@ -175,6 +245,15 @@ class PublicTransportCustomerStrategyBehaviour(
         return self.create_service_context(**kwargs)
 
     def clear_service_context(self):
+        """
+        Clear a terminal PublicTransport service when no customer movement remains.
+
+        An unfinished service or one still carrying pending movement is
+        deliberately retained.
+
+        Returns:
+            bool: True when no active service context remains.
+        """
         context = self.get_service_context()
         if context is None:
             return True
@@ -203,6 +282,16 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def _service_event_details(self, context=None):
+        """
+        Build canonical identifiers for PublicTransport customer service events.
+
+        ``transport_id`` represents the vehicle currently correlated with the
+        service and may change between PublicTransport legs.
+
+        Returns:
+            dict | None: Modality, service, user, and current transport
+            identifiers.
+        """
         context = context or self.get_service_context()
         if context is None:
             return None
@@ -219,6 +308,25 @@ class PublicTransportCustomerStrategyBehaviour(
         context=None,
         transport_id=None,
     ):
+        """
+        Add canonical PublicTransport identifiers to a copied outgoing payload.
+
+        When ``transport_id`` is supplied, that vehicle becomes the current
+        candidate or active transport in the service context. A later boarding
+        refusal may clear that candidate without destroying the complete journey
+        service.
+
+        Args:
+            content (dict | None): Existing payload.
+            context (dict | None): Service context.
+            transport_id: Optional current PublicTransport vehicle JID.
+
+        Returns:
+            dict: Payload extended with canonical service identifiers.
+
+        Raises:
+            ValueError: If no service context is available.
+        """
         context = context or self.get_service_context()
         if context is None:
             raise ValueError("Cannot propagate identifiers without a service context.")
@@ -229,6 +337,18 @@ class PublicTransportCustomerStrategyBehaviour(
         return result
 
     def message_matches_service(self, content, context=None):
+        """
+        Validate that a message belongs to the active PublicTransport service.
+
+        Service ID, modality, and user ID must match the customer context.
+
+        When a current candidate or boarded transport is established, the incoming
+        ``transport_id`` must also identify that same vehicle.
+
+        Returns:
+            bool: True when the message belongs to the expected service and
+            transport context.
+        """
         context = context or self.get_service_context()
         if context is None or not isinstance(content, dict):
             return False
@@ -258,6 +378,26 @@ class PublicTransportCustomerStrategyBehaviour(
         transport_id,
         boarding_key=None,
     ):
+        """
+        Mirror one PublicTransport boarding assignment without emitting an event.
+
+        A single logical service may board several vehicles during transfers.
+
+        ``boarding_key`` identifies one journey boarding independently from the
+        vehicle JID. Repeated processing of the same key is ignored, while a new
+        boarding may append another vehicle to ``transport_ids`` and update the
+        current ``transport_id``.
+
+        The public ``service_assigned`` event is emitted by the vehicle that
+        accepts that boarding.
+
+        Args:
+            transport_id: Accepted PublicTransport vehicle JID.
+            boarding_key: Optional boarding-specific correlation key.
+
+        Returns:
+            bool: True when a new local boarding assignment was recorded.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -292,6 +432,22 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def clear_candidate_transport(self, transport_id=None):
+        """
+        Clear the current PublicTransport boarding candidate without terminating
+        the complete service.
+
+        This is used after boarding refusal or invalid candidate state so the
+        customer may continue waiting for another compatible vehicle on the same
+        journey leg.
+
+        Historical ``transport_ids`` and boarding assignments remain untouched.
+
+        Args:
+            transport_id: Optional expected candidate vehicle JID.
+
+        Returns:
+            bool: True when the current candidate transport was cleared.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -303,6 +459,19 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def mark_service_started(self, transport_id=None):
+        """
+        Mirror PublicTransport service-start state without emitting an event.
+
+        The helper remains available for custom strategies. The current
+        PublicTransport customer FSM normally owns the public start milestone
+        through ``start_service()`` after its first accepted boarding.
+
+        Args:
+            transport_id: Optional active PublicTransport vehicle JID.
+
+        Returns:
+            bool: True when local start state can be established.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -321,6 +490,18 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def assign_service(self, transport_id, extra_details=None):
+        """
+        Emit a single customer-owned ``service_assigned`` event.
+
+        This generic helper is retained for compatibility or custom strategies.
+
+        The current PublicTransport customer FSM does not normally use it because
+        each accepted boarding is publicly assigned by the corresponding vehicle
+        and mirrored locally through ``mark_service_assigned()``.
+
+        Returns:
+            bool: True when assignment was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -341,6 +522,24 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def start_service(self, transport_id=None, extra_details=None):
+        """
+        Mark the door-to-door PublicTransport service started and emit
+        ``service_started`` exactly once.
+
+        The current customer FSM calls this after an accepted boarding.
+
+        For journeys containing transfers, later accepted boardings call the same
+        helper again but no additional ``service_started`` event is emitted because
+        the service is already marked started.
+
+        Args:
+            transport_id: Vehicle associated with the accepted boarding.
+            extra_details (dict | None): Pattern, route, mode, stop, and leg
+                metadata.
+
+        Returns:
+            bool: True only when the service start was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -361,6 +560,21 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def complete_service(self, extra_details=None):
+        """
+        Emit the successful terminal event for the complete PublicTransport
+        door-to-door journey.
+
+        Completion is allowed only after the service has started.
+
+        The current customer FSM emits this after every selected journey leg,
+        including any final walking leg, has been completed.
+
+        Args:
+            extra_details (dict | None): Optional final journey summary fields.
+
+        Returns:
+            bool: True when ``service_completed`` was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -383,6 +597,20 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def fail_service(self, failure_reason=None, extra_details=None):
+        """
+        Mark the complete PublicTransport journey failed and emit
+        ``service_failed``.
+
+        The canonical service remains singular even when the failure occurs after
+        one or more successful boardings or transfers.
+
+        Args:
+            failure_reason (str | None): Canonical terminal failure reason.
+            extra_details (dict | None): Additional diagnostic fields.
+
+        Returns:
+            bool: True when failure was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -405,6 +633,28 @@ class PublicTransportCustomerStrategyBehaviour(
         extra_details=None,
         require_service=True,
     ):
+        """
+        Register one PublicTransport customer movement for deferred metric
+        emission.
+
+        Customer-side movement represents walking journey legs.
+
+        Before the first successful boarding, walking is recorded as
+        ``phase="approach"``.
+
+        Once ``service_started`` has been emitted, subsequent transfer and final
+        walking legs are recorded as ``phase="service"``.
+
+        Walking movements additionally use ``movement_mode="walking"`` and normally
+        set ``transport_id=None``.
+
+        Returns:
+            bool: True when the movement was registered.
+
+        Raises:
+            ValueError: If phase or distance violates the canonical movement
+                contract.
+        """
         if phase not in self._METRICS_MOVEMENT_PHASES:
             raise ValueError("Invalid metrics movement phase: {}".format(phase))
         if (
@@ -451,6 +701,13 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def complete_pending_movement(self):
+        """
+        Emit the pending PublicTransport customer movement as
+        ``movement_completed``.
+
+        Returns:
+            bool: True when one pending movement existed and was emitted.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -474,6 +731,13 @@ class PublicTransportCustomerStrategyBehaviour(
         return True
 
     def discard_pending_movement(self):
+        """
+        Discard an incomplete PublicTransport customer movement without emitting a
+        movement metric.
+
+        Returns:
+            bool: True when one pending movement existed.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -494,7 +758,12 @@ class PublicTransportCustomerStrategyBehaviour(
     async def on_start(
         self
     ):
+        """
+        Log entry into one concrete PublicTransport customer FSM state.
 
+        Generic FSM lifecycle instrumentation belongs to
+        FSMPublicTransportCustomerStrategyBehaviour.
+        """
         logger.debug(
             "Strategy {} started in public transport customer {}".format(
                 type(self).__name__,
@@ -506,7 +775,15 @@ class PublicTransportCustomerStrategyBehaviour(
         self,
         stop
     ):
+        """
+        Return the logical PublicTransport stop identifier from a stop descriptor.
 
+        Args:
+            stop (dict | None): Journey stop descriptor.
+
+        Returns:
+            object | None: Stop identifier.
+        """
         if stop is None:
             return None
 
@@ -518,7 +795,15 @@ class PublicTransportCustomerStrategyBehaviour(
         self,
         stop
     ):
+        """
+        Return the XMPP JID of a PublicTransport stop descriptor.
 
+        Args:
+            stop (dict | None): Journey stop descriptor.
+
+        Returns:
+            object | None: Stop JID.
+        """
         if stop is None:
             return None
 
@@ -531,12 +816,24 @@ class PublicTransportCustomerStrategyBehaviour(
         journeys=None
     ):
         """
-        Selects a journey using the baseline
-        lexicographic rule:
+        Select one feasible journey with the baseline lexicographic policy.
 
-        1. fewer public transport transfers
-        2. less walking distance
-        3. fewer public transport stops
+        Candidates are ordered by:
+
+        1. fewer PublicTransport transfers;
+        2. less total walking distance;
+        3. fewer PublicTransport stops.
+
+        This is a lexicographic preference, not a weighted cost function. A
+        journey with fewer transfers therefore wins before walking distance is
+        considered.
+
+        Args:
+            journeys (list | None): Candidate journeys. When omitted, candidates
+                stored by the customer are used.
+
+        Returns:
+            dict | None: Selected journey or None when no candidate exists.
         """
 
         if journeys is None:
@@ -572,7 +869,23 @@ class PublicTransportCustomerStrategyBehaviour(
         self,
         fleetmanager_id
     ):
+        """
+        Request PublicTransport journey candidates from one FleetManager.
 
+        A valid request requires current customer origin and final destination.
+
+        The first successfully prepared journey request creates the canonical
+        ``service_id`` and emits ``service_requested``.
+
+        The request carries walking constraints, maximum transfers, and canonical
+        service identifiers through REQUEST_PROTOCOL / REQUEST_PERFORMATIVE.
+
+        Args:
+            fleetmanager_id: PublicTransport FleetManager JID.
+
+        Returns:
+            bool: True when the journey request was sent.
+        """
         if fleetmanager_id is None:
             return False
 
@@ -672,7 +985,24 @@ class PublicTransportCustomerStrategyBehaviour(
         pattern_id,
         destination_stop
     ):
+        """
+        Request admission to the queue for one directional PublicTransport Pattern
+        at a stop.
 
+        The queue request is operational stop infrastructure rather than a
+        canonical service lifecycle event.
+
+        It identifies the directional ``pattern_id`` and the customer's intended
+        destination stop through REQUEST_PROTOCOL / REQUEST_PERFORMATIVE.
+
+        Args:
+            stop: Origin-stop descriptor.
+            pattern_id: Directional PublicTransport Pattern.
+            destination_stop: Logical destination-stop identifier.
+
+        Returns:
+            bool: True when the queue request was sent.
+        """
         stop_jid = (
             self.get_stop_jid(
                 stop
@@ -756,7 +1086,19 @@ class PublicTransportCustomerStrategyBehaviour(
         stop,
         pattern_id
     ):
+        """
+        Cancel the customer's queue registration for one PublicTransport Pattern.
 
+        REQUEST_PROTOCOL / CANCEL_PERFORMATIVE is sent directly to the stop using
+        the directional ``pattern_id`` as service name.
+
+        Args:
+            stop: Stop descriptor.
+            pattern_id: Pattern whose queue registration must be cancelled.
+
+        Returns:
+            bool: True when the cancellation request was sent.
+        """
         stop_jid = (
             self.get_stop_jid(
                 stop
@@ -803,7 +1145,26 @@ class PublicTransportCustomerStrategyBehaviour(
         vehicle_id,
         leg
     ):
+        """
+        Request boarding of one compatible PublicTransport vehicle.
 
+        The current journey leg supplies Pattern, origin stop, destination stop,
+        route metadata, and leg index.
+
+        A deterministic ``boarding_key`` is built from leg index, Pattern, origin
+        stop, and destination stop so repeated processing of the same boarding can
+        be distinguished from later transfers under the same ``service_id``.
+
+        The candidate vehicle becomes the current ``transport_id`` in the service
+        context before REQUEST_PROTOCOL / REQUEST_PERFORMATIVE is sent.
+
+        Args:
+            vehicle_id: Candidate PublicTransport vehicle JID.
+            leg (dict): Current PublicTransport journey leg.
+
+        Returns:
+            bool: True when the boarding request was sent.
+        """
         if (
             vehicle_id is None
             or leg is None
@@ -920,7 +1281,13 @@ class PublicTransportCustomerStrategyBehaviour(
     async def run(
         self
     ):
+        """
+        Execute the concrete PublicTransport customer FSM state.
 
+        Raises:
+            NotImplementedError: When a concrete state does not implement
+                execution.
+        """
         raise NotImplementedError
 
 
@@ -935,14 +1302,27 @@ class PublicTransportCustomerWaitingToMoveState(
     PublicTransportCustomerStrategyBehaviour
 ):
     """
-    Main dispatcher state for the Public Transport customer.
+    Dispatch PublicTransport journey planning and execution.
 
-    Responsibilities:
+    Before a journey has been selected, this state discovers PublicTransport
+    FleetManagers and asks every known manager for journey candidates.
 
-    - Discover Public Transport FleetManagers.
-    - Request journey candidates when no journey exists.
-    - Inspect the current journey leg.
-    - Route execution to walking, stop waiting or final state.
+    FleetManager discovery is operational bootstrap and does not itself create
+    the canonical service. ``service_requested`` is emitted only when at least
+    one journey request can actually be sent.
+
+    After a journey has been selected, the state becomes the central
+    leg dispatcher:
+
+    - a walking leg enters ``CUSTOMER_MOVING_TO_DEST``;
+    - a PublicTransport leg enters ``CUSTOMER_IN_STOP``;
+    - a finished journey enters terminal ``CUSTOMER_IN_DEST``.
+
+    The selected journey remains the runtime source of truth and
+    ``current_leg_index`` determines which leg is dispatched next.
+
+    Unsupported leg types are currently treated as retryable configuration
+    errors: the customer remains on the same leg and retries this dispatcher.
     """
 
     async def on_start(
@@ -958,7 +1338,29 @@ class PublicTransportCustomerWaitingToMoveState(
     async def run(
         self
     ):
+        """
+        Plan a journey when necessary or dispatch the current journey leg.
 
+        Without a selected journey, the customer first discovers PublicTransport
+        FleetManagers. Absence of FleetManagers is retryable and does not create
+        ``service_requested``.
+
+        Once FleetManagers exist, journey requests are sent to every known manager.
+        If none can be sent, execution retries later in
+        ``CUSTOMER_WAITING_TO_MOVE``.
+
+        At least one successfully sent request advances to
+        ``CUSTOMER_WAITING_FOR_JOURNEY``.
+
+        With an existing journey:
+
+        - a finished journey enters ``CUSTOMER_IN_DEST``;
+        - a walking leg enters ``CUSTOMER_MOVING_TO_DEST``;
+        - a PublicTransport leg enters ``CUSTOMER_IN_STOP``.
+
+        Unsupported leg types are logged and retried without advancing
+        ``current_leg_index``.
+        """
         #
         # No journey has been selected yet.
         #
@@ -1151,7 +1553,23 @@ class PublicTransportCustomerWaitingToMoveState(
 class PublicTransportCustomerWaitingForJourneyState(
     PublicTransportCustomerStrategyBehaviour
 ):
+    """
+    Collect PublicTransport journey responses and select one feasible journey.
 
+    The customer expects up to one response from every currently known
+    FleetManager but uses a bounded receive window. Missing responses do not
+    prevent selection when other FleetManagers already supplied viable
+    journeys.
+
+    Valid journey lists are combined into one candidate collection and the
+    baseline lexicographic selection policy chooses the preferred journey.
+
+    Once selected, that journey becomes the customer's runtime source of truth
+    and execution returns to ``CUSTOMER_WAITING_TO_MOVE`` for leg dispatch.
+
+    If no feasible journey is available, execution enters terminal
+    ``CUSTOMER_JOURNEY_FAILED``.
+    """
     async def on_start(self):
 
         await super().on_start()
@@ -1161,7 +1579,27 @@ class PublicTransportCustomerWaitingForJourneyState(
         )
 
     async def run(self):
+        """
+        Collect journey proposals from known PublicTransport FleetManagers.
 
+        If FleetManagers disappeared before response collection begins, execution
+        returns to ``CUSTOMER_WAITING_TO_MOVE`` so normal discovery can run again.
+
+        Up to one response per expected FleetManager is collected within the
+        receive window. REQUEST_PROTOCOL / INFORM_PERFORMATIVE messages containing
+        ``request_type="public_transport_journeys"`` contribute their journey
+        lists.
+
+        A timeout ends collection but does not invalidate journeys already
+        received.
+
+        All returned journeys are stored as candidates and passed to
+        ``select_journey()``.
+
+        No selected journey enters ``CUSTOMER_JOURNEY_FAILED``. A successful
+        selection resets journey execution state through ``set_journey()`` and
+        returns to ``CUSTOMER_WAITING_TO_MOVE``.
+        """
         fleetmanagers = (
             self.agent.get_fleetmanagers()
         )
@@ -1340,12 +1778,21 @@ class PublicTransportCustomerJourneyFailedState(
     PublicTransportCustomerStrategyBehaviour
 ):
     """
-    Final state for a Customer whose requested
-    journey could not be completed.
+    Terminal unsuccessful state for PublicTransport journey planning.
 
-    No next state is configured.
-    Therefore the Public Transport Customer
-    FSM finishes here.
+    This state is entered when journey collection produces no feasible
+    candidate.
+
+    On entry, any pending customer movement is discarded and the complete
+    logical service emits ``service_failed`` with
+    ``failure_reason="no_feasible_journey"``.
+
+    The current position and leg index are retained in the failure event for
+    diagnostics.
+
+    ``run()`` clears transient vehicle, Pattern, and pedestrian state and does
+    not select another FSM state, allowing this PublicTransport strategy
+    execution to terminate naturally.
     """
 
     async def on_start(self):
@@ -1376,7 +1823,12 @@ class PublicTransportCustomerJourneyFailedState(
         )
 
     async def run(self):
+        """
+        Clear transient PublicTransport execution state and terminate this failed
+        FSM path.
 
+        No next state is selected.
+        """
         self.agent.clear_current_vehicle()
 
         self.agent.clear_waiting_pattern_id()
@@ -1396,18 +1848,27 @@ class PublicTransportCustomerMovingToDestState(
     PublicTransportCustomerStrategyBehaviour
 ):
     """
-    Executes a walking leg of a multimodal journey.
+    Execute and monitor one walking leg of the selected PublicTransport
+    journey.
 
-    The same state is used for:
+    The same state handles:
 
-    - access walking:
-        Customer -> Public Transport Stop
+    - access walking from the customer origin to the first stop;
+    - transfer walking between PublicTransport stops;
+    - final walking from the last stop to the door-to-door destination.
 
-    - transfer walking:
-        Public Transport Stop -> Public Transport Stop
+    Walking before the first accepted boarding is recorded as
+    ``phase="approach"``.
 
-    - final walking:
-        Public Transport Stop -> final destination
+    Once the PublicTransport service has started, transfer and final walking
+    are recorded as ``phase="service"``.
+
+    Every walking movement uses ``movement_mode="walking"`` and explicitly
+    clears ``transport_id`` because the customer is not inside a
+    PublicTransport vehicle during that movement.
+
+    Successful completion advances the current journey leg and returns to
+    ``CUSTOMER_WAITING_TO_MOVE`` for dispatch of the next leg.
     """
 
     async def on_start(
@@ -1425,8 +1886,20 @@ class PublicTransportCustomerMovingToDestState(
         leg
     ):
         """
-        Completes the current walking leg and updates
-        the logical Stop state when appropriate.
+        Finalize one logical walking leg after physical movement completes.
+
+        When the leg ends at a PublicTransport stop, that stop becomes the
+        customer's current logical stop. This applies to access and transfer
+        walking.
+
+        When no destination-stop descriptor exists, the leg is treated as final
+        walking and the current stop is cleared.
+
+        Temporary ``pedestrian_dest`` state is then cleared and
+        ``current_leg_index`` advances exactly once.
+
+        Args:
+            leg (dict): Completed walking journey leg.
         """
 
         destination_stop = (
@@ -1483,7 +1956,32 @@ class PublicTransportCustomerMovingToDestState(
     async def run(
         self
     ):
+        """
+        Execute or continue the current PublicTransport walking leg.
 
+        Missing or non-walking current legs return control to the central
+        dispatcher without advancing the journey.
+
+        A walking leg requires a physical destination and an active canonical
+        service context.
+
+        Its metric phase is selected dynamically:
+
+        - ``approach`` before the service has started;
+        - ``service`` after the first successful boarding.
+
+        Physical movement is correlated through one pending movement carrying
+        ``movement_mode="walking"``, ``leg_index``, and ``transport_id=None``.
+
+        Already being at the target produces an explicit zero-distance movement
+        when necessary, finalizes the walking leg, and returns to the dispatcher.
+
+        Active movement remains in ``CUSTOMER_MOVING_TO_DEST``.
+
+        PathRequestException is currently treated as retryable: the incomplete
+        movement is discarded, the customer waits briefly, and the same walking
+        leg is attempted again.
+        """
         leg = (
             self.agent.get_current_leg()
         )
@@ -1687,7 +2185,33 @@ class PublicTransportCustomerMovingToDestState(
 class PublicTransportCustomerInStopState(
     PublicTransportCustomerStrategyBehaviour
 ):
+    """
+    Request queue admission for the current PublicTransport leg.
 
+    The current journey leg must define a directional Pattern, an origin stop,
+    and a destination stop.
+
+    ``current_stop`` may legitimately be unset when the journey begins directly
+    at a stop. In that case the stop infrastructure performs the physical
+    proximity validation. A different explicitly known current stop is treated
+    as inconsistent journey state.
+
+    Queue registration is operational stop infrastructure and is correlated by
+    stop JID, Pattern, and destination stop rather than by canonical
+    ``service_id``.
+
+    After sending the queue request, the customer waits for one station reply.
+
+    A valid ACCEPT establishes the logical current stop and waiting Pattern and
+    advances to ``CUSTOMER_WAITING``.
+
+    REFUSE, malformed responses, request failures, and queue-confirmation
+    timeouts are retryable and remain in ``CUSTOMER_IN_STOP``.
+
+    On timeout or an invalid response after a queue request, the customer
+    cancels the queue entry before retrying because the stop queue does not
+    guarantee duplicate suppression.
+    """
     async def on_start(self):
 
         await super().on_start()
@@ -1697,14 +2221,47 @@ class PublicTransportCustomerInStopState(
         )
 
     def _bare_jid(self, jid):
+        """
+        Normalize a JID to its bare form for stop-response correlation.
 
+        Args:
+            jid: SPADE/Jabber identifier.
+
+        Returns:
+            str | None: Bare JID or None.
+        """
         if jid is None:
             return None
 
         return str(jid).split("/")[0]
 
     async def run(self):
+        """
+        Validate the current PublicTransport leg and request queue admission.
 
+        Missing or non-PublicTransport legs return control to the journey
+        dispatcher.
+
+        Invalid Pattern or stop metadata likewise returns to
+        ``CUSTOMER_WAITING_TO_MOVE``.
+
+        A queue request is sent to the exact origin-stop JID for the directional
+        Pattern and intended destination stop.
+
+        Failure to send the request is retryable.
+
+        After a successful request, the customer waits up to the current queue
+        confirmation window for the station response.
+
+        Timeout, malformed payload, wrong sender, or unsupported response triggers
+        queue cancellation before retry whenever an entry may already have been
+        created.
+
+        A valid ACCEPT records the logical current stop and waiting Pattern and
+        enters ``CUSTOMER_WAITING``.
+
+        A REFUSE leaves the journey and service open and retries stop admission.
+        """
         leg = self.agent.get_current_leg()
 
         if leg is None:
@@ -2049,16 +2606,26 @@ class PublicTransportCustomerWaitingState(
     PublicTransportCustomerStrategyBehaviour
 ):
     """
-    Waits reactively at a Public Transport Stop.
+    Wait reactively at a PublicTransport stop for a compatible vehicle.
 
-    The Customer is already registered in the queue
-    associated with the directional Pattern of the
-    current Public Transport leg.
+    The customer has already been accepted into the queue associated with the
+    current directional Pattern.
 
-    No polling is performed.
+    No polling of FleetManagers, stops, or vehicles is performed.
 
-    The Customer remains blocked until the Stop informs
-    that a compatible Vehicle is available.
+    The state waits for REQUEST_PROTOCOL / INFORM_PERFORMATIVE
+    ``public_transport_vehicle_available`` notifications sent by the exact
+    origin stop.
+
+    A notification is accepted only when stop and Pattern match the current
+    journey leg and a concrete ``vehicle_id`` is supplied.
+
+    The customer then sends a boarding request directly to that vehicle and
+    stores it as the current provisional vehicle before entering
+    ``CUSTOMER_WAITING_FOR_APPROVAL``.
+
+    Unrelated, malformed, stale, or incompatible availability notifications are
+    ignored while the customer remains reactively queued.
     """
 
     async def on_start(
@@ -2074,7 +2641,29 @@ class PublicTransportCustomerWaitingState(
     async def run(
         self
     ):
+        """
+        Resolve one direct PublicTransport boarding request.
 
+        The state waits only for ACCEPT_PERFORMATIVE or REFUSE_PERFORMATIVE from the
+        currently selected candidate vehicle.
+
+        Boarding responses must match the active canonical service, vehicle,
+        directional Pattern, origin stop, and destination stop.
+
+        ACCEPT mirrors the vehicle-owned ``service_assigned`` milestone locally and
+        calls ``start_service()``.
+
+        The first successful boarding emits the unique customer-owned
+        ``service_started`` event. Later transfers reuse the same ``service_id``;
+        ``start_service()`` then remains idempotent and emits no second start.
+
+        After acceptance, the customer clears stop-queue execution state and enters
+        ``CUSTOMER_IN_TRANSPORT``.
+
+        REFUSE clears only the provisional vehicle and returns to
+        ``CUSTOMER_WAITING``. The customer remains in the same stop queue and may
+        board a later compatible vehicle without creating a new service.
+        """
         leg = (
             self.agent.get_current_leg()
         )
@@ -2408,7 +2997,29 @@ class PublicTransportCustomerWaitingState(
 class PublicTransportCustomerWaitingForApprovalState(
     PublicTransportCustomerStrategyBehaviour
 ):
+    """
+    Resolve one direct PublicTransport boarding request.
 
+    The state waits only for ACCEPT_PERFORMATIVE or REFUSE_PERFORMATIVE from the
+    currently selected candidate vehicle.
+
+    Boarding responses must match the active canonical service, vehicle,
+    directional Pattern, origin stop, and destination stop.
+
+    ACCEPT mirrors the vehicle-owned ``service_assigned`` milestone locally and
+    calls ``start_service()``.
+
+    The first successful boarding emits the unique customer-owned
+    ``service_started`` event. Later transfers reuse the same ``service_id``;
+    ``start_service()`` then remains idempotent and emits no second start.
+
+    After acceptance, the customer clears stop-queue execution state and enters
+    ``CUSTOMER_IN_TRANSPORT``.
+
+    REFUSE clears only the provisional vehicle and returns to
+    ``CUSTOMER_WAITING``. The customer remains in the same stop queue and may
+    board a later compatible vehicle without creating a new service.
+    """
     async def on_start(self):
         await super().on_start()
 
@@ -2417,13 +3028,43 @@ class PublicTransportCustomerWaitingForApprovalState(
         )
 
     def _bare_jid(self, jid):
+        """
+        Normalize a JID for candidate-vehicle response correlation.
+
+        Returns:
+            str | None: Bare JID or None.
+        """
         if jid is None:
             return None
 
         return str(jid).split("/")[0]
 
     async def run(self):
+        """
+        Process acceptance or refusal from the provisional PublicTransport vehicle.
 
+        Missing or incompatible journey state abandons the provisional vehicle and
+        returns to normal journey or stop waiting.
+
+        The state reacts only to REQUEST_PROTOCOL messages from the exact candidate
+        vehicle carrying ACCEPT_PERFORMATIVE or REFUSE_PERFORMATIVE.
+
+        A valid payload must identify ``public_transport_board`` and match the
+        canonical service, Pattern, origin stop, and destination stop.
+
+        ACCEPT mirrors the boarding assignment using the returned
+        ``boarding_key`` and invokes ``start_service()``.
+
+        ``start_service()`` may legitimately return False on later transfers
+        because the door-to-door service has already started; this does not make
+        the new boarding invalid.
+
+        The stop and waiting-Pattern markers are cleared after successful boarding
+        and execution advances to ``CUSTOMER_IN_TRANSPORT``.
+
+        REFUSE clears only candidate transport state and returns to
+        ``CUSTOMER_WAITING`` for another vehicle.
+        """
         leg = self.agent.get_current_leg()
 
         if leg is None:
@@ -2679,7 +3320,32 @@ class PublicTransportCustomerWaitingForApprovalState(
 class PublicTransportCustomerInTransportState(
     PublicTransportCustomerStrategyBehaviour
 ):
+    """
+    Track one accepted PublicTransport vehicle leg until the requested
+    alighting stop is reached.
 
+    The current vehicle, Pattern, origin stop, and destination stop are derived
+    from the selected journey leg.
+
+    The customer waits reactively for
+    ``public_transport_arrival`` from the exact boarded vehicle.
+
+    Arrival messages must match the active canonical service and additionally
+    identify the expected vehicle, Pattern, and destination stop.
+
+    On valid arrival, the customer's physical position is synchronized with
+    the destination-stop position when available.
+
+    The destination stop becomes the new logical current stop, provisional
+    vehicle and waiting-Pattern state are cleared, and the completed
+    PublicTransport leg advances exactly once.
+
+    Execution then returns to ``CUSTOMER_WAITING_TO_MOVE`` so the next walking,
+    transfer, PublicTransport, or terminal leg can be dispatched.
+
+    Vehicle arrival does not emit ``service_completed`` because the complete
+    door-to-door Journey may still contain additional legs.
+    """
     async def on_start(self):
         await super().on_start()
 
@@ -2688,13 +3354,38 @@ class PublicTransportCustomerInTransportState(
         )
 
     def _bare_jid(self, jid):
+        """
+        Normalize a JID for boarded-vehicle message correlation.
+
+        Returns:
+            str | None: Bare JID or None.
+        """
         if jid is None:
             return None
 
         return str(jid).split("/")[0]
 
     async def run(self):
+        """
+        Wait for arrival at the destination stop of the current PublicTransport leg.
 
+        Missing or inconsistent journey/vehicle state returns control to the
+        central journey dispatcher.
+
+        The state accepts only REQUEST_PROTOCOL / INFORM_PERFORMATIVE messages from
+        the exact boarded vehicle.
+
+        A valid message must contain ``public_transport_arrival``, match the
+        canonical service, identify the expected vehicle and Pattern, and report
+        the current leg's destination stop.
+
+        On arrival, the customer position is synchronized with the destination-stop
+        coordinates when available.
+
+        The destination stop is stored as the new logical current stop, vehicle and
+        waiting-Pattern execution state are cleared, ``current_leg_index`` advances
+        once, and execution returns to ``CUSTOMER_WAITING_TO_MOVE``.
+        """
         leg = self.agent.get_current_leg()
 
         if leg is None:
@@ -2936,12 +3627,24 @@ class PublicTransportCustomerInDestState(
     PublicTransportCustomerStrategyBehaviour
 ):
     """
-    Final state for a successfully completed
-    Public Transport journey.
+    Terminal successful state of the complete PublicTransport door-to-door
+    Journey.
 
-    No next state is configured.
-    Therefore the Public Transport Customer
-    FSM finishes here.
+    This state is reached only after the central dispatcher determines that all
+    selected journey legs have been consumed.
+
+    On entry, any residual customer pending movement is completed
+    defensively.
+
+    The customer then emits the unique public ``service_completed`` event with
+    final journey summary metadata including transfers, walking distance,
+    PublicTransport stops, and total leg count.
+
+    Vehicle execution state, waiting Pattern, pedestrian destination, and the
+    terminal service context are cleared in ``run()``.
+
+    No next state is selected, allowing the PublicTransport FSM to terminate
+    naturally and invoke modal-completion orchestration.
     """
 
     async def on_start(self):
@@ -2978,7 +3681,13 @@ class PublicTransportCustomerInDestState(
         )
 
     async def run(self):
+        """
+        Clear residual PublicTransport execution state and terminate the successful
+        FSM path.
 
+        The canonical service context is cleared only after terminal processing has
+        occurred.
+        """
         self.agent.clear_current_vehicle()
 
         self.agent.clear_waiting_pattern_id()
@@ -2994,13 +3703,48 @@ class FSMPublicTransportCustomerStrategyBehaviour(
     FSMSimfleetBehaviour
 ):
     """
-    Finite-state strategy for multimodal Public Transport
-    customers.
+    Finite-state customer strategy for door-to-door PublicTransport journeys.
+
+    The FSM coordinates nine states covering:
+
+    - FleetManager discovery and journey planning;
+    - walking access, transfer, and final walking legs;
+    - stop-queue admission;
+    - reactive waiting for compatible vehicles;
+    - boarding negotiation;
+    - active PublicTransport travel;
+    - successful and failed terminal outcomes.
+
+    One persistent ``service_id`` spans the complete Journey even when several
+    vehicles and transfers are used.
+
+    Public ``service_assigned`` may occur once per accepted boarding and is
+    emitted by the corresponding vehicle.
+
+    The customer emits ``service_started`` only for the first successful
+    boarding, and owns the unique ``service_completed`` or ``service_failed``
+    terminal for the complete door-to-door Journey.
+
+    Successful and failed terminal states have no active outgoing transition in
+    the current implementation. Normal FSM termination invokes
+    ``notify_modal_completion()`` after generic strategy-end instrumentation.
+
+    MultiModalCustomerAgent uses that notification together with customer
+    status to distinguish successful modal completion from fatal modal failure.
+
+    Generic FSM lifecycle instrumentation is inherited from
+    FSMSimfleetBehaviour.
     """
 
     async def on_end(self):
         """
-        Finalize the PublicTransport strategy and notify customer orchestration.
+        Finalize the PublicTransport customer FSM and notify modal orchestration.
+
+        Generic FSM end instrumentation runs first.
+
+        The modal-completion hook is then triggered so MultiModalCustomerAgent may
+        inspect the terminal customer status and either continue the itinerary
+        after success or stop it after modal failure.
         """
         await super().on_end()
         self.agent.notify_modal_completion()
@@ -3008,7 +3752,9 @@ class FSMPublicTransportCustomerStrategyBehaviour(
     def setup(
         self
     ):
-
+        """
+        Register PublicTransport customer states and permitted transitions.
+        """
         #
         # States
         #

@@ -40,7 +40,34 @@ from simfleet.utils.status import (
 # ==================================================================
 
 class StationSharingCustomerStrategyBehaviour(State):
+    """
+    Base SPADE State shared by the StationSharing customer FSM.
 
+    The customer owns the door-to-door lifecycle of one station-based shared
+    mobility service identified by ``service_id``.
+
+    The lifecycle coordinates three physical segments:
+
+    - pedestrian approach from the customer origin to an origin station;
+    - shared-vehicle movement between origin and destination stations;
+    - pedestrian movement from the destination station to the customer's final
+      destination.
+
+    The customer creates ``service_id`` and owns public
+    ``service_requested``, ``service_assigned``, ``service_completed``, and
+    ``service_failed`` events. It also emits the pedestrian movement metrics.
+
+    The selected StationSharing transport owns public ``service_started`` and
+    the vehicle-service movement while mirroring assignment and terminal
+    outcome locally.
+
+    Station selection and station-operation failures are maintained separately
+    from the canonical service context so pick and drop failures can be
+    represented explicitly at terminal processing.
+
+    This class is an FSM State helper. State registration and transitions
+    belong to FSMStationSharingCustomerStrategyBehaviour.
+    """
 
     METRICS_MODALITY = "station_sharing"
     _METRICS_SERVICE_CONTEXT_ATTR = "_metrics_service_context"
@@ -48,6 +75,16 @@ class StationSharingCustomerStrategyBehaviour(State):
     _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
 
     def _metrics_modality(self):
+        """
+        Return the canonical StationSharing modality.
+
+        Returns:
+            str: ``"station_sharing"``.
+
+        Raises:
+            ValueError: If a concrete strategy does not define
+                ``METRICS_MODALITY``.
+        """
         modality = self.METRICS_MODALITY
         if modality is None:
             raise ValueError(
@@ -56,6 +93,12 @@ class StationSharingCustomerStrategyBehaviour(State):
         return modality
 
     def get_service_context(self):
+        """
+        Return the active canonical StationSharing service context.
+
+        Returns:
+            dict | None: Current schema-1.0 service context.
+        """
         return getattr(
             self.agent,
             self._METRICS_SERVICE_CONTEXT_ATTR,
@@ -71,6 +114,28 @@ class StationSharingCustomerStrategyBehaviour(State):
         destination=None,
         emit_requested=False,
     ):
+        """
+        Create and store one canonical StationSharing service context.
+
+        The customer normally creates a new ``service_id`` and emits
+        ``service_requested`` when its StationSharing FSM first enters service
+        discovery.
+
+        The context persists through FleetManager discovery, station selection,
+        walking approach, vehicle assignment, station-to-station travel, and the
+        final pedestrian leg.
+
+        Args:
+            service_id: Optional existing logical service identifier.
+            user_id: StationSharing customer JID.
+            transport_id: Optional assigned shared-vehicle JID.
+            origin: Door-to-door customer origin.
+            destination: Door-to-door final destination.
+            emit_requested (bool): Whether to emit ``service_requested``.
+
+        Returns:
+            dict | None: Created or reusable service context.
+        """
         current = self.get_service_context()
         if current is not None:
             requested_id = str(service_id) if service_id is not None else None
@@ -146,6 +211,18 @@ class StationSharingCustomerStrategyBehaviour(State):
         return context
 
     def get_or_create_service_context(self, **kwargs):
+        """
+        Return the matching StationSharing service context or create one.
+
+        An existing service may be reused only when an explicitly supplied
+        ``service_id`` matches the current logical request.
+
+        Args:
+            **kwargs: Arguments forwarded to ``create_service_context()``.
+
+        Returns:
+            dict | None: Matching or newly created context.
+        """
         context = self.get_service_context()
         service_id = kwargs.get("service_id")
         if context is not None:
@@ -165,6 +242,15 @@ class StationSharingCustomerStrategyBehaviour(State):
         return self.create_service_context(**kwargs)
 
     def clear_service_context(self):
+        """
+        Clear a terminal StationSharing service context when no movement remains.
+
+        Unfinished services and contexts still owning pending movement are
+        deliberately retained.
+
+        Returns:
+            bool: True when no service context remains.
+        """
         context = self.get_service_context()
         if context is None:
             return True
@@ -193,6 +279,12 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def _service_event_details(self, context=None):
+        """
+        Build canonical identifiers shared by StationSharing service events.
+
+        Returns:
+            dict | None: Modality, service, user, and transport identifiers.
+        """
         context = context or self.get_service_context()
         if context is None:
             return None
@@ -209,6 +301,20 @@ class StationSharingCustomerStrategyBehaviour(State):
         context=None,
         transport_id=None,
     ):
+        """
+        Add canonical StationSharing identifiers to a copied outgoing payload.
+
+        Args:
+            content (dict | None): Existing payload.
+            context (dict | None): Service context.
+            transport_id: Optional assigned shared-vehicle identifier.
+
+        Returns:
+            dict: Payload extended with canonical identifiers.
+
+        Raises:
+            ValueError: If no service context is available.
+        """
         context = context or self.get_service_context()
         if context is None:
             raise ValueError("Cannot propagate identifiers without a service context.")
@@ -219,6 +325,15 @@ class StationSharingCustomerStrategyBehaviour(State):
         return result
 
     def message_matches_service(self, content, context=None):
+        """
+        Validate that a message belongs to the active StationSharing service.
+
+        Service ID, modality, user identity, and any already assigned transport
+        identifier must match the local context.
+
+        Returns:
+            bool: True when the message belongs to the expected service.
+        """
         context = context or self.get_service_context()
         if context is None or not isinstance(content, dict):
             return False
@@ -244,6 +359,12 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def mark_service_assigned(self, transport_id):
+        """
+        Mirror StationSharing assignment without emitting a public event.
+
+        Returns:
+            bool: True when the local assignment is valid.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -257,6 +378,15 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def mark_service_started(self, transport_id=None):
+        """
+        Mirror transport-owned StationSharing service start locally.
+
+        The customer uses this after receiving service status from the assigned
+        shared vehicle. No duplicate ``service_started`` event is emitted.
+
+        Returns:
+            bool: True when the local service can be marked started.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -275,6 +405,21 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def assign_service(self, transport_id, extra_details=None):
+        """
+        Bind the vehicle supplied by the origin station and emit
+        ``service_assigned`` exactly once.
+
+        Assignment occurs only when the origin station reports the concrete
+        transport identifier. Station queue admission alone is not an assignment
+        milestone.
+
+        Args:
+            transport_id: Assigned StationSharing transport JID.
+            extra_details (dict | None): Additional canonical fields.
+
+        Returns:
+            bool: True when assignment was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -295,6 +440,17 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def start_service(self, transport_id=None, extra_details=None):
+        """
+        Mark StationSharing vehicle use as started and emit ``service_started``.
+
+        The helper remains available to custom strategies, although the current
+        customer FSM does not normally own this public milestone. The selected
+        transport emits ``service_started`` and the customer mirrors it through
+        ``mark_service_started()``.
+
+        Returns:
+            bool: True when service start was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -315,6 +471,16 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def complete_service(self, extra_details=None):
+        """
+        Mark the complete door-to-door StationSharing service successful and emit
+        ``service_completed``.
+
+        Completion requires the service to have started and occurs only after all
+        required post-vehicle pedestrian movement has also finished.
+
+        Returns:
+            bool: True when completion was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -337,6 +503,20 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def fail_service(self, failure_reason=None, extra_details=None):
+        """
+        Mark the StationSharing service failed and emit ``service_failed``.
+
+        Terminal processing may include additional station-operation information,
+        such as whether failure occurred while picking a vehicle or returning it
+        to a destination station.
+
+        Args:
+            failure_reason (str | None): Canonical failure reason.
+            extra_details (dict | None): Additional failure fields.
+
+        Returns:
+            bool: True when failure was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -359,6 +539,27 @@ class StationSharingCustomerStrategyBehaviour(State):
         extra_details=None,
         require_service=True,
     ):
+        """
+        Register one planned StationSharing customer movement for deferred metric
+        emission.
+
+        The current customer FSM uses:
+
+        - ``phase="approach"`` with ``movement_mode="walking"`` for travel from
+          the customer origin to the origin station;
+        - ``phase="service"`` with ``movement_mode="walking"`` for the final walk
+          from the destination station to the customer's door-to-door destination.
+
+        The station-to-station vehicle movement is emitted by the assigned
+        StationSharing transport.
+
+        Returns:
+            bool: True when the movement was registered.
+
+        Raises:
+            ValueError: If phase or distance violates the canonical movement
+                contract.
+        """
         if phase not in self._METRICS_MOVEMENT_PHASES:
             raise ValueError("Invalid metrics movement phase: {}".format(phase))
         if (
@@ -405,6 +606,13 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def complete_pending_movement(self):
+        """
+        Emit the pending StationSharing customer movement as
+        ``movement_completed``.
+
+        Returns:
+            bool: True when one pending movement existed and was emitted.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -428,6 +636,13 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def discard_pending_movement(self):
+        """
+        Discard an incomplete StationSharing customer movement without emitting a
+        metric.
+
+        Returns:
+            bool: True when one pending movement existed.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -446,6 +661,23 @@ class StationSharingCustomerStrategyBehaviour(State):
         return True
 
     def _service_message_content(self, content=None, transport_id=None):
+        """
+        Build a StationSharing message carrying canonical service identifiers.
+
+        Before vehicle assignment, transport ID may remain unset. After the origin
+        station supplies a concrete vehicle, ``transport_id`` correlates direct
+        customer-to-transport messages with that same service.
+
+        Args:
+            content (dict | None): Additional payload fields.
+            transport_id: Optional StationSharing transport JID.
+
+        Returns:
+            dict: Payload containing canonical service identifiers.
+
+        Raises:
+            ValueError: If no open service context exists.
+        """
         context = self.get_service_context()
         if context is None:
             raise ValueError(
@@ -459,11 +691,27 @@ class StationSharingCustomerStrategyBehaviour(State):
         return result
 
     def _message_sender_matches_transport(self, content, sender):
+        """
+        Verify that a StationSharing transport identifier matches the XMPP sender.
+
+        Returns:
+            bool: True when payload and sender identify the same bare JID.
+        """
         if not isinstance(content, dict) or content.get("transport_id") is None:
             return False
         return self.agent.bare_jid(content.get("transport_id")) == self.agent.bare_jid(sender)
 
     def _set_generic_trip_failure(self, reason):
+        """
+        Record a non-station-specific failure for terminal StationSharing handling.
+
+        The failure is stored on the customer agent and converted into the
+        canonical ``service_failed`` event when CUSTOMER_IN_DEST performs terminal
+        processing.
+
+        Args:
+            reason (str): Failure reason.
+        """
         self.agent.trip_failed = True
         self.agent.failure_operation = None
         self.agent.failure_reason = reason
@@ -471,6 +719,31 @@ class StationSharingCustomerStrategyBehaviour(State):
             self.agent.failure_station_id = None
 
     def _set_station_trip_failure(self, operation, station, reason):
+        """
+        Record a StationSharing pick or drop failure for terminal processing.
+
+        Supported operations are:
+
+        ``pick``
+            Failure while obtaining a vehicle from the origin station.
+
+        ``drop``
+            Failure while registering the vehicle at the destination station.
+
+        The selected station is retained so the terminal ``service_failed`` event
+        can include ``failure_operation`` and ``station_id``.
+
+        Args:
+            operation (str): ``"pick"`` or ``"drop"``.
+            station: Station descriptor or station JID.
+            reason (str): Operational failure reason.
+
+        Returns:
+            bool: True when station-specific failure information was stored.
+
+        Raises:
+            ValueError: If operation is neither ``pick`` nor ``drop``.
+        """
         if operation not in ("pick", "drop"):
             raise ValueError("Station-sharing failure operation must be pick or drop.")
         station_id = station.get("jid") if isinstance(station, dict) else station
@@ -498,7 +771,19 @@ class StationSharingCustomerStrategyBehaviour(State):
         )
 
     async def request_station_candidates(self):
+        """
+        Request feasible origin and destination stations from all known
+        StationSharing FleetManagers.
 
+        The query carries the open ``service_id``, current customer position,
+        final destination, and optional maximum walking distance.
+
+        FleetManagers are expected to return separate origin-station and
+        destination-station candidate collections.
+
+        Raises:
+            ValueError: If no StationSharing service context is open.
+        """
         fleetmanagers = (
             self.agent.get_fleetmanagers()
         )
@@ -560,16 +845,26 @@ class StationSharingCustomerStrategyBehaviour(State):
 
     def select_station_pair(self):
         """
-        Default baseline policy.
+        Select the baseline origin and destination StationSharing station pair.
 
-        Origin:
-            nearest feasible station to the customer.
+        Origin candidates must expose a position and at least one available
+        vehicle. Destination candidates must expose a position and at least one
+        available dock.
 
-        Destination:
-            nearest feasible station to the final destination.
+        The baseline policy selects independently:
 
-        This method is intentionally isolated so it can later be
-        replaced by inference, LLM reasoning or another policy.
+        - the feasible origin station nearest to the customer's current position;
+        - the feasible destination station nearest to the customer's final
+          destination.
+
+        It does not jointly optimize the complete origin-destination pair.
+
+        The method is intentionally isolated so alternative policies may replace
+        this baseline without changing the surrounding FSM.
+
+        Returns:
+            tuple: ``(origin_station, destination_station)`` or ``(None, None)``
+            when no feasible pair exists.
         """
 
         origin_candidates = (
@@ -636,7 +931,17 @@ class StationSharingCustomerStrategyBehaviour(State):
         )
 
     async def request_bike(self):
+        """
+        Request one shared vehicle from the selected origin station.
 
+        The request is sent directly to the origin station through
+        REQUEST_PROTOCOL / REQUEST_PERFORMATIVE and carries the open canonical
+        service identifiers.
+
+        Station admission or queue acceptance does not itself establish
+        ``service_assigned``. Assignment occurs only when the station later reports
+        the concrete transport identifier.
+        """
         station_id = (
             self.agent.get_origin_station_id()
         )
@@ -687,7 +992,24 @@ class StationSharingCustomerStrategyBehaviour(State):
         self,
         transport_id
     ):
+        """
+        Request the assigned StationSharing vehicle to begin the station-to-station
+        service leg.
 
+        The message supplies the customer identifier, origin-station position,
+        destination-station position, destination-station JID, and canonical
+        service identifiers.
+
+        The current protocol represents this direct customer-to-vehicle trip
+        request as REQUEST_PROTOCOL / PROPOSE_PERFORMATIVE.
+
+        Args:
+            transport_id: Vehicle JID supplied by the origin station.
+
+        Returns:
+            bool: True when the trip request was sent, or False when either
+            selected station is missing.
+        """
         destination_station = (
             self.agent.get_destination_station()
         )
@@ -769,7 +1091,31 @@ class StationSharingCustomerStrategyBehaviour(State):
 class StationSharingCustomerWaitingState(
     StationSharingCustomerStrategyBehaviour
 ):
+    """
+    Discover a feasible StationSharing station pair and start pedestrian
+    approach to the origin station.
 
+    Entering this state creates the canonical StationSharing service context
+    and emits ``service_requested`` before FleetManager discovery begins.
+
+    FleetManagers provide origin-station and destination-station candidates.
+    The customer selects an origin station with vehicle availability near its
+    current position and a destination station with dock availability near its
+    final destination.
+
+    Temporary absence of FleetManagers or a feasible station pair is not
+    terminal. The same ``service_id`` remains open while discovery is retried.
+
+    Once a pair is selected, pedestrian travel to the origin station is
+    registered as ``phase="approach"`` with
+    ``movement_mode="walking"``.
+
+    If the customer is already at the origin station, a zero-distance approach
+    movement is emitted immediately and vehicle acquisition begins.
+
+    Walking-route failures are stored as terminal trip failure and execution
+    advances to ``CUSTOMER_IN_DEST`` for canonical failure processing.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_WAITING
@@ -778,6 +1124,33 @@ class StationSharingCustomerWaitingState(
         )
 
     async def run(self):
+        """
+        Create or reuse the StationSharing service and resolve a feasible station
+        pair.
+
+        The canonical ``service_requested`` event is emitted before FleetManager
+        discovery.
+
+        When no FleetManager is available, discovery is retried after an
+        operational delay without replacing the open service context.
+
+        Station candidate responses are correlated with the active service and
+        merged by station JID.
+
+        If no feasible origin/destination pair can currently be selected,
+        candidates are cleared and the same service retries from
+        ``CUSTOMER_WAITING``.
+
+        A feasible pair starts pedestrian movement to the origin station and
+        registers pending ``phase="approach"`` /
+        ``movement_mode="walking"`` movement.
+
+        AlreadyInDestination completes a zero-distance approach and requests a
+        vehicle immediately.
+
+        Route or unexpected walking errors are recorded as trip failure and
+        deferred to terminal processing in ``CUSTOMER_IN_DEST``.
+        """
         if self.get_service_context() is None:
             context = self.create_service_context(
                 user_id=self.agent.jid,
@@ -925,13 +1298,43 @@ class StationSharingCustomerWaitingState(
 class StationSharingCustomerMovingToStationState(
     StationSharingCustomerStrategyBehaviour
 ):
+    """
+    Monitor pedestrian movement from the customer origin to the selected
+    StationSharing origin station.
 
+    Physical walking is performed by the customer movement infrastructure.
+
+    While movement remains incomplete, execution stays in
+    ``CUSTOMER_MOVING_TO_TRANSPORT``.
+
+    Confirmed arrival emits the pending ``phase="approach"`` walking movement,
+    requests one shared vehicle from the origin station, and advances to
+    ``CUSTOMER_IN_STATION``.
+
+    Physical arrival without a canonical pending approach movement is recorded
+    as terminal ``approach_movement_missing`` failure and deferred to
+    ``CUSTOMER_IN_DEST``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_MOVING_TO_TRANSPORT
         logger.debug("{} moving to sharing station".format(self.agent.jid))
 
     async def run(self):
+        """
+        Monitor walking approach until the origin station is reached.
+
+        Incomplete physical movement remains in
+        ``CUSTOMER_MOVING_TO_TRANSPORT`` after a one-second asynchronous wait.
+
+        Arrival requires the pending canonical approach movement to exist and be
+        emitted successfully.
+
+        The customer then requests a shared vehicle and enters
+        ``CUSTOMER_IN_STATION``.
+
+        Missing movement correlation is recorded as terminal trip failure.
+        """
         if not self.agent.is_in_destination():
             self.set_next_state(CUSTOMER_MOVING_TO_TRANSPORT)
             await self.agent.sleep(1)
@@ -955,13 +1358,55 @@ class StationSharingCustomerMovingToStationState(
 class StationSharingCustomerInStationState(
     StationSharingCustomerStrategyBehaviour
 ):
+    """
+    Wait at the origin station until a concrete shared vehicle is supplied.
 
+    Station admission and vehicle assignment are separate milestones.
+
+    ACCEPT_PERFORMATIVE means only that the customer's vehicle request has
+    been admitted or queued. It does not emit ``service_assigned``.
+
+    REFUSE_PERFORMATIVE represents an origin-station ``pick`` failure because
+    no usable vehicle can be supplied.
+
+    INFORM_PERFORMATIVE must provide the concrete ``transport_id``. Only then
+    does the customer emit ``service_assigned``, store the selected vehicle,
+    and send that vehicle the direct station-to-station trip request.
+
+    Successful assignment advances to ``CUSTOMER_IN_TRANSPORT``.
+
+    Invalid or incomplete vehicle-supply responses are treated as terminal
+    pick failures and processed later in ``CUSTOMER_IN_DEST``.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_IN_STATION
         logger.debug("{} waiting for a bike in sharing station".format(self.agent.jid))
 
     async def run(self):
+        """
+        Process origin-station admission, refusal, and concrete vehicle supply.
+
+        Missing origin-station identity is terminal.
+
+        Timeouts, unrelated protocols, and messages from another sender keep the
+        customer in ``CUSTOMER_IN_STATION``.
+
+        Station ACCEPT confirms queue/service admission only.
+
+        Station REFUSE records a ``pick`` failure with
+        ``no_bikes_available``.
+
+        A valid INFORM must contain ``transport_id``. The concrete vehicle is then
+        assigned through ``assign_service()``, stored as the active
+        StationSharing transport, and asked to start the station-to-station trip.
+
+        Successful trip setup clears station candidates and enters
+        ``CUSTOMER_IN_TRANSPORT``.
+
+        Assignment or trip-start setup failures are deferred to terminal canonical
+        processing.
+        """
         station_id = self.agent.get_origin_station_id()
         if station_id is None:
             self._set_generic_trip_failure("origin_station_missing")
@@ -1046,13 +1491,60 @@ class StationSharingCustomerInStationState(
 class StationSharingCustomerInTransportState(
     StationSharingCustomerStrategyBehaviour
 ):
+    """
+    Track the assigned StationSharing vehicle until successful destination
+    station registration or transport failure.
 
+    Only messages from the concrete assigned vehicle and matching canonical
+    service context are accepted.
+
+    ``CUSTOMER_IN_TRANSPORT`` mirrors the transport-owned
+    ``service_started`` milestone locally.
+
+    REFUSE_PERFORMATIVE records either a destination-station ``drop`` failure
+    or a generic transport failure.
+
+    ``CUSTOMER_IN_DEST`` means that the vehicle has successfully reached and
+    registered in the destination station. It does not yet complete the
+    customer's door-to-door service.
+
+    After vehicle success, the customer clears the active vehicle and starts
+    the final pedestrian leg from the destination station to its final
+    destination.
+
+    Zero-distance vehicle services are supported by mirroring service start
+    when ``CUSTOMER_IN_DEST`` arrives without a previous
+    ``CUSTOMER_IN_TRANSPORT`` notification.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_IN_TRANSPORT
         logger.debug("{} in station-sharing transport".format(self.agent.jid))
 
     async def run(self):
+        """
+        Process active messages from the assigned StationSharing transport.
+
+        Missing assigned transport is terminal.
+
+        Timeouts, unrelated protocols, wrong senders, malformed or stale service
+        messages keep the customer in ``CUSTOMER_IN_TRANSPORT``.
+
+        A transport REFUSE records either a destination-station ``drop`` failure
+        or a generic transport failure and advances to terminal processing.
+
+        INFORM with ``CUSTOMER_IN_TRANSPORT`` mirrors ``service_started``.
+
+        INFORM with ``CUSTOMER_IN_DEST`` first guarantees that local service-start
+        state exists, supporting zero-distance vehicle trips.
+
+        Successful vehicle completion does not emit ``service_completed``.
+        Instead, the assigned vehicle is cleared and pedestrian movement to the
+        customer's final destination begins.
+
+        That final walk is registered as ``phase="service"`` with
+        ``movement_mode="walking"``.
+        """
         transport_id = self.agent.get_station_sharing_transport_id()
         if transport_id is None:
             self._set_generic_trip_failure("transport_missing")
@@ -1185,13 +1677,43 @@ class StationSharingCustomerInTransportState(
 class StationSharingCustomerMovingToDestinationState(
     StationSharingCustomerStrategyBehaviour
 ):
+    """
+    Monitor the final pedestrian segment from the destination station to the
+    customer's door-to-door destination.
 
+    The movement belongs to the active StationSharing service and is recorded
+    as ``phase="service"`` with ``movement_mode="walking"``.
+
+    While walking remains incomplete, execution stays in
+    ``CUSTOMER_MOVING_TO_DEST``.
+
+    Confirmed arrival emits the pending walking ``movement_completed`` event
+    and advances to terminal ``CUSTOMER_IN_DEST``.
+
+    Arrival without a corresponding pending movement records
+    ``final_walk_movement_missing`` failure before entering terminal
+    processing.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_MOVING_TO_DEST
         logger.debug("{} walking to final destination".format(self.agent.jid))
 
     async def run(self):
+        """
+        Monitor the final walking leg until the customer's destination is reached.
+
+        Incomplete movement remains in ``CUSTOMER_MOVING_TO_DEST`` after a
+        one-second asynchronous wait.
+
+        Arrival attempts to emit the pending canonical movement.
+
+        Missing movement correlation records ``final_walk_movement_missing``.
+
+        Successful or failed final walking always proceeds to
+        ``CUSTOMER_IN_DEST``, where the complete door-to-door service receives its
+        canonical terminal event.
+        """
         if not self.agent.is_in_destination():
             self.set_next_state(CUSTOMER_MOVING_TO_DEST)
             await self.agent.sleep(1)
@@ -1205,7 +1727,31 @@ class StationSharingCustomerMovingToDestinationState(
 class StationSharingCustomerInDestState(
     StationSharingCustomerStrategyBehaviour
 ):
+    """
+    Terminal door-to-door state of the StationSharing customer FSM.
 
+    All residual transport and station-candidate state is cleared on entry.
+
+    This state owns the final canonical outcome of the complete service.
+
+    When ``trip_failed`` is set:
+
+    - station-specific ``pick`` or ``drop`` failures emit
+      ``service_failed`` with
+      ``failure_reason="station_operation_failed"``,
+      ``failure_operation``, and ``station_id``;
+    - generic trip failures emit ``service_failed`` with their stored reason.
+
+    When no failure exists, ``service_completed`` is emitted only after
+    approach walking, vehicle use, destination-station registration, and any
+    required final pedestrian movement have all completed.
+
+    The canonical service context is cleared after terminal processing.
+
+    Failed legacy customers stop their agent in ``run()``. Successful terminal
+    execution returns normally so the FSM can finish and notify multimodal
+    orchestration.
+    """
     async def on_start(self):
         await super().on_start()
         self.agent.status = CUSTOMER_IN_DEST
@@ -1257,6 +1803,15 @@ class StationSharingCustomerInDestState(
             self.clear_service_context()
 
     async def run(self):
+        """
+        Finish the terminal StationSharing state.
+
+        Failed trips stop the customer agent after the canonical failure was
+        emitted during ``on_start()``.
+
+        Successful trips return normally, allowing the FSM to terminate and its
+        ``on_end()`` hook to notify modal orchestration.
+        """
         if self.agent.trip_failed:
             await self.agent.stop()
         return
@@ -1265,16 +1820,61 @@ class StationSharingCustomerInDestState(
 class FSMStationSharingCustomerStrategyBehaviour(
     FSMSimfleetBehaviour
 ):
+    """
+    Finite-state customer strategy for station-based shared mobility.
 
+    The FSM coordinates six phases:
+
+    ``CUSTOMER_WAITING``
+        Create the service, discover station candidates, select an origin and
+        destination station, and begin walking to the origin station.
+
+    ``CUSTOMER_MOVING_TO_TRANSPORT``
+        Monitor the pedestrian approach to the origin station.
+
+    ``CUSTOMER_IN_STATION``
+        Request and obtain a concrete shared vehicle from the origin station.
+
+    ``CUSTOMER_IN_TRANSPORT``
+        Track the assigned vehicle until successful destination-station
+        registration or transport failure.
+
+    ``CUSTOMER_MOVING_TO_DEST``
+        Monitor the final pedestrian leg from the destination station to the
+        customer's final destination.
+
+    ``CUSTOMER_IN_DEST``
+        Emit the canonical door-to-door completion or failure.
+
+    The customer owns public ``service_requested``, ``service_assigned``,
+    ``service_completed``, ``service_failed``, and both pedestrian movement
+    segments.
+
+    The StationSharing transport owns public ``service_started`` and the
+    station-to-station vehicle movement.
+
+    Successful FSM termination invokes ``notify_modal_completion()`` so
+    MultiModalCustomerAgent can advance to its next itinerary leg. Legacy
+    customers retain the default no-op completion hook.
+
+    Generic FSM lifecycle instrumentation is inherited from
+    FSMSimfleetBehaviour.
+    """
     async def on_end(self):
         """
-        Finalize the StationSharing strategy and notify customer orchestration.
+        Finalize the StationSharing customer FSM and notify modal orchestration.
+
+        Generic FSM end instrumentation executes first. The customer's modal
+        completion hook is then called so a multimodal itinerary may observe
+        termination of this StationSharing leg.
         """
         await super().on_end()
         self.agent.notify_modal_completion()
 
     def setup(self):
-
+        """
+        Register StationSharing customer states and permitted transitions.
+        """
         self.add_state(
             CUSTOMER_WAITING,
             StationSharingCustomerWaitingState(),

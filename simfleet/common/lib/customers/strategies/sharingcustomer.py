@@ -35,7 +35,29 @@ from simfleet.utils.helpers import (
 # ==================================================================
 
 class SharingCustomerStrategyBehaviour(State):
+    """
+    Base SPADE State shared by the free-floating Sharing customer FSM.
 
+    The customer owns the public lifecycle of a Sharing mobility request:
+
+    - creation of the logical ``service_id`` and ``service_requested``;
+    - validation of the selected vehicle and ``service_assigned``;
+    - walking approach movement toward the reserved vehicle;
+    - terminal ``service_completed`` or ``service_failed``.
+
+    The Sharing transport owns the public ``service_started`` milestone and
+    vehicle-service movement. The customer mirrors that start locally when it
+    receives the corresponding transport status.
+
+    Candidate discovery is performed through Sharing FleetManagers. A customer
+    may receive several vehicle candidates, filter them by walking
+    reachability, select the nearest remaining candidate, and retry another
+    candidate after a booking refusal without creating a second service ID.
+
+    This class provides service-correlation, movement-metric, candidate
+    booking, and transport-messaging helpers. It is an FSM State helper; the
+    complete customer FSM is defined by FSMSharingCustomerStrategyBehaviour.
+    """
 
     METRICS_MODALITY = "sharing"
     _METRICS_SERVICE_CONTEXT_ATTR = "_metrics_service_context"
@@ -43,6 +65,16 @@ class SharingCustomerStrategyBehaviour(State):
     _METRICS_MOVEMENT_PHASES = {"approach", "service", "auxiliary"}
 
     def _metrics_modality(self):
+        """
+        Return the canonical free-floating Sharing modality.
+
+        Returns:
+            str: ``"sharing"``.
+
+        Raises:
+            ValueError: If a concrete strategy does not define
+                ``METRICS_MODALITY``.
+        """
         modality = self.METRICS_MODALITY
         if modality is None:
             raise ValueError(
@@ -51,6 +83,12 @@ class SharingCustomerStrategyBehaviour(State):
         return modality
 
     def get_service_context(self):
+        """
+        Return the active canonical Sharing service context.
+
+        Returns:
+            dict | None: Current schema-1.0 service context.
+        """
         return getattr(
             self.agent,
             self._METRICS_SERVICE_CONTEXT_ATTR,
@@ -66,6 +104,26 @@ class SharingCustomerStrategyBehaviour(State):
         destination=None,
         emit_requested=False,
     ):
+        """
+        Create and store one canonical Sharing service context.
+
+        The Sharing customer normally creates the ``service_id`` when candidate
+        discovery begins and emits ``service_requested`` at that point.
+
+        The same context survives candidate refusals so retries do not create
+        additional logical services.
+
+        Args:
+            service_id: Optional existing logical service identifier.
+            user_id: Sharing customer JID.
+            transport_id: Optional selected Sharing transport JID.
+            origin: Customer trip origin.
+            destination: Final customer destination.
+            emit_requested (bool): Whether to emit ``service_requested``.
+
+        Returns:
+            dict | None: Created or reusable service context.
+        """
         current = self.get_service_context()
         if current is not None:
             requested_id = str(service_id) if service_id is not None else None
@@ -141,6 +199,18 @@ class SharingCustomerStrategyBehaviour(State):
         return context
 
     def get_or_create_service_context(self, **kwargs):
+        """
+        Return the matching active Sharing service context or create one.
+
+        Candidate retries reuse the existing context and therefore preserve the
+        original ``service_id``.
+
+        Args:
+            **kwargs: Arguments forwarded to ``create_service_context()``.
+
+        Returns:
+            dict | None: Matching or newly created service context.
+        """
         context = self.get_service_context()
         service_id = kwargs.get("service_id")
         if context is not None:
@@ -160,6 +230,15 @@ class SharingCustomerStrategyBehaviour(State):
         return self.create_service_context(**kwargs)
 
     def clear_service_context(self):
+        """
+        Clear a terminal Sharing service context when no movement remains.
+
+        Unfinished services and contexts still owning pending movement are
+        deliberately retained.
+
+        Returns:
+            bool: True when no service context remains.
+        """
         context = self.get_service_context()
         if context is None:
             return True
@@ -188,6 +267,12 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def _service_event_details(self, context=None):
+        """
+        Build canonical identifiers shared by Sharing service events.
+
+        Returns:
+            dict | None: Modality, service, user, and transport identifiers.
+        """
         context = context or self.get_service_context()
         if context is None:
             return None
@@ -204,6 +289,20 @@ class SharingCustomerStrategyBehaviour(State):
         context=None,
         transport_id=None,
     ):
+        """
+        Add canonical Sharing service identifiers to a copied payload.
+
+        Args:
+            content (dict | None): Existing payload.
+            context (dict | None): Service context.
+            transport_id: Optional Sharing transport identifier.
+
+        Returns:
+            dict: Payload extended with canonical identifiers.
+
+        Raises:
+            ValueError: If no service context is available.
+        """
         context = context or self.get_service_context()
         if context is None:
             raise ValueError("Cannot propagate identifiers without a service context.")
@@ -214,6 +313,15 @@ class SharingCustomerStrategyBehaviour(State):
         return result
 
     def message_matches_service(self, content, context=None):
+        """
+        Validate that a message belongs to the expected Sharing service.
+
+        Service ID, modality, user identifier, and any already assigned transport
+        identifier must match the local context.
+
+        Returns:
+            bool: True when the message belongs to the active service.
+        """
         context = context or self.get_service_context()
         if context is None or not isinstance(content, dict):
             return False
@@ -239,6 +347,12 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def mark_service_assigned(self, transport_id):
+        """
+        Mirror Sharing assignment state without emitting ``service_assigned``.
+
+        Returns:
+            bool: True when the local assignment is valid.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -252,6 +366,15 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def mark_service_started(self, transport_id=None):
+        """
+        Mirror Sharing service start emitted by the reserved transport.
+
+        The customer uses this when receiving transport status indicating that
+        vehicle use has started. No duplicate ``service_started`` event is emitted.
+
+        Returns:
+            bool: True when the local context can be marked started.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -270,6 +393,15 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def assign_service(self, transport_id, extra_details=None):
+        """
+        Bind the accepted Sharing vehicle and emit ``service_assigned`` once.
+
+        The customer owns this public assignment milestone because it is emitted
+        only after validating the selected vehicle's ACCEPT response.
+
+        Returns:
+            bool: True when assignment was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -290,6 +422,17 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def start_service(self, transport_id=None, extra_details=None):
+        """
+        Mark Sharing service use as started and emit ``service_started``.
+
+        The helper remains part of the generic metrics contract, although the
+        current Sharing customer FSM does not normally own this public milestone;
+        the Sharing transport emits it and the customer mirrors it through
+        ``mark_service_started()``.
+
+        Returns:
+            bool: True when the start event was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -310,6 +453,17 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def complete_service(self, extra_details=None):
+        """
+        Mark the Sharing service completed and emit ``service_completed``.
+
+        Completion requires the local context to have been marked started.
+
+        In the current Sharing lifecycle, the customer owns this terminal public
+        event after receiving ``CUSTOMER_IN_DEST`` from the reserved transport.
+
+        Returns:
+            bool: True when completion was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -332,6 +486,15 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def fail_service(self, failure_reason=None, extra_details=None):
+        """
+        Mark the Sharing service failed and emit ``service_failed``.
+
+        Candidate exhaustion, walking-route failure, transport cancellation, and
+        other terminal customer-side errors use this public failure contract.
+
+        Returns:
+            bool: True when failure was newly emitted.
+        """
         context = self.get_service_context()
         if context is None or context.get("terminal_status") is not None:
             return False
@@ -356,6 +519,25 @@ class SharingCustomerStrategyBehaviour(State):
         extra_details=None,
         require_service=True,
     ):
+        """
+        Register one planned Sharing-customer movement for deferred emission.
+
+        The current customer FSM uses this principally for the walking approach
+        from the customer's position to the reserved free-floating vehicle.
+
+        That movement is recorded as ``phase="approach"`` with
+        ``movement_mode="walking"``.
+
+        ``movement_completed`` is emitted only after physical arrival is
+        confirmed.
+
+        Returns:
+            bool: True when the movement was registered.
+
+        Raises:
+            ValueError: If phase or distance violates the canonical movement
+                contract.
+        """
         if phase not in self._METRICS_MOVEMENT_PHASES:
             raise ValueError("Invalid metrics movement phase: {}".format(phase))
         if (
@@ -402,6 +584,12 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def complete_pending_movement(self):
+        """
+        Emit the pending Sharing-customer movement as ``movement_completed``.
+
+        Returns:
+            bool: True when one pending movement existed and was emitted.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -425,6 +613,12 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def discard_pending_movement(self):
+        """
+        Discard an incomplete Sharing-customer movement without emitting a metric.
+
+        Returns:
+            bool: True when one pending movement existed.
+        """
         pending = getattr(
             self.agent,
             self._METRICS_PENDING_MOVEMENT_ATTR,
@@ -443,7 +637,18 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def reset_service_assignment(self):
-        """Reset a refused pre-start candidate without creating a new service."""
+        """
+        Remove a refused pre-start Sharing transport from the service context.
+
+        The logical service itself remains open so another candidate may be tried
+        with the same ``service_id``.
+
+        The reset is allowed only before service start and before any terminal
+        state.
+
+        Returns:
+            bool: True when assignment state was reset.
+        """
         context = self.get_service_context()
         if (
             context is None
@@ -456,7 +661,15 @@ class SharingCustomerStrategyBehaviour(State):
         return True
 
     def _request_identity_matches(self, content):
-        """Match a booking response to the open sharing request."""
+        """
+        Validate a booking response against the open Sharing request.
+
+        Service ID, modality, user ID, and transport ID must be present. Service,
+        modality, and user identity must match the current customer context.
+
+        Returns:
+            bool: True when the response is compatible with the open request.
+        """
         context = self.get_service_context()
         if context is None or not isinstance(content, dict):
             return False
@@ -470,11 +683,29 @@ class SharingCustomerStrategyBehaviour(State):
         )
 
     def _message_sender_matches_transport(self, content, sender):
+        """
+        Verify that the payload transport identifier matches the XMPP sender.
+
+        Returns:
+            bool: True when both identify the same bare JID.
+        """
         if not isinstance(content, dict) or content.get("transport_id") is None:
             return False
         return self.agent.bare_jid(content.get("transport_id")) == self.agent.bare_jid(sender)
 
     def _service_message_content(self, content=None, transport_id=None):
+        """
+        Build a Sharing message payload carrying canonical service identifiers.
+
+        An explicit transport identifier may be inserted for candidate-specific
+        booking messages without changing the logical service identifier.
+
+        Returns:
+            dict: Payload extended with service correlation fields.
+
+        Raises:
+            ValueError: If no open service context exists.
+        """
         context = self.get_service_context()
         if context is None:
             raise ValueError("Cannot build a sharing service message without an open context.")
@@ -486,7 +717,17 @@ class SharingCustomerStrategyBehaviour(State):
         return result
 
     async def _fail_and_stop(self, failure_reason):
-        """Emit the one public sharing failure and terminate this customer."""
+        """
+        Emit the terminal Sharing failure, clear transient customer state, and
+        stop the customer agent.
+
+        Any pending movement is discarded before ``service_failed`` is emitted.
+        The service context, pending booking, selected Sharing vehicle, and
+        candidate cache are then cleared.
+
+        Args:
+            failure_reason (str): Canonical failure reason.
+        """
         self.discard_pending_movement()
         self.fail_service(failure_reason)
         self.clear_service_context()
@@ -502,6 +743,18 @@ class SharingCustomerStrategyBehaviour(State):
         logger.debug("Strategy {} started in customer {}".format(type(self).__name__, self.agent.name))
 
     async def go_to_transport(self):
+        """
+        Start pedestrian movement toward the currently reserved Sharing vehicle.
+
+        The target vehicle and its last known position come from the customer's
+        active Sharing transport context.
+
+        Returns:
+            tuple: Result returned by the customer's ``move_to()`` operation.
+
+        Raises:
+            RuntimeError: If no current Sharing transport or position is known.
+        """
         transport_id = (
             self.agent.get_sharing_transport_id()
         )
@@ -533,6 +786,18 @@ class SharingCustomerStrategyBehaviour(State):
         self,
         fleetmanager_id
     ):
+        """
+        Request available free-floating Sharing vehicles from one FleetManager.
+
+        The request carries the open service identifiers, customer ID, current
+        origin, and optionally ``max_walking_distance``.
+
+        Args:
+            fleetmanager_id: FleetManager JID receiving the candidate query.
+
+        Raises:
+            ValueError: If no Sharing service context is open.
+        """
         context = self.get_service_context()
         if context is None:
             raise ValueError("Cannot request sharing candidates without an open service context.")
@@ -577,6 +842,14 @@ class SharingCustomerStrategyBehaviour(State):
         await self.send(msg)
 
     def select_transport(self):
+        """
+        Select the nearest candidate remaining after customer-side filtering.
+
+        Candidates are ordered by their precomputed ``distance`` field.
+
+        Returns:
+            dict | None: Selected Sharing transport candidate.
+        """
         candidates = (
             self.agent.get_transport_candidates()
         )
@@ -593,6 +866,18 @@ class SharingCustomerStrategyBehaviour(State):
         self,
         transport
     ):
+        """
+        Request booking of one selected free-floating Sharing vehicle.
+
+        The current protocol represents the customer booking request as
+        REQUEST_PROTOCOL / PROPOSE_PERFORMATIVE.
+
+        The payload carries the shared service identifiers together with customer
+        origin and final destination.
+
+        Args:
+            transport (dict): Selected candidate containing at least its JID.
+        """
         transport_id = transport.get("jid")
 
         if transport_id is None:
@@ -653,6 +938,15 @@ class SharingCustomerStrategyBehaviour(State):
         self,
         transport_id
     ):
+        """
+        Cancel the current Sharing booking attempt.
+
+        REQUEST_PROTOCOL / CANCEL_PERFORMATIVE propagates the same service
+        identifiers and any recorded failure reason to the selected vehicle.
+
+        Args:
+            transport_id: Sharing transport JID.
+        """
         if transport_id is None:
             return
 
@@ -693,6 +987,18 @@ class SharingCustomerStrategyBehaviour(State):
         await self.send(msg)
 
     async def inform_transport_arrival(self):
+        """
+        Inform the reserved Sharing vehicle that the customer reached it.
+
+        The message uses REQUEST_PROTOCOL / INFORM_PERFORMATIVE and carries
+        ``status=CUSTOMER_IN_TRANSPORT``.
+
+        This notification ends the pedestrian approach from the customer's
+        perspective and allows the Sharing transport to emit the public
+        ``service_started`` milestone.
+
+        The method itself does not emit ``service_started``.
+        """
         transport_id = (
             self.agent.get_sharing_transport_id()
         )
@@ -740,6 +1046,13 @@ class SharingCustomerStrategyBehaviour(State):
         await self.send(msg)
 
     async def run(self):
+        """
+        Execute the concrete Sharing customer FSM state.
+
+        Raises:
+            NotImplementedError: When a concrete state does not implement
+                execution.
+        """
         raise NotImplementedError
 
 # ==================================================================
@@ -755,12 +1068,25 @@ class SharingCustomerStrategyBehaviour(State):
 ################################################################
 class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
     """
-    Search for an available free-floating sharing vehicle.
+    Discover and select a usable free-floating Sharing transport.
 
-    A logical service starts when the first candidate query is sent.  Temporary
-    absence of a FleetManager is treated as discovery/bootstrap latency and
-    does not create demand yet.  Once candidate search starts, exhausting the
-    candidate set is a terminal public service failure.
+    FleetManager discovery is treated as operational bootstrap. No canonical
+    user service is created while no Sharing FleetManager is available.
+
+    Once at least one FleetManager can receive a candidate query, the customer
+    creates or reuses its canonical service context and emits
+    ``service_requested`` exactly once.
+
+    Candidate responses from multiple FleetManagers are correlated through the
+    same ``service_id`` and merged by transport JID. Candidates are then
+    filtered by pedestrian reachability and the nearest remaining vehicle is
+    selected for booking.
+
+    Candidate exhaustion after the service has started is terminal and emits
+    ``service_failed`` through the common failure path.
+
+    A selected vehicle is stored as the pending transport and execution
+    advances to ``CUSTOMER_WAITING_FOR_APPROVAL``.
     """
 
     async def on_start(self):
@@ -773,6 +1099,26 @@ class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
         )
 
     async def run(self):
+        """
+        Discover FleetManagers, gather Sharing candidates, and select one vehicle.
+
+        Absence of FleetManagers does not create a canonical service. The customer
+        retries discovery after an operational delay.
+
+        Once candidate querying can begin, ``service_requested`` is emitted through
+        the persistent service context. Responses are accepted only when their
+        protocol, performative, request type, and service identifiers match the
+        open Sharing request.
+
+        Candidate vehicles are deduplicated by JID, filtered by
+        ``can_walk()``, and the nearest remaining candidate is selected.
+
+        When no usable candidate remains, the service fails terminally and the
+        customer agent stops.
+
+        A selected candidate receives the booking request and the FSM advances to
+        ``CUSTOMER_WAITING_FOR_APPROVAL``.
+        """
         # Fleet discovery is operational.  Do not create a user service until
         # there is a FleetManager to which a candidate request can be sent.
         if not self.agent.get_fleetmanagers():
@@ -912,7 +1258,31 @@ class SharingCustomerWaitingState(SharingCustomerStrategyBehaviour):
 class SharingCustomerWaitingForApprovalState(
     SharingCustomerStrategyBehaviour
 ):
-    """Wait for the selected free-floating vehicle booking response."""
+    """
+    Resolve the selected Sharing vehicle's booking response.
+
+    Only responses from the currently pending transport are considered.
+    Protocol, performative, canonical service identifiers, payload transport
+    ID, and XMPP sender must all match the open request.
+
+    A matching REFUSE_PERFORMATIVE removes only that candidate. When other
+    candidates remain, the customer returns to ``CUSTOMER_WAITING`` and retries
+    another vehicle while preserving the same logical ``service_id``.
+
+    A matching ACCEPT_PERFORMATIVE emits the unique public
+    ``service_assigned`` milestone, stores the accepted Sharing vehicle, and
+    begins pedestrian movement toward its reported position.
+
+    Successful walking setup advances to
+    ``CUSTOMER_MOVING_TO_TRANSPORT``.
+
+    If the customer is already at the vehicle, an explicit zero-distance
+    walking approach is emitted, the transport is immediately informed of
+    customer arrival, and execution advances directly to
+    ``CUSTOMER_IN_TRANSPORT``.
+
+    Walking-route and unexpected setup failures terminate the Sharing service.
+    """
 
     async def on_start(self):
         await super().on_start()
@@ -924,6 +1294,28 @@ class SharingCustomerWaitingForApprovalState(
         )
 
     async def run(self):
+        """
+        Process acceptance or refusal of the current Sharing booking attempt.
+
+        Timeouts, unrelated protocols, responses from another transport, malformed
+        JSON, unsupported performatives, and stale service identifiers leave the
+        current booking unresolved.
+
+        A valid refusal removes the pending vehicle. If other candidates remain,
+        the FSM returns to ``CUSTOMER_WAITING`` without clearing the service
+        context, allowing the next candidate to be tried with the same
+        ``service_id``.
+
+        A valid acceptance emits ``service_assigned`` exactly once and stores the
+        selected transport. Pedestrian movement to that vehicle is registered as
+        canonical ``phase="approach"`` with ``movement_mode="walking"``.
+
+        AlreadyInDestination emits an explicit zero-distance approach and enters
+        ``CUSTOMER_IN_TRANSPORT`` directly after notifying the vehicle.
+
+        Route or unexpected approach errors emit ``service_failed``, cancel the
+        accepted booking, clear transient Sharing state, and stop the customer.
+        """
         pending_transport = self.agent.get_pending_transport()
         if pending_transport is None:
             logger.warning(
@@ -1079,7 +1471,22 @@ class SharingCustomerWaitingForApprovalState(
 class SharingCustomerMovingToTransportState(
     SharingCustomerStrategyBehaviour
 ):
-    """Customer walking toward the already reserved sharing vehicle."""
+    """
+    Monitor the customer's pedestrian approach to the reserved Sharing vehicle.
+
+    Physical walking is performed by the customer's movement infrastructure.
+    This state remains active until the reserved vehicle position is reached.
+
+    Confirmed arrival emits the pending ``phase="approach"``
+    ``movement_completed`` event, including
+    ``movement_mode="walking"``, and informs the reserved transport with
+    ``CUSTOMER_IN_TRANSPORT``.
+
+    Execution then advances to ``CUSTOMER_IN_TRANSPORT``.
+
+    Missing reserved-transport state or inconsistent canonical movement is
+    treated as terminal service failure.
+    """
 
     async def on_start(self):
         await super().on_start()
@@ -1091,6 +1498,22 @@ class SharingCustomerMovingToTransportState(
         )
 
     async def run(self):
+        """
+        Monitor pedestrian movement until the customer reaches the booked vehicle.
+
+        Missing Sharing transport assignment terminates the service.
+
+        While walking remains incomplete, execution stays in
+        ``CUSTOMER_MOVING_TO_TRANSPORT`` after a one-second asynchronous wait.
+
+        Physical arrival requires an existing pending approach movement.
+        Successful completion emits ``movement_completed``, informs the vehicle of
+        customer arrival, and enters ``CUSTOMER_IN_TRANSPORT``.
+
+        Arrival without canonical pending movement fails the service with
+        ``approach_movement_missing``, cancels the booking, clears Sharing state,
+        and stops the customer.
+        """
         transport_id = self.agent.get_sharing_transport_id()
         if transport_id is None:
             await self._fail_and_stop("missing_assigned_transport")
@@ -1129,7 +1552,26 @@ class SharingCustomerMovingToTransportState(
 class SharingCustomerInTransportState(
     SharingCustomerStrategyBehaviour
 ):
-    """Customer using the reserved free-floating sharing vehicle."""
+    """
+    Track the customer's active use of the reserved Sharing vehicle.
+
+    The state accepts service messages only from the assigned transport and
+    only when their canonical identifiers match the active Sharing service.
+
+    ``CUSTOMER_IN_TRANSPORT`` mirrors the public ``service_started`` milestone
+    already owned by the transport without emitting a duplicate event.
+
+    ``CUSTOMER_IN_DEST`` closes the customer-owned service lifecycle. The
+    customer first ensures that local start state is established and then
+    emits the public ``service_completed`` event.
+
+    Explicit start mirroring before completion also supports zero-distance
+    vehicle services where the transport may notify destination directly
+    without a preceding ``CUSTOMER_IN_TRANSPORT`` message.
+
+    Transport cancellation emits the public ``service_failed`` terminal and
+    stops the customer.
+    """
 
     async def on_start(self):
         await super().on_start()
@@ -1141,6 +1583,26 @@ class SharingCustomerInTransportState(
         )
 
     async def run(self):
+        """
+        Process active service messages from the reserved Sharing transport.
+
+        Timeouts, unrelated protocols, wrong senders, malformed payloads, stale
+        service identifiers, and unsupported performatives keep the customer in
+        ``CUSTOMER_IN_TRANSPORT``.
+
+        A matching CANCEL_PERFORMATIVE emits ``service_failed`` using the
+        transport-provided failure reason when available and terminates the
+        customer.
+
+        INFORM with ``CUSTOMER_IN_TRANSPORT`` mirrors ``service_started`` locally.
+
+        INFORM with ``CUSTOMER_IN_DEST`` first guarantees local start state,
+        allowing zero-distance services to preserve lifecycle ordering, and then
+        emits customer-owned ``service_completed``.
+
+        Successful terminal processing clears the Sharing transport and service
+        context and advances to ``CUSTOMER_IN_DEST``.
+        """
         transport_id = self.agent.get_sharing_transport_id()
         if transport_id is None:
             await self._fail_and_stop("missing_assigned_transport")
@@ -1229,7 +1691,18 @@ class SharingCustomerInTransportState(
 class SharingCustomerInDestState(
     SharingCustomerStrategyBehaviour
 ):
-    """Terminal success state for a free-floating sharing customer."""
+    """
+    Terminal successful state of the free-floating Sharing customer FSM.
+
+    The canonical ``service_completed`` event has already been emitted before
+    this state is entered.
+
+    Entering the state defensively clears pending booking, active Sharing
+    transport, and candidate-selection state.
+
+    The state has no outgoing FSM transitions. Returning from ``run()`` allows
+    the complete Sharing strategy to terminate normally.
+    """
 
     async def on_start(self):
         await super().on_start()
@@ -1244,6 +1717,9 @@ class SharingCustomerInDestState(
         )
 
     async def run(self):
+        """
+        Log successful Sharing destination completion and terminate this FSM path.
+        """
         logger.info(
             "Customer {} has reached their destination.".format(
                 self.agent.name
@@ -1256,19 +1732,58 @@ class FSMSharingCustomerStrategyBehaviour(
     FSMSimfleetBehaviour
 ):
     """
-    Finite State Machine behaviour for a free-floating
-    sharing customer.
+    Finite-state customer strategy for free-floating Sharing mobility.
+
+    The FSM coordinates five phases:
+
+    ``CUSTOMER_WAITING``
+        Discover FleetManagers and usable Sharing vehicles.
+
+    ``CUSTOMER_WAITING_FOR_APPROVAL``
+        Resolve booking of the selected candidate. Refusal may retry another
+        candidate with the same ``service_id``.
+
+    ``CUSTOMER_MOVING_TO_TRANSPORT``
+        Monitor the pedestrian approach to the reserved vehicle and emit its
+        canonical walking movement.
+
+    ``CUSTOMER_IN_TRANSPORT``
+        Mirror transport-owned service start and process service completion or
+        failure.
+
+    ``CUSTOMER_IN_DEST``
+        Terminal successful Sharing state.
+
+    The customer owns ``service_requested``, ``service_assigned``,
+    ``service_completed``, ``service_failed``, and walking-approach movement.
+    The Sharing transport owns public ``service_started`` and vehicle-service
+    movement.
+
+    Normal FSM termination invokes ``notify_modal_completion()`` so a
+    MultiModalCustomerAgent may continue to its next itinerary leg. For
+    ordinary legacy customers that hook remains a no-op.
+
+    Generic FSM lifecycle instrumentation is inherited from
+    FSMSimfleetBehaviour.
     """
 
     async def on_end(self):
         """
-        Finalize the Sharing strategy and notify customer orchestration.
+        Finalize the Sharing customer FSM and notify modal orchestration.
+
+        ``FSMSimfleetBehaviour.on_end()`` emits the generic strategy lifecycle end
+        event. The customer hook is then invoked so multimodal orchestration may
+        observe successful modal completion.
+
+        Legacy non-multimodal customers retain the default no-op hook.
         """
         await super().on_end()
         self.agent.notify_modal_completion()
 
     def setup(self):
-
+        """
+        Register Sharing customer states and permitted transitions.
+        """
         # States
         self.add_state(
             CUSTOMER_WAITING,
